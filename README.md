@@ -265,5 +265,3 @@ The included examples are intended to compile for `esp32dev` with Arduino ESP32.
 ## License
 
 Fresh is intended to be released as open source under the MIT license.
-
-Add a root-level `LICENSE` file containing the MIT license text before publishing the repository.
