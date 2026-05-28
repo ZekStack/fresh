@@ -102,11 +102,8 @@ void setup() {
 		    return doc["active"] == true;
 	    })
 	);
-
-	db.forceSyncAsync();
 }
 
 void loop() {
 	delay(1000);
 }
-

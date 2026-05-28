@@ -165,12 +165,7 @@ void otherDBMethodsTesting(){
 		Serial.println("Failed to rename Sensor model");
 	}
 	
-	// This forces the sync task to do a flush to the file system
-	db.forceSyncAsync();
-	
-	// This forces a sync in the caller's context. Must not be used from a psram stack backed task
-	// because it touches flash
-	db.forceSync();
+	// Normal persistence is handled by the background sync task.
 }
 
 // Testing alternative models
