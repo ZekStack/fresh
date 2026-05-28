@@ -1,4 +1,5 @@
 #include "Fresh.h"
+#include "internal/FreshInternal.h"
 
 #include <cctype>
 #include <cstring>
