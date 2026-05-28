@@ -40,7 +40,6 @@ void setup() {
 	);
 
 	printResult("drop all", db.dropAllModels());
-	printResult("sync model changes", db.forceSync());
 }
 
 void loop() {

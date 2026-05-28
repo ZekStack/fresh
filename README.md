@@ -39,7 +39,9 @@ Flash persistence happens later in the sync task. If power is lost before the di
 
 Periodic sync is dirty-only: if nothing changed, the sync task should not write, rename, truncate, or update metadata on flash.
 
-`forceSync()` is the blocking exception. It runs sync work in the caller context and touches flash intentionally. Use `forceSyncAsync()` when you want the sync task to do the work instead.
+### Advanced Manual Sync
+
+Normal applications should rely on the configured background sync task. Fresh also exposes `forceSyncAsync()` and `forceSync()` for specialized durability checkpoints, but treat them as advanced controls: `forceSync()` blocks and touches flash in the caller context.
 
 ## Installation
 
@@ -111,8 +113,6 @@ void setup() {
 	JsonDocument patch;
 	patch["age"] = 20;
 	users.updateById(user["_id"].as<const char *>(), patch);
-
-	db.forceSyncAsync();
 }
 
 void loop() {
@@ -140,8 +140,6 @@ Common methods:
 - `dropModels({...})`
 - `dropAllModels()`
 - `renameModel(oldName, newName)`
-- `forceSyncAsync()`
-- `forceSync()`
 - `storageInfo()`
 - `startBackup()`
 - `readBackup(buffer, length, timeoutMS)`
@@ -231,10 +229,10 @@ The current backup format is a streamable MessagePack archive. Heavy compression
 
 ## Examples
 
-- [Basic](examples/Basic/Basic.ino): minimal init, create, find, update, stream append, and async sync.
+- [Basic](examples/Basic/Basic.ino): minimal init, create, find, update, stream append, and background persistence.
 - [Crud](examples/Crud/Crud.ino): create, find, update, and delete operations.
 - [ValidatorsAndCallbacks](examples/ValidatorsAndCallbacks/ValidatorsAndCallbacks.ino): validators, event/sync callbacks, custom time, and `std::bind`.
-- [SyncAndStorage](examples/SyncAndStorage/SyncAndStorage.ino): RAM-first writes, `forceSyncAsync`, `forceSync`, `storageInfo`, and `db.model`.
+- [SyncAndStorage](examples/SyncAndStorage/SyncAndStorage.ino): RAM-first writes, background sync timing, `storageInfo`, and `db.model`.
 - [StreamModel](examples/StreamModel/StreamModel.ino): stream model append, `retrieve`, and `streamTo`.
 - [BackupStream](examples/BackupStream/BackupStream.ino): backup callbacks, `startBackup`, `readBackup`, `backupStatus`, and `backupImport`.
 - [ModelManagement](examples/ModelManagement/ModelManagement.ino): create, rename, drop, drop selected, and drop all models.
