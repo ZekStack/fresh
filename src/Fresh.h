@@ -140,6 +140,9 @@ struct FreshStreamRetrieveOptions {
 class Fresh;
 class FreshModel;
 class FreshBackupPrint;
+struct FreshBackupState;
+struct FreshMutex;
+struct FreshPendingRecord;
 
 using FreshPredicate = std::function<bool(const JsonDocument &)>;
 using FreshBoolValidator = std::function<bool(const JsonDocument &)>;
@@ -199,8 +202,6 @@ class FreshModel {
 	Fresh *_owner = nullptr;
 	std::shared_ptr<State> _state;
 };
-
-#include "internal/FreshInternal.h"
 
 class Fresh {
   public:
@@ -291,7 +292,7 @@ class Fresh {
 	bool _manifestDirty = false;
 	TaskHandle_t _syncTaskHandle = nullptr;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> _models;
-	FreshMutex _mutex;
+	std::unique_ptr<FreshMutex> _mutex;
 
 	FreshSyncCallback _onSync;
 	FreshEventCallback _onEvent;
@@ -300,5 +301,5 @@ class Fresh {
 	FreshBackupCallback _onBackupProgress;
 	FreshBackupCallback _onBackupEnd;
 	FreshBackupCallback _onBackupError;
-	mutable FreshBackupState _backup;
+	mutable std::unique_ptr<FreshBackupState> _backup;
 };

@@ -1,4 +1,5 @@
 #include "Fresh.h"
+#include "internal/FreshInternal.h"
 
 #include <LittleFS.h>
 #include <algorithm>
@@ -22,7 +23,7 @@ FreshResult FreshResult::failure(FreshStatus status, const char *message, size_t
 	return result;
 }
 
-Fresh::Fresh() {
+Fresh::Fresh() : _mutex(std::make_unique<FreshMutex>()), _backup(std::make_unique<FreshBackupState>()) {
 }
 
 Fresh::~Fresh() {
@@ -37,7 +38,7 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "db path is required");
 	}
 
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	if (_initialized) {
 		return FreshResult::failure(FreshStatus::AlreadyInitialized, "database already initialized");
 	}
@@ -64,7 +65,7 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 		return manifestResult;
 	}
 
-	_backup.buffer.resize(std::max<size_t>(config.backupBufferSize, 512));
+	_backup->buffer.resize(std::max<size_t>(config.backupBufferSize, 512));
 	_initialized = true;
 
 	BaseType_t taskResult = pdFAIL;
@@ -116,7 +117,7 @@ void Fresh::syncLoop() {
 uint64_t Fresh::now() {
 	FreshTimeCallback callback;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		callback = _onTimeGet;
 	}
 	if (callback) {
@@ -132,7 +133,7 @@ uint64_t Fresh::now() {
 void Fresh::emitEvent(FreshEvent event) {
 	FreshEventCallback callback;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		callback = _onEvent;
 	}
 	if (callback) {
@@ -143,7 +144,7 @@ void Fresh::emitEvent(FreshEvent event) {
 void Fresh::emitSync(FreshResult result) {
 	FreshSyncCallback callback;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		callback = _onSync;
 	}
 	if (callback) {
@@ -160,37 +161,37 @@ FreshStorageInfo Fresh::storageInfo() const {
 }
 
 void Fresh::onSync(FreshSyncCallback callback) {
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	_onSync = callback;
 }
 
 void Fresh::onEvent(FreshEventCallback callback) {
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	_onEvent = callback;
 }
 
 void Fresh::onTimeGet(FreshTimeCallback callback) {
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	_onTimeGet = callback;
 }
 
 void Fresh::onBackupStart(FreshBackupCallback callback) {
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	_onBackupStart = callback;
 }
 
 void Fresh::onBackupProgress(FreshBackupCallback callback) {
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	_onBackupProgress = callback;
 }
 
 void Fresh::onBackupEnd(FreshBackupCallback callback) {
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	_onBackupEnd = callback;
 }
 
 void Fresh::onBackupError(FreshBackupCallback callback) {
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	_onBackupError = callback;
 }
 
@@ -283,4 +284,3 @@ const char *Fresh::statusToString(FreshStatus status) const {
 	}
 	return "unknown";
 }
-

@@ -1,4 +1,5 @@
 #include "Fresh.h"
+#include "internal/FreshInternal.h"
 
 FreshModel::FreshModel(Fresh *owner, std::shared_ptr<State> state) : _owner(owner), _state(state) {
 }
@@ -20,7 +21,7 @@ FreshResult FreshModel::setValidator(FreshBoolValidator validator) {
 	if (!_owner || !_state) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
-	FreshLock lock(_owner->_mutex);
+	FreshLock lock(*_owner->_mutex);
 	_state->validator = [validator](const JsonDocument &doc) {
 		if (!validator || validator(doc)) {
 			return FreshValidationResult{.result = true, .message = "ok"};
@@ -34,7 +35,7 @@ FreshResult FreshModel::setValidator(FreshResultValidator validator) {
 	if (!_owner || !_state) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
-	FreshLock lock(_owner->_mutex);
+	FreshLock lock(*_owner->_mutex);
 	_state->validator = validator;
 	return FreshResult::success("validator set");
 }
@@ -50,7 +51,7 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 	FreshEvent event;
 	FreshResult result;
 	{
-		FreshLock lock(_owner->_mutex);
+		FreshLock lock(*_owner->_mutex);
 		if (!lock) {
 			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 		}
@@ -110,7 +111,7 @@ FreshResult FreshModel::append(JsonDocument &doc) {
 	FreshEvent event;
 	FreshResult result;
 	{
-		FreshLock lock(_owner->_mutex);
+		FreshLock lock(*_owner->_mutex);
 		JsonDocument stored;
 		FreshCopyJson(stored, doc);
 		_state->streamEntries.push_back(stored);
@@ -144,7 +145,7 @@ FreshResult FreshModel::findById(const std::string &id) const {
 	if (!_owner || !_state || _state->dropped) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
-	FreshLock lock(_owner->_mutex);
+	FreshLock lock(*_owner->_mutex);
 	auto found = _state->docs.find(id);
 	if (found == _state->docs.end()) {
 		return FreshResult::failure(FreshStatus::ModelNotFound, "document not found");
@@ -165,7 +166,7 @@ FreshResult FreshModel::find(FreshPredicate predicate, bool stopAtFirst) const {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "predicate is required");
 	}
 
-	FreshLock lock(_owner->_mutex);
+	FreshLock lock(*_owner->_mutex);
 	FreshResult result = FreshResult::success("documents found");
 	JsonArray array = result.doc.to<JsonArray>();
 	for (const auto &entry : _state->docs) {
@@ -231,7 +232,7 @@ FreshResult FreshModel::update(FreshPredicate predicate, const JsonDocument &pat
 	std::vector<FreshEvent> events;
 	FreshResult result = FreshResult::success("documents updated");
 	{
-		FreshLock lock(_owner->_mutex);
+		FreshLock lock(*_owner->_mutex);
 		for (auto &entry : _state->docs) {
 			if (!predicate(entry.second)) {
 				continue;
@@ -324,7 +325,7 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 	std::vector<FreshEvent> events;
 	FreshResult result = FreshResult::success("documents deleted");
 	{
-		FreshLock lock(_owner->_mutex);
+		FreshLock lock(*_owner->_mutex);
 		for (auto it = _state->docs.begin(); it != _state->docs.end();) {
 			if (!predicate(it->second)) {
 				++it;
@@ -379,7 +380,7 @@ FreshResult FreshModel::retrieve(
 		);
 	}
 
-	FreshLock lock(_owner->_mutex);
+	FreshLock lock(*_owner->_mutex);
 	FreshResult result = FreshResult::success("stream entries found");
 	JsonArray array = result.doc.to<JsonArray>();
 	size_t skipped = 0;
@@ -414,7 +415,7 @@ FreshResult FreshModel::streamTo(Print &out) const {
 	if (_state->type != FreshModelType::Stream) {
 		return FreshResult::failure(FreshStatus::UnsupportedOperation, "streamTo is only valid for stream models");
 	}
-	FreshLock lock(_owner->_mutex);
+	FreshLock lock(*_owner->_mutex);
 	size_t count = 0;
 	for (const JsonDocument &entry : _state->streamEntries) {
 		count += serializeMsgPack(entry, out);
@@ -431,7 +432,7 @@ FreshModel Fresh::model(const char *modelName) {
 		return FreshModel();
 	}
 
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	auto found = _models.find(modelName);
 	if (!_initialized || found == _models.end() || found->second->dropped) {
 		return FreshModel();
@@ -447,7 +448,7 @@ FreshModel Fresh::createModel(const char *modelName, FreshModelType type) {
 	FreshEvent event;
 	std::shared_ptr<FreshModel::State> state;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		if (!_initialized) {
 			return FreshModel();
 		}
@@ -482,7 +483,7 @@ FreshResult Fresh::dropModel(const char *modelName) {
 	FreshEvent event;
 	FreshResult result;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		auto found = _models.find(modelName);
 		if (found == _models.end()) {
 			return FreshResult::failure(FreshStatus::ModelNotFound, "model not found");
@@ -516,7 +517,7 @@ FreshResult Fresh::dropModels(std::initializer_list<const char *> modelNames) {
 FreshResult Fresh::dropAllModels() {
 	std::vector<std::string> names;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		for (const auto &entry : _models) {
 			names.push_back(entry.first);
 		}
@@ -539,7 +540,7 @@ FreshResult Fresh::renameModel(const char *oldName, const char *newName) {
 	FreshEvent event;
 	FreshResult result;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		auto found = _models.find(oldName);
 		if (found == _models.end()) {
 			return FreshResult::failure(FreshStatus::ModelNotFound, "model not found");

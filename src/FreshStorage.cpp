@@ -1,4 +1,5 @@
 #include "Fresh.h"
+#include "internal/FreshInternal.h"
 
 #include <LittleFS.h>
 
@@ -396,7 +397,7 @@ FreshResult Fresh::syncDirty(bool force) {
 	std::vector<std::shared_ptr<FreshModel::State>> snapshot;
 	bool shouldWriteManifest = false;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		if (!lock || !_initialized) {
 			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 		}
@@ -416,7 +417,7 @@ FreshResult Fresh::syncDirty(bool force) {
 
 	FreshResult last = FreshResult::success("nothing dirty");
 	if (shouldWriteManifest) {
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		last = writeManifest();
 		if (!last) {
 			emitSync(last);
@@ -425,7 +426,7 @@ FreshResult Fresh::syncDirty(bool force) {
 	}
 
 	for (const auto &state : snapshot) {
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		last = syncModel(state);
 		if (!last) {
 			emitSync(last);
@@ -442,7 +443,7 @@ FreshResult Fresh::syncDirty(bool force) {
 }
 
 FreshResult Fresh::forceSyncAsync() {
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	if (!_initialized) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 	}
