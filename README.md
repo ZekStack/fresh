@@ -2,7 +2,12 @@
 
 Fresh is a RAM-first document database for ESP32 with async LittleFS persistence.
 
-It is built for Arduino ESP32 projects that need small document collections, simple query/update helpers, stream-style logs, and background persistence without touching flash from normal public write calls.
+It is built for Arduino ESP32 projects that need document collections, simple query/update helpers, stream-style logs, and background persistence without touching flash from normal public write calls.
+
+## CI / Release / License
+[![CI](https://github.com/ZekStack/fresh/actions/workflows/ci.yml/badge.svg)](https://github.com/ZekStack/fresh/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ZekStack/fresh?sort=semver)](https://github.com/ZekStack/fresh/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
 
 ## Status
 
@@ -263,5 +268,8 @@ The included examples are intended to compile for `esp32dev` with Arduino ESP32.
 - Runtime behavior should be validated on your target ESP32 board and flash partition layout.
 
 ## License
+MIT — see [LICENSE.md](LICENSE.md).
 
-Fresh is intended to be released as open source under the MIT license.
+## ZekStack
+- Website: <https://zekstack.hu/>
+- GitHub: <https://github.com/ZekStack>
