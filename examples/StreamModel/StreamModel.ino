@@ -57,8 +57,6 @@ void setup() {
 	Serial.println("streamTo Serial:");
 	printResult("streamTo", logs.streamTo(Serial));
 	Serial.println();
-
-	printResult("forceSyncAsync", db.forceSyncAsync());
 }
 
 void loop() {

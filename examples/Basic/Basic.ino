@@ -59,8 +59,6 @@ void setup() {
 	JsonDocument logEntry;
 	logEntry["message"] = "booted";
 	logs.append(logEntry);
-
-	db.forceSyncAsync();
 }
 
 void loop() {

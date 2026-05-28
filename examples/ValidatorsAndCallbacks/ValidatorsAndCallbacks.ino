@@ -72,8 +72,6 @@ void setup() {
 	validSensor["type"] = "temperature";
 	validSensor["pin"] = 34;
 	printResult("result validator create", sensors.create(validSensor));
-
-	db.forceSyncAsync();
 }
 
 void loop() {

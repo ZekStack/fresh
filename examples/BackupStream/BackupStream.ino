@@ -58,7 +58,6 @@ void setup() {
 		users.create(user);
 	}
 
-	db.forceSync();
 	FreshResult backupResult = db.startBackup();
 	backupRequested = static_cast<bool>(backupResult);
 	Serial.println(backupResult.message.c_str());

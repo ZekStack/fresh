@@ -220,6 +220,7 @@ class Fresh {
 	FreshResult dropAllModels();
 	FreshResult renameModel(const char *oldName, const char *newName);
 
+	// Advanced manual sync controls. The blocking variant touches flash synchronously.
 	FreshResult forceSyncAsync();
 	FreshResult forceSync();
 
