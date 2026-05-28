@@ -1,4 +1,5 @@
 #include "Fresh.h"
+#include "internal/FreshInternal.h"
 
 #include <cstring>
 
@@ -32,26 +33,26 @@ bool Fresh::backupWriteByte(uint8_t byte) {
 		bool shouldEmitProgress = false;
 		FreshBackupInfo info;
 		{
-			FreshLock lock(_backup.mutex);
-			if (_backup.cancelled) {
+			FreshLock lock(_backup->mutex);
+			if (_backup->cancelled) {
 				return false;
 			}
-			if (_backup.buffer.empty()) {
+			if (_backup->buffer.empty()) {
 				return false;
 			}
-			if (_backup.used < _backup.buffer.size()) {
-				_backup.buffer[_backup.tail] = byte;
-				_backup.tail = (_backup.tail + 1) % _backup.buffer.size();
-				_backup.used++;
-				_backup.progress++;
+			if (_backup->used < _backup->buffer.size()) {
+				_backup->buffer[_backup->tail] = byte;
+				_backup->tail = (_backup->tail + 1) % _backup->buffer.size();
+				_backup->used++;
+				_backup->progress++;
 				shouldEmitProgress =
-				    _backup.total > 0 && (_backup.progress == _backup.total ||
-				                          _backup.progress - _backup.lastProgressEvent >= 512);
+				    _backup->total > 0 && (_backup->progress == _backup->total ||
+				                          _backup->progress - _backup->lastProgressEvent >= 512);
 				if (shouldEmitProgress) {
-					_backup.lastProgressEvent = _backup.progress;
-					info.progress = _backup.progress;
-					info.total = _backup.total;
-					info.size = _backup.progress;
+					_backup->lastProgressEvent = _backup->progress;
+					info.progress = _backup->progress;
+					info.total = _backup->total;
+					info.size = _backup->progress;
 				}
 				wrote = true;
 			}
@@ -68,21 +69,21 @@ bool Fresh::backupWriteByte(uint8_t byte) {
 
 void Fresh::runBackupIfRequested() {
 	{
-		FreshLock lock(_backup.mutex);
-		if (!_backup.requested || _backup.running) {
+		FreshLock lock(_backup->mutex);
+		if (!_backup->requested || _backup->running) {
 			return;
 		}
-		_backup.requested = false;
-		_backup.running = true;
-		_backup.done = false;
-		_backup.cancelled = false;
-		_backup.head = 0;
-		_backup.tail = 0;
-		_backup.used = 0;
-		_backup.progress = 0;
-		_backup.total = 0;
-		_backup.lastProgressEvent = 0;
-		_backup.result = FreshResult::success("backup running");
+		_backup->requested = false;
+		_backup->running = true;
+		_backup->done = false;
+		_backup->cancelled = false;
+		_backup->head = 0;
+		_backup->tail = 0;
+		_backup->used = 0;
+		_backup->progress = 0;
+		_backup->total = 0;
+		_backup->lastProgressEvent = 0;
+		_backup->result = FreshResult::success("backup running");
 	}
 
 	FreshBackupInfo startInfo;
@@ -95,7 +96,7 @@ void Fresh::runBackupIfRequested() {
 	const uint64_t generatedAt = now();
 	JsonDocument archive;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		archive["version"] = 1;
 		archive["generatedAt"] = generatedAt;
 		JsonArray modelsArray = archive["models"].to<JsonArray>();
@@ -124,8 +125,8 @@ void Fresh::runBackupIfRequested() {
 	FreshBackupPrint print(*this);
 	size_t total = measureMsgPack(archive);
 	{
-		FreshLock lock(_backup.mutex);
-		_backup.total = total;
+		FreshLock lock(_backup->mutex);
+		_backup->total = total;
 	}
 	size_t written = serializeMsgPack(archive, print);
 	FreshResult result =
@@ -138,10 +139,10 @@ void Fresh::runBackupIfRequested() {
 	          );
 
 	{
-		FreshLock lock(_backup.mutex);
-		_backup.running = false;
-		_backup.done = true;
-		_backup.result = result;
+		FreshLock lock(_backup->mutex);
+		_backup->running = false;
+		_backup->done = true;
+		_backup->result = result;
 	}
 
 	FreshBackupInfo endInfo;
@@ -163,12 +164,12 @@ void Fresh::runBackupIfRequested() {
 }
 
 bool Fresh::isBackupCancelled() {
-	FreshLock lock(_backup.mutex);
-	return _backup.cancelled;
+	FreshLock lock(_backup->mutex);
+	return _backup->cancelled;
 }
 
 size_t Fresh::estimateBackupSize() {
-	FreshLock lock(_mutex);
+	FreshLock lock(*_mutex);
 	size_t total = 64;
 	for (const auto &entry : _models) {
 		const auto &state = entry.second;
@@ -189,7 +190,7 @@ size_t Fresh::estimateBackupSize() {
 void Fresh::callBackupStart(FreshBackupInfo info) {
 	FreshBackupCallback callback;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		callback = _onBackupStart;
 	}
 	if (callback) {
@@ -200,7 +201,7 @@ void Fresh::callBackupStart(FreshBackupInfo info) {
 void Fresh::callBackupProgress(FreshBackupInfo info) {
 	FreshBackupCallback callback;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		callback = _onBackupProgress;
 	}
 	if (callback) {
@@ -211,7 +212,7 @@ void Fresh::callBackupProgress(FreshBackupInfo info) {
 void Fresh::callBackupEnd(FreshBackupInfo info) {
 	FreshBackupCallback callback;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		callback = _onBackupEnd;
 	}
 	if (callback) {
@@ -222,7 +223,7 @@ void Fresh::callBackupEnd(FreshBackupInfo info) {
 void Fresh::callBackupError(FreshBackupInfo info) {
 	FreshBackupCallback callback;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		callback = _onBackupError;
 	}
 	if (callback) {
@@ -231,19 +232,19 @@ void Fresh::callBackupError(FreshBackupInfo info) {
 }
 
 FreshResult Fresh::startBackup() {
-	FreshLock dbLock(_mutex);
+	FreshLock dbLock(*_mutex);
 	if (!_initialized) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 	}
 	{
-		FreshLock backupLock(_backup.mutex);
-		if (_backup.running || _backup.requested) {
+		FreshLock backupLock(_backup->mutex);
+		if (_backup->running || _backup->requested) {
 			return FreshResult::failure(FreshStatus::Busy, "backup already running");
 		}
-		_backup.requested = true;
-		_backup.done = false;
-		_backup.cancelled = false;
-		_backup.result = FreshResult::success("backup queued");
+		_backup->requested = true;
+		_backup->done = false;
+		_backup->cancelled = false;
+		_backup->result = FreshResult::success("backup queued");
 	}
 	if (_syncTaskHandle != nullptr) {
 		xTaskNotifyGive(_syncTaskHandle);
@@ -260,13 +261,13 @@ size_t Fresh::readBackup(uint8_t *buffer, size_t length, uint32_t timeoutMS) {
 	size_t read = 0;
 	while (read < length) {
 		{
-			FreshLock lock(_backup.mutex);
-			while (_backup.used > 0 && read < length) {
-				buffer[read++] = _backup.buffer[_backup.head];
-				_backup.head = (_backup.head + 1) % _backup.buffer.size();
-				_backup.used--;
+			FreshLock lock(_backup->mutex);
+			while (_backup->used > 0 && read < length) {
+				buffer[read++] = _backup->buffer[_backup->head];
+				_backup->head = (_backup->head + 1) % _backup->buffer.size();
+				_backup->used--;
 			}
-			if (read > 0 || _backup.done || (!_backup.running && !_backup.requested)) {
+			if (read > 0 || _backup->done || (!_backup->running && !_backup->requested)) {
 				return read;
 			}
 		}
@@ -279,26 +280,26 @@ size_t Fresh::readBackup(uint8_t *buffer, size_t length, uint32_t timeoutMS) {
 }
 
 FreshResult Fresh::backupStatus() const {
-	FreshLock lock(_backup.mutex);
-	return _backup.result;
+	FreshLock lock(_backup->mutex);
+	return _backup->result;
 }
 
 FreshResult Fresh::cancelBackup() {
-	FreshLock lock(_backup.mutex);
-	if (!_backup.running && !_backup.requested) {
+	FreshLock lock(_backup->mutex);
+	if (!_backup->running && !_backup->requested) {
 		return FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
 	}
-	_backup.cancelled = true;
-	_backup.requested = false;
-	_backup.result = FreshResult::failure(FreshStatus::Cancelled, "backup cancelled");
-	return _backup.result;
+	_backup->cancelled = true;
+	_backup->requested = false;
+	_backup->result = FreshResult::failure(FreshStatus::Cancelled, "backup cancelled");
+	return _backup->result;
 }
 
 FreshResult Fresh::backupImport(Stream &input) {
 	bool backupActive = false;
 	{
-		FreshLock backupLock(_backup.mutex);
-		backupActive = _backup.running || _backup.requested;
+		FreshLock backupLock(_backup->mutex);
+		backupActive = _backup->running || _backup->requested;
 	}
 	if (backupActive) {
 		return FreshResult::failure(FreshStatus::Busy, "backup already running");
@@ -322,8 +323,8 @@ FreshResult Fresh::backupImport(const uint8_t *data, size_t length) {
 
 	bool backupActive = false;
 	{
-		FreshLock backupLock(_backup.mutex);
-		backupActive = _backup.running || _backup.requested;
+		FreshLock backupLock(_backup->mutex);
+		backupActive = _backup->running || _backup->requested;
 	}
 	if (backupActive) {
 		return FreshResult::failure(FreshStatus::Busy, "backup already running");
@@ -405,7 +406,7 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 
 	size_t affectedCount = 0;
 	{
-		FreshLock lock(_mutex);
+		FreshLock lock(*_mutex);
 		for (const auto &entry : importedModels) {
 			const std::string &name = entry.first;
 			const auto &incoming = entry.second;
