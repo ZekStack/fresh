@@ -2,61 +2,36 @@
 
 Fresh is a RAM-first document database for ESP32 with async LittleFS persistence.
 
-It is built for Arduino ESP32 projects that need document collections, simple query/update helpers, stream-style logs, and background persistence without touching flash from normal public write calls.
+Fresh helps you keep small document collections and append-style logs in Arduino ESP32 projects without writing to flash from normal public write calls. It is designed for embedded applications that need predictable RAM-first behavior, background persistence, and simple result-based error handling.
 
-## CI / Release / License
 [![CI](https://github.com/ZekStack/fresh/actions/workflows/ci.yml/badge.svg)](https://github.com/ZekStack/fresh/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ZekStack/fresh?sort=semver)](https://github.com/ZekStack/fresh/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
 
-## Status
+## Why use Fresh?
 
-Fresh is currently early-stage software at `0.0.1`.
+* **RAM-first writes** - public create, update, delete, and append calls accept data into memory before background persistence.
+* **ESP32-friendly storage** - dirty-only LittleFS sync reduces unnecessary flash work.
+* **Document and stream models** - use general JSON document models or append-style stream models.
+* **Clear API** - operations return `FreshResult` instead of throwing exceptions.
+* **Production-minded** - FreeRTOS mutex protection, bindable callbacks, storage reporting, and explicit limitations.
 
-The public API, storage format, and backup format may still change before a stable release. Use it as a practical starting point, test it on your target hardware, and avoid treating the current flash layout as a permanent compatibility contract.
-
-## Features
-
-- General document models backed by ArduinoJson `JsonDocument`.
-- Stream models for append-style records such as logs.
-- RAM-first public writes.
-- Dirty-only background sync to reduce unnecessary flash writes.
-- MessagePack persistence through ArduinoJson v7.
-- Automatic `_id`, `createdAt`, and `updatedAt` fields.
-- Validators for create/update checks.
-- Event, sync, backup, and custom time callbacks.
-- Backup streaming through a small read buffer.
-- Model create, lookup, rename, drop, and drop-all helpers.
-- LittleFS storage usage reporting.
-- FreeRTOS mutex protection for shared state.
-- No exceptions; operations report status through `FreshResult`.
-
-## Durability Model
-
-Fresh accepts normal public writes into RAM first. A successful `create`, `update`, `delete`, or `append` result means the change was validated and accepted in memory.
-
-Flash persistence happens later in the sync task. If power is lost before the dirty state is synced, recent accepted changes can be lost.
-
-Periodic sync is dirty-only: if nothing changed, the sync task should not write, rename, truncate, or update metadata on flash.
-
-### Advanced Manual Sync
-
-Normal applications should rely on the configured background sync task. Fresh also exposes `forceSyncAsync()` and `forceSync()` for specialized durability checkpoints, but treat them as advanced controls: `forceSync()` blocks and touches flash in the caller context.
-
-## Installation
+## Install
 
 ### PlatformIO
 
-Fresh is designed for Arduino ESP32 and depends on ArduinoJson v7.
+Fresh is built for Arduino ESP32 and depends on ArduinoJson v7.
 
 ```ini
 [env:esp32dev]
 platform = espressif32
 board = esp32dev
 framework = arduino
+
 lib_deps =
   https://github.com/ZekStack/fresh.git
   bblanchon/ArduinoJson@>=7.0.0
+
 build_flags =
   -std=gnu++20
 build_unflags =
@@ -65,9 +40,15 @@ build_unflags =
 
 ### Arduino IDE
 
-Fresh is not published to Arduino Library Manager yet. Until it is published, install it from the repository ZIP or clone it into your Arduino libraries folder.
+Fresh is not published to Arduino Library Manager yet.
 
-## Quick Start
+Install it by downloading the repository ZIP or cloning it into your Arduino libraries folder.
+
+```txt
+Arduino/libraries/Fresh
+```
+
+## Quick start
 
 ```cpp
 #include <Arduino.h>
@@ -77,197 +58,176 @@ Fresh db;
 FreshModel users;
 
 void setup() {
-	Serial.begin(115200);
+    Serial.begin(115200);
 
-	FreshConfig config;
-	config.syncIntervalMS = 5000;
+    FreshResult initResult = db.init("/fresh_app");
+    if (!initResult) {
+        Serial.println(initResult.message.c_str());
+        return;
+    }
 
-	FreshResult initResult = db.init("/fresh_app", config);
-	if (!initResult) {
-		Serial.println(initResult.message.c_str());
-		return;
-	}
+    users = db.createModel("User");
+    if (!users) {
+        Serial.println("Failed to open User model");
+        return;
+    }
 
-	users = db.createModel("User");
-	if (!users) {
-		Serial.println("Failed to open User model");
-		return;
-	}
+    JsonDocument user;
+    user["name"] = "Panna";
+    user["age"] = 19;
 
-	JsonDocument user;
-	user["name"] = "Panna";
-	user["age"] = 19;
+    FreshResult createResult = users.create(user);
+    if (!createResult) {
+        Serial.println(createResult.message.c_str());
+        return;
+    }
 
-	FreshResult createResult = users.create(user);
-	if (!createResult) {
-		Serial.println(createResult.message.c_str());
-		return;
-	}
+    FreshResult found = users.findById(user["_id"].as<const char *>());
+    if (found) {
+        serializeJson(found.doc, Serial);
+        Serial.println();
+    }
 
-	FreshResult found = users.findById(user["_id"].as<const char *>());
-	if (found) {
-		serializeJson(found.doc, Serial);
-		Serial.println();
-	}
-
-	JsonDocument patch;
-	patch["age"] = 20;
-	users.updateById(user["_id"].as<const char *>(), patch);
+    JsonDocument patch;
+    patch["age"] = 20;
+    users.updateById(user["_id"].as<const char *>(), patch);
 }
 
 void loop() {
-	delay(1000);
+    delay(1000);
 }
 ```
 
-## API Overview
+## Important notes
 
-### `FreshConfig`
+> [!IMPORTANT]
+> Fresh accepts normal public writes into RAM first. A successful `create`, `update`, `delete`, or `append` result means the change was accepted in memory, not necessarily persisted to flash yet.
 
-Controls sync interval, sync task priority/core/stack size, LittleFS mount behavior, default model type, snapshot thresholds, and backup buffer size.
-
-### `Fresh`
-
-Owns the database instance.
-
-Common methods:
-
-- `init(path, config)`
-- `createModel(name)`
-- `createModel(name, FreshModelType::Stream)`
-- `model(name)`
-- `dropModel(name)`
-- `dropModels({...})`
-- `dropAllModels()`
-- `renameModel(oldName, newName)`
-- `storageInfo()`
-- `startBackup()`
-- `readBackup(buffer, length, timeoutMS)`
-- `backupStatus()`
-- `cancelBackup()`
-- `backupImport(Stream&)`
-- `backupImport(buffer, length)`
-
-### `FreshModel`
-
-Represents a model handle.
-
-Document model methods:
-
-- `create(doc)`
-- `findById(id)`
-- `findOne(field, value)`
-- `find(predicate)`
-- `updateById(id, patch)`
-- `updateOne(predicate, patch)`
-- `update(predicate, patch)`
-- `deleteById(id)`
-- `deleteOne(predicate)`
-- `deleteMany(predicate)`
-
-Stream model methods:
-
-- `append(doc)`
-- `retrieve()`
-- `retrieve(predicate, options)`
-- `streamTo(Print&)`
-
-### `FreshResult`
-
-All operations return result objects instead of throwing exceptions.
-
-Important fields:
-
-- `result`
-- `status`
-- `message`
-- `doc`
-- `affectedCount`
-
-Use it directly in conditions:
-
-```cpp
-FreshResult result = users.findOne("name", "Panna");
-if (!result) {
-	Serial.println(result.message.c_str());
-}
-```
-
-### Callbacks
-
-Fresh callbacks use `std::function`, so lambdas and `std::bind` both work.
-
-- `onEvent`
-- `onSync`
-- `onTimeGet`
-- `onBackupStart`
-- `onBackupProgress`
-- `onBackupEnd`
-- `onBackupError`
-
-### Backup
-
-Backup generation runs through the sync task and can be read in chunks.
-
-```cpp
-db.startBackup();
-
-uint8_t buffer[256];
-size_t read = db.readBackup(buffer, sizeof(buffer), 50);
-```
-
-Backups can be restored from an already-open `Stream` such as a `File`, or from a memory buffer:
-
-```cpp
-File backup = LittleFS.open("/backup.msgpack", "r");
-db.backupImport(backup);
-
-FreshResult imported = db.backupImport(buffer, length);
-```
-
-The current backup format is a streamable MessagePack archive. Heavy compression and web-server-specific helpers are not part of the current core API.
+* Flash persistence happens later in the sync task. Power loss before sync can lose recently accepted changes.
+* `forceSyncAsync()` requests a sync checkpoint through the sync task.
+* `forceSync()` is an advanced blocking call and touches flash in the caller context.
+* The current storage and backup formats use ArduinoJson MessagePack and are not stable compatibility contracts yet.
 
 ## Examples
 
-- [Basic](examples/Basic/Basic.ino): minimal init, create, find, update, stream append, and background persistence.
-- [Crud](examples/Crud/Crud.ino): create, find, update, and delete operations.
-- [ValidatorsAndCallbacks](examples/ValidatorsAndCallbacks/ValidatorsAndCallbacks.ino): validators, event/sync callbacks, custom time, and `std::bind`.
-- [SyncAndStorage](examples/SyncAndStorage/SyncAndStorage.ino): RAM-first writes, background sync timing, `storageInfo`, and `db.model`.
-- [StreamModel](examples/StreamModel/StreamModel.ino): stream model append, `retrieve`, and `streamTo`.
-- [BackupStream](examples/BackupStream/BackupStream.ino): backup callbacks, `startBackup`, `readBackup`, `backupStatus`, and `backupImport`.
-- [ModelManagement](examples/ModelManagement/ModelManagement.ino): create, rename, drop, drop selected, and drop all models.
+The repository includes topic-focused Arduino sketches in the `examples/` folder.
 
-## Storage Layout
+| Example | Description |
+| --- | --- |
+| `Basic` | Minimal init, create, find, and update. |
+| `Crud` | Full create, find, update, and delete operations. |
+| `SyncAndStorage` | RAM-first writes, dirty background sync, `storageInfo`, and model lookup. |
+| `StreamModel` | Stream model append, retrieve, filtered retrieve, reverse/limit options, and `streamTo`. |
+| `ValidatorsAndCallbacks` | Bool/result validators, `std::bind`, event/sync callbacks, and custom time. |
+| `BackupStream` | Backup callbacks, `startBackup`, chunked `readBackup`, status checks, and `backupImport`. |
+| `ModelManagement` | Create, rename, drop, drop selected, and drop all models. |
 
-Fresh stores database metadata under the configured database root in LittleFS.
+Start with:
 
-Each model has its own storage area. Document and stream changes are written as journal records, and snapshots are written when compaction thresholds are reached. On startup, Fresh loads the newest valid snapshot and replays valid journal records.
-
-The sync task only writes dirty state. Clean models are skipped.
-
-## Build And Verification
-
-Compile an example with PlatformIO:
-
-```sh
-pio ci examples/Basic --board esp32dev --lib . --project-option build_unflags=-std=gnu++11 --project-option build_flags=-std=gnu++20
+```txt
+examples/Basic
 ```
 
-The included examples are intended to compile for `esp32dev` with Arduino ESP32.
+## Documentation
 
-## Limitations
+Detailed documentation is available in the `docs/` folder.
 
-- Arduino ESP32 is the only target for now.
-- Full document models are loaded into RAM.
-- Public writes are not flash-durable until sync runs.
-- Backup uses a MessagePack archive, not heavy compression.
-- ESPAsyncWebServer integration is not included yet.
-- ESP-IDF component packaging is not included yet.
-- Runtime behavior should be validated on your target ESP32 board and flash partition layout.
+| Document | Description |
+| --- | --- |
+| [`docs/getting-started.md`](docs/getting-started.md) | Step-by-step setup and first document flow. |
+| [`docs/configuration.md`](docs/configuration.md) | `FreshConfig` options and defaults. |
+| [`docs/api.md`](docs/api.md) | Public classes, result types, callbacks, and backup API. |
+| [`docs/examples.md`](docs/examples.md) | Explanation of all included examples. |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common issues and solutions. |
+
+## API overview
+
+```cpp
+Fresh db;
+FreshResult initResult = db.init("/fresh_app");
+
+FreshModel users = db.createModel("User");
+FreshResult created = users.create(userDoc);
+FreshResult found = users.findById(id);
+FreshResult updated = users.updateById(id, patchDoc);
+FreshResult removed = users.deleteById(id);
+
+FreshModel logs = db.createModel("Log", FreshModelType::Stream);
+FreshResult appended = logs.append(logDoc);
+FreshResult entries = logs.retrieve();
+```
+
+For the full API, see [`docs/api.md`](docs/api.md).
+
+## Compatibility
+
+| Item | Support |
+| --- | --- |
+| Framework | Arduino ESP32 |
+| Platform | `espressif32` |
+| Language | C++20 |
+| Filesystem | LittleFS |
+| Persistence format | ArduinoJson MessagePack |
+| PSRAM | Used when available for internal allocations |
+| Dependencies | `bblanchon/ArduinoJson >= 7.0.0` |
+| Exceptions | Not used |
+| Status | Early-stage `0.0.1` |
+
+## Configuration
+
+```cpp
+FreshConfig config;
+config.syncIntervalMS = 5000;
+config.syncTaskStackSize = 8192;
+config.snapshotRecordThreshold = 128;
+config.backupBufferSize = 8 * 1024;
+
+FreshResult result = db.init("/fresh_app", config);
+```
+
+For all options, see [`docs/configuration.md`](docs/configuration.md).
+
+## Error handling
+
+Fresh reports operation status through `FreshResult`.
+
+```cpp
+FreshResult result = db.init("/fresh_app");
+
+if (!result) {
+    Serial.println(result.message.c_str());
+    return;
+}
+```
+
+For result fields and status codes, see [`docs/api.md`](docs/api.md).
+
+## Project structure
+
+```txt
+fresh/
+├── examples/
+├── docs/
+├── src/
+├── library.json
+├── library.properties
+├── README.md
+├── LICENSE.md
+└── PLAN.md
+```
+
+## Status
+
+Fresh is currently early-stage software at `0.0.1`.
+
+The public API, storage format, and backup format may still change before a stable release. Test it on your target ESP32 board before using it in production.
 
 ## License
-MIT — see [LICENSE.md](LICENSE.md).
+
+MIT - see [`LICENSE.md`](LICENSE.md).
 
 ## ZekStack
-- Website: <https://zekstack.hu/>
-- GitHub: <https://github.com/ZekStack>
+
+Part of the ZekStack ESP32 library stack.
+
+ZekStack libraries are designed to provide small, reusable building blocks for ESP32 applications.
