@@ -1,0 +1,104 @@
+# Troubleshooting
+
+## `init()` fails
+
+Print the returned message and status:
+
+```cpp
+FreshResult result = db.init("/fresh_app");
+if (!result) {
+    Serial.printf("Fresh init failed: %s\n", result.message.c_str());
+}
+```
+
+Common causes:
+
+* LittleFS cannot mount.
+* The database path is invalid.
+* Existing data is corrupt.
+* The sync task cannot be created because of memory pressure.
+
+If LittleFS mount recovery is acceptable for your product, set `eraseOnFileSystemFailure = true`. This can erase stored data, so keep it disabled unless that tradeoff is intentional.
+
+## Data is missing after power loss
+
+Fresh is RAM-first. A successful public write means the change was accepted into memory. It may not have reached LittleFS yet.
+
+Reduce the loss window by lowering `syncIntervalMS`, or request a checkpoint with `forceSyncAsync()` after important operations. Use `forceSync()` only when blocking and touching flash in the caller context is acceptable.
+
+## Flash usage does not change immediately
+
+Background sync is dirty-only and interval-based. `storageInfo()` may look unchanged immediately after `create`, `update`, `delete`, or `append`.
+
+Wait longer than `syncIntervalMS`, then check storage again.
+
+## Model creation returns an empty handle
+
+Check that the database is initialized and the model name is valid.
+
+```cpp
+FreshModel users = db.createModel("User");
+if (!users) {
+    Serial.println("Failed to open User model");
+}
+```
+
+Use `db.model("User")` when you expect the model to already exist.
+
+## Validator failures
+
+Validators run on create and update. If a validator rejects a document, the returned `FreshResult` should have `FreshStatus::ValidationFailed`.
+
+For clearer messages, use a `FreshValidationResult` validator:
+
+```cpp
+model.setValidator([](const JsonDocument &doc) {
+    bool valid = !doc["type"].isNull();
+    return FreshValidationResult{
+        .result = valid,
+        .message = valid ? "ok" : "Document requires type"
+    };
+});
+```
+
+## Backup returns busy or not running
+
+`startBackup()` can fail with `FreshStatus::Busy` if a backup is already running or the sync task is occupied.
+
+`readBackup(...)`, `backupStatus()`, or `cancelBackup()` can report backup-not-running state when no backup is active.
+
+Typical backup loop:
+
+```cpp
+FreshResult started = db.startBackup();
+if (!started) {
+    Serial.println(started.message.c_str());
+    return;
+}
+
+uint8_t buffer[256];
+size_t read = db.readBackup(buffer, sizeof(buffer), 50);
+```
+
+Use `onBackupEnd` and `onBackupError` callbacks to know when a backup has completed or failed.
+
+## Stream reads return no records
+
+Confirm the model was created as a stream model:
+
+```cpp
+FreshModel logs = db.createModel("Log", FreshModelType::Stream);
+```
+
+`append()` is for stream models. Document CRUD methods are for general models.
+
+## Compile errors about language standard
+
+Fresh expects C++20 for the current codebase.
+
+```ini
+build_flags =
+  -std=gnu++20
+build_unflags =
+  -std=gnu++11
+```
