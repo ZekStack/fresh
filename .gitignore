@@ -1,3 +1,7 @@
+.pio/
+.vscode/
 .venv
 build/
 build_prev_runner/
+release-changelog.md
+PLAN.md
