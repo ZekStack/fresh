@@ -104,8 +104,9 @@ void loop() {
 > Fresh accepts normal public writes into RAM first. A successful `create`, `update`, `delete`, or `append` result means the change was accepted in memory, not necessarily persisted to flash yet.
 
 * Flash persistence happens later in the sync task. Power loss before sync can lose recently accepted changes.
-* `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state.
-* `forceSync()` runs the same forced dirty-state checkpoint synchronously and touches flash in the caller context.
+* Sync captures dirty RAM state under a short database lock, then performs LittleFS writes without holding the global database mutex.
+* `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts.
+* `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context.
 * Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
 * The current storage and backup formats use ArduinoJson MessagePack and are not stable compatibility contracts yet.
 

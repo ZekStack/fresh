@@ -81,6 +81,7 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 
 		FreshPendingRecord record;
 		record.op = FreshJournalOp::Create;
+		record.sequence = _owner->_nextPendingSequence++;
 		record.id = id;
 		FreshCopyJson(record.doc, stored);
 		_state->pending.push_back(record);
@@ -118,6 +119,7 @@ FreshResult FreshModel::append(JsonDocument &doc) {
 
 		FreshPendingRecord record;
 		record.op = FreshJournalOp::Append;
+		record.sequence = _owner->_nextPendingSequence++;
 		FreshCopyJson(record.doc, stored);
 		_state->pending.push_back(record);
 		_state->dirty = true;
@@ -255,6 +257,7 @@ FreshResult FreshModel::update(FreshPredicate predicate, const JsonDocument &pat
 			FreshCopyJson(entry.second, candidate);
 			FreshPendingRecord record;
 			record.op = FreshJournalOp::Update;
+			record.sequence = _owner->_nextPendingSequence++;
 			record.id = entry.first;
 			FreshCopyJson(record.doc, candidate);
 			_state->pending.push_back(record);
@@ -336,6 +339,7 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 
 			FreshPendingRecord record;
 			record.op = FreshJournalOp::Delete;
+			record.sequence = _owner->_nextPendingSequence++;
 			record.id = id;
 			_state->pending.push_back(record);
 			_state->dirty = true;
@@ -465,6 +469,7 @@ FreshModel Fresh::createModel(const char *modelName, FreshModelType type) {
 		state->dirty = true;
 		_models[state->name] = state;
 		_manifestDirty = true;
+		_manifestEpoch++;
 		event = {
 		    .type = FreshEventType::ModelCreated,
 		    .modelName = state->name,
@@ -490,7 +495,9 @@ FreshResult Fresh::dropModel(const char *modelName) {
 		}
 		found->second->dropped = true;
 		found->second->dirty = true;
+		found->second->storageEpoch++;
 		_manifestDirty = true;
+		_manifestEpoch++;
 		result = FreshResult::success("model dropped", 1);
 		event = {
 		    .type = FreshEventType::ModelDropped,
@@ -553,8 +560,10 @@ FreshResult Fresh::renameModel(const char *oldName, const char *newName) {
 		state->previousName = oldName;
 		state->name = newName;
 		state->dirty = true;
+		state->storageEpoch++;
 		_models[state->name] = state;
 		_manifestDirty = true;
+		_manifestEpoch++;
 		result = FreshResult::success("model renamed", 1);
 		event = {
 		    .type = FreshEventType::ModelRenamed,

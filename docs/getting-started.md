@@ -103,9 +103,9 @@ Patch documents merge into the existing document and update `updatedAt`.
 
 Fresh is RAM-first. A successful write result means the operation was accepted into memory. It does not mean the change has already been written to flash.
 
-The sync task persists dirty state to LittleFS later. If power is lost before the next sync, recent accepted changes can be lost.
+The sync task persists dirty state to LittleFS later. It captures a batch under a short database lock, then performs LittleFS writes without holding the global database mutex. If power is lost before the next sync, recent accepted changes can be lost.
 
-Use the configured `syncIntervalMS` for normal background persistence. `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state. `forceSync()` runs the same forced dirty-state checkpoint synchronously and touches flash in the caller context, so reserve it for advanced checkpoints.
+Use the configured `syncIntervalMS` for normal background persistence. `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts. `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context, so reserve it for advanced checkpoints. Writes accepted after a forced sync captures its batch remain pending for a later sync.
 
 ## Next steps
 
