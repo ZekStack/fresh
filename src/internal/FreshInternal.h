@@ -25,6 +25,7 @@ enum class FreshJournalOp : uint8_t {
 
 struct FreshPendingRecord {
 	FreshJournalOp op = FreshJournalOp::Create;
+	uint64_t sequence = 0;
 	std::string id;
 	JsonDocument doc;
 };
@@ -43,6 +44,7 @@ struct FreshModel::State {
 	bool snapshotRequired = false;
 	uint32_t recordsSinceSnapshot = 0;
 	size_t bytesSinceSnapshot = 0;
+	uint32_t storageEpoch = 0;
 };
 
 struct FreshBackupState {

@@ -35,7 +35,7 @@ FreshResult result = db.init("/fresh_app", config);
 
 ## Sync interval
 
-`syncIntervalMS` controls how often the background task checks for dirty state. Public writes are accepted into RAM first, and the task writes dirty models to LittleFS later. Normal background sync compacts snapshots only when thresholds are reached or a snapshot is explicitly required.
+`syncIntervalMS` controls how often the background task checks for dirty state. Public writes are accepted into RAM first, and the task writes dirty models to LittleFS later. Sync captures a batch under a short database lock, then performs LittleFS writes without holding the global database mutex. Normal background sync compacts snapshots only when thresholds are reached or a snapshot is explicitly required.
 
 Shorter intervals reduce the window of data loss after power failure but can increase flash activity. Longer intervals reduce background work but leave more accepted RAM state waiting for persistence.
 
@@ -81,7 +81,7 @@ Fresh stores changes as journal records and writes snapshots when compaction thr
 
 Lower thresholds compact more often and may reduce startup replay work. Higher thresholds compact less often and may reduce snapshot writes.
 
-`forceSync()` and `forceSyncAsync()` bypass these thresholds for dirty models involved in that sync, forcing a checkpoint snapshot after pending journal records are written. Clean models are not snapshotted just because a forced sync was requested.
+`forceSync()` and `forceSyncAsync()` bypass these thresholds for dirty models captured by that sync, forcing a checkpoint snapshot after pending journal records are written. Clean models are not snapshotted just because a forced sync was requested.
 
 ## Backup buffer
 

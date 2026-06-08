@@ -261,18 +261,12 @@ class Fresh {
 	std::string modelFile(const std::string &name, const char *fileName) const;
 	FreshResult ensureDir(const std::string &path);
 	FreshResult readManifest();
-	FreshResult writeManifest();
+	FreshResult writeManifest(const JsonDocument &manifest);
 	FreshResult applyRecord(const std::shared_ptr<FreshModel::State> &state, const FreshPendingRecord &record);
 	FreshResult loadSnapshot(const std::shared_ptr<FreshModel::State> &state);
 	FreshResult loadJournal(const std::shared_ptr<FreshModel::State> &state);
 	FreshResult loadModel(const std::shared_ptr<FreshModel::State> &state);
 	JsonDocument recordToJson(const FreshPendingRecord &record);
-	FreshResult appendJournalRecord(
-	    const std::shared_ptr<FreshModel::State> &state,
-	    const FreshPendingRecord &record
-	);
-	FreshResult writeSnapshot(const std::shared_ptr<FreshModel::State> &state);
-	FreshResult syncModel(const std::shared_ptr<FreshModel::State> &state, bool forceSnapshot);
 	FreshResult syncDirty(bool force);
 
 	bool backupWriteByte(uint8_t byte);
@@ -291,9 +285,12 @@ class Fresh {
 	bool _stopTask = false;
 	bool _manifestDirty = false;
 	bool _forceSyncRequested = false;
+	uint32_t _manifestEpoch = 0;
+	uint64_t _nextPendingSequence = 1;
 	TaskHandle_t _syncTaskHandle = nullptr;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> _models;
 	std::unique_ptr<FreshMutex> _mutex;
+	std::unique_ptr<FreshMutex> _syncMutex;
 
 	FreshSyncCallback _onSync;
 	FreshEventCallback _onEvent;

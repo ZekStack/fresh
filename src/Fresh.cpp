@@ -23,7 +23,10 @@ FreshResult FreshResult::failure(FreshStatus status, const char *message, size_t
 	return result;
 }
 
-Fresh::Fresh() : _mutex(std::make_unique<FreshMutex>()), _backup(std::make_unique<FreshBackupState>()) {
+Fresh::Fresh()
+    : _mutex(std::make_unique<FreshMutex>()),
+      _syncMutex(std::make_unique<FreshMutex>()),
+      _backup(std::make_unique<FreshBackupState>()) {
 }
 
 Fresh::~Fresh() {

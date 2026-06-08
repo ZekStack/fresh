@@ -428,6 +428,7 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 				target->bytesSinceSnapshot = 0;
 				target->dirty = true;
 				target->snapshotRequired = true;
+				target->storageEpoch++;
 			}
 			affectedCount++;
 		}
@@ -442,10 +443,12 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 				state->dirty = true;
 				state->snapshotRequired = false;
 				state->pending.clear();
+				state->storageEpoch++;
 				affectedCount++;
 			}
 		}
 		_manifestDirty = true;
+		_manifestEpoch++;
 	}
 
 	if (_syncTaskHandle != nullptr) {

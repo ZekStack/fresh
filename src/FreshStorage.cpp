@@ -2,6 +2,146 @@
 #include "internal/FreshInternal.h"
 
 #include <LittleFS.h>
+#include <utility>
+
+namespace {
+
+struct FreshJournalSyncRecord {
+	uint64_t sequence = 0;
+	FreshJournalOp op = FreshJournalOp::Create;
+	FreshByteVector payload;
+};
+
+struct FreshModelSyncBatch {
+	std::shared_ptr<void> state;
+	std::string name;
+	std::string previousName;
+	std::string path;
+	std::string previousPath;
+	std::string journalPath;
+	std::string snapshotTempPath;
+	std::string snapshotPath;
+	std::string previousJournalPath;
+	std::string previousSnapshotPath;
+	FreshModelType type = FreshModelType::General;
+	bool dropped = false;
+	bool writeSnapshot = false;
+	uint32_t storageEpoch = 0;
+	std::vector<FreshJournalSyncRecord> records;
+	JsonDocument snapshot;
+};
+
+struct FreshModelSyncResult {
+	FreshResult result = FreshResult::success("model synced");
+	size_t recordsWritten = 0;
+	size_t bytesWritten = 0;
+	bool snapshotWritten = false;
+	bool dropped = false;
+	bool renamed = false;
+};
+
+FreshResult FreshWriteJournalRecord(const FreshModelSyncBatch &batch, const FreshJournalSyncRecord &record) {
+	if (!LittleFS.exists(batch.path.c_str()) && !LittleFS.mkdir(batch.path.c_str())) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create directory");
+	}
+
+	File file = LittleFS.open(batch.journalPath.c_str(), "a");
+	if (!file) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open journal");
+	}
+
+	FreshWriteU32(file, FreshJournalMagic);
+	FreshWriteU16(file, FreshJournalVersion);
+	file.write(static_cast<uint8_t>(record.op));
+	file.write(static_cast<uint8_t>(0));
+	FreshWriteU32(file, static_cast<uint32_t>(record.payload.size()));
+	FreshWriteU32(file, FreshChecksum(record.payload.data(), record.payload.size()));
+	size_t written = file.write(record.payload.data(), record.payload.size());
+	file.flush();
+	file.close();
+
+	if (written != record.payload.size()) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write journal");
+	}
+	return FreshResult::success("journal record written");
+}
+
+FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch) {
+	if (!LittleFS.exists(batch.path.c_str()) && !LittleFS.mkdir(batch.path.c_str())) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create directory");
+	}
+
+	File file = LittleFS.open(batch.snapshotTempPath.c_str(), "w");
+	if (!file) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open snapshot");
+	}
+	size_t written = serializeMsgPack(batch.snapshot, file);
+	file.close();
+	if (written == 0) {
+		LittleFS.remove(batch.snapshotTempPath.c_str());
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write snapshot");
+	}
+	LittleFS.remove(batch.snapshotPath.c_str());
+	if (!LittleFS.rename(batch.snapshotTempPath.c_str(), batch.snapshotPath.c_str())) {
+		LittleFS.remove(batch.snapshotTempPath.c_str());
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to replace snapshot");
+	}
+	LittleFS.remove(batch.journalPath.c_str());
+	return FreshResult::success("snapshot written");
+}
+
+FreshModelSyncResult FreshWriteModelBatch(const FreshModelSyncBatch &batch) {
+	FreshModelSyncResult result;
+	result.result = FreshResult::success("model synced");
+
+	if (batch.dropped) {
+		if (!batch.previousName.empty()) {
+			LittleFS.remove(batch.previousJournalPath.c_str());
+			LittleFS.remove(batch.previousSnapshotPath.c_str());
+			LittleFS.rmdir(batch.previousPath.c_str());
+		}
+		LittleFS.remove(batch.journalPath.c_str());
+		LittleFS.remove(batch.snapshotPath.c_str());
+		LittleFS.rmdir(batch.path.c_str());
+		result.dropped = true;
+		result.result = FreshResult::success("model dropped");
+		return result;
+	}
+
+	if (!batch.previousName.empty()) {
+		if (LittleFS.exists(batch.previousPath.c_str()) && !LittleFS.exists(batch.path.c_str())) {
+			if (!LittleFS.rename(batch.previousPath.c_str(), batch.path.c_str())) {
+				result.result = FreshResult::failure(FreshStatus::FileSystemError, "failed to rename model directory");
+				return result;
+			}
+		}
+		result.renamed = true;
+	}
+
+	for (const FreshJournalSyncRecord &record : batch.records) {
+		FreshResult writeResult = FreshWriteJournalRecord(batch, record);
+		if (!writeResult) {
+			result.result = writeResult;
+			return result;
+		}
+		result.recordsWritten++;
+		result.bytesWritten += record.payload.size();
+	}
+
+	if (batch.writeSnapshot) {
+		FreshResult snapshotResult = FreshWriteSnapshotBatch(batch);
+		if (!snapshotResult) {
+			result.result = snapshotResult;
+			return result;
+		}
+		result.snapshotWritten = true;
+		result.result = snapshotResult;
+	}
+
+	return result;
+}
+
+} // namespace
 
 std::string Fresh::modelPath(const std::string &name) const {
 	return FreshJoinPath(_rootPath, name);
@@ -56,23 +196,10 @@ FreshResult Fresh::readManifest() {
 	return FreshResult::success();
 }
 
-FreshResult Fresh::writeManifest() {
+FreshResult Fresh::writeManifest(const JsonDocument &manifest) {
 	FreshResult dirResult = ensureDir(_rootPath);
 	if (!dirResult) {
 		return dirResult;
-	}
-
-	JsonDocument doc;
-	doc["version"] = 1;
-	JsonArray modelsArray = doc["models"].to<JsonArray>();
-	for (const auto &entry : _models) {
-		const auto &state = entry.second;
-		if (state->dropped) {
-			continue;
-		}
-		JsonObject modelObject = modelsArray.add<JsonObject>();
-		modelObject["name"] = state->name;
-		modelObject["type"] = FreshModelTypeToString(state->type);
 	}
 
 	const std::string tempPath = FreshJoinPath(_rootPath, "manifest.tmp");
@@ -81,7 +208,7 @@ FreshResult Fresh::writeManifest() {
 	if (!file) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write manifest");
 	}
-	size_t written = serializeMsgPack(doc, file);
+	size_t written = serializeMsgPack(manifest, file);
 	file.close();
 	if (written == 0) {
 		LittleFS.remove(tempPath.c_str());
@@ -92,7 +219,6 @@ FreshResult Fresh::writeManifest() {
 		LittleFS.remove(tempPath.c_str());
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to replace manifest");
 	}
-	_manifestDirty = false;
 	return FreshResult::success("manifest written");
 }
 
@@ -252,162 +378,102 @@ JsonDocument Fresh::recordToJson(const FreshPendingRecord &record) {
 	return doc;
 }
 
-FreshResult Fresh::appendJournalRecord(
-    const std::shared_ptr<FreshModel::State> &state,
-    const FreshPendingRecord &record
-) {
-	FreshResult dirResult = ensureDir(modelPath(state->name));
-	if (!dirResult) {
-		return dirResult;
-	}
-
-	JsonDocument recordDoc = recordToJson(record);
-	FreshByteVector payload;
-	payload.resize(measureMsgPack(recordDoc));
-	if (payload.empty()) {
-		return FreshResult::failure(FreshStatus::InternalError, "empty journal record");
-	}
-	serializeMsgPack(recordDoc, payload.data(), payload.size());
-
-	const std::string path = modelFile(state->name, FreshJournalFile);
-	File file = LittleFS.open(path.c_str(), "a");
-	if (!file) {
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open journal");
-	}
-
-	FreshWriteU32(file, FreshJournalMagic);
-	FreshWriteU16(file, FreshJournalVersion);
-	file.write(static_cast<uint8_t>(record.op));
-	file.write(static_cast<uint8_t>(0));
-	FreshWriteU32(file, static_cast<uint32_t>(payload.size()));
-	FreshWriteU32(file, FreshChecksum(payload.data(), payload.size()));
-	size_t written = file.write(payload.data(), payload.size());
-	file.flush();
-	file.close();
-
-	if (written != payload.size()) {
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write journal");
-	}
-	state->recordsSinceSnapshot++;
-	state->bytesSinceSnapshot += payload.size();
-	return FreshResult::success("journal record written");
-}
-
-FreshResult Fresh::writeSnapshot(const std::shared_ptr<FreshModel::State> &state) {
-	FreshResult dirResult = ensureDir(modelPath(state->name));
-	if (!dirResult) {
-		return dirResult;
-	}
-
-	JsonDocument snapshot;
-	snapshot["version"] = 1;
-	snapshot["name"] = state->name;
-	snapshot["type"] = FreshModelTypeToString(state->type);
-
-	if (state->type == FreshModelType::Stream) {
-		JsonArray entries = snapshot["entries"].to<JsonArray>();
-		for (const JsonDocument &entry : state->streamEntries) {
-			entries.add(entry.as<JsonVariantConst>());
-		}
-	} else {
-		JsonArray docs = snapshot["docs"].to<JsonArray>();
-		for (const auto &entry : state->docs) {
-			docs.add(entry.second.as<JsonVariantConst>());
-		}
-	}
-
-	const std::string tempPath = modelFile(state->name, "snapshot.tmp");
-	const std::string finalPath = modelFile(state->name, FreshSnapshotFile);
-	File file = LittleFS.open(tempPath.c_str(), "w");
-	if (!file) {
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open snapshot");
-	}
-	size_t written = serializeMsgPack(snapshot, file);
-	file.close();
-	if (written == 0) {
-		LittleFS.remove(tempPath.c_str());
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write snapshot");
-	}
-	LittleFS.remove(finalPath.c_str());
-	if (!LittleFS.rename(tempPath.c_str(), finalPath.c_str())) {
-		LittleFS.remove(tempPath.c_str());
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to replace snapshot");
-	}
-	LittleFS.remove(modelFile(state->name, FreshJournalFile).c_str());
-	state->recordsSinceSnapshot = 0;
-	state->bytesSinceSnapshot = 0;
-	state->snapshotRequired = false;
-	return FreshResult::success("snapshot written");
-}
-
-FreshResult Fresh::syncModel(const std::shared_ptr<FreshModel::State> &state, bool forceSnapshot) {
-	if (!state->dirty && state->pending.empty() && !state->snapshotRequired) {
-		return FreshResult::success("model clean");
-	}
-	if (state->dropped) {
-		const std::string path = modelPath(state->name);
-		if (!state->previousName.empty()) {
-			LittleFS.remove(modelFile(state->previousName, FreshJournalFile).c_str());
-			LittleFS.remove(modelFile(state->previousName, FreshSnapshotFile).c_str());
-			LittleFS.rmdir(modelPath(state->previousName).c_str());
-		}
-		LittleFS.remove(modelFile(state->name, FreshJournalFile).c_str());
-		LittleFS.remove(modelFile(state->name, FreshSnapshotFile).c_str());
-		LittleFS.rmdir(path.c_str());
-		state->dirty = false;
-		state->pending.clear();
-		state->snapshotRequired = false;
-		return FreshResult::success("model dropped");
-	}
-
-	if (!state->previousName.empty()) {
-		const std::string oldPath = modelPath(state->previousName);
-		const std::string newPath = modelPath(state->name);
-		if (LittleFS.exists(oldPath.c_str()) && !LittleFS.exists(newPath.c_str())) {
-			if (!LittleFS.rename(oldPath.c_str(), newPath.c_str())) {
-				return FreshResult::failure(FreshStatus::FileSystemError, "failed to rename model directory");
-			}
-		}
-		state->previousName.clear();
-	}
-
-	while (!state->pending.empty()) {
-		FreshPendingRecord record = state->pending.front();
-		FreshResult result = appendJournalRecord(state, record);
-		if (!result) {
-			return result;
-		}
-		state->pending.pop_front();
-	}
-
-	if (forceSnapshot || state->snapshotRequired || state->recordsSinceSnapshot >= _config.snapshotRecordThreshold ||
-	    state->bytesSinceSnapshot >= _config.snapshotBytesThreshold) {
-		FreshResult snapshotResult = writeSnapshot(state);
-		if (!snapshotResult) {
-			return snapshotResult;
-		}
-	}
-
-	state->dirty = false;
-	return FreshResult::success("model synced");
-}
-
 FreshResult Fresh::syncDirty(bool force) {
-	std::vector<std::shared_ptr<FreshModel::State>> snapshot;
+	FreshLock syncLock(*_syncMutex);
+	if (!syncLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock sync");
+	}
+
+	JsonDocument manifest;
 	bool shouldWriteManifest = false;
+	uint32_t manifestEpoch = 0;
+	std::vector<FreshModelSyncBatch> batches;
 	{
 		FreshLock lock(*_mutex);
 		if (!lock || !_initialized) {
 			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 		}
 		shouldWriteManifest = _manifestDirty;
-		for (const auto &entry : _models) {
-			const auto &state = entry.second;
-			if (state->dirty || !state->pending.empty() || state->snapshotRequired) {
-				snapshot.push_back(state);
+		manifestEpoch = _manifestEpoch;
+		if (shouldWriteManifest) {
+			manifest["version"] = 1;
+			JsonArray modelsArray = manifest["models"].to<JsonArray>();
+			for (const auto &entry : _models) {
+				const auto &state = entry.second;
+				if (state->dropped) {
+					continue;
+				}
+				JsonObject modelObject = modelsArray.add<JsonObject>();
+				modelObject["name"] = state->name;
+				modelObject["type"] = FreshModelTypeToString(state->type);
 			}
 		}
-		if (!shouldWriteManifest && snapshot.empty()) {
+
+		for (const auto &entry : _models) {
+			const auto &state = entry.second;
+			if (!state->dirty && state->pending.empty() && !state->snapshotRequired) {
+				continue;
+			}
+
+			FreshModelSyncBatch batch;
+			batch.state = std::static_pointer_cast<void>(state);
+			batch.name = state->name;
+			batch.previousName = state->previousName;
+			batch.path = modelPath(batch.name);
+			batch.previousPath = batch.previousName.empty() ? std::string() : modelPath(batch.previousName);
+			batch.journalPath = modelFile(batch.name, FreshJournalFile);
+			batch.snapshotTempPath = modelFile(batch.name, "snapshot.tmp");
+			batch.snapshotPath = modelFile(batch.name, FreshSnapshotFile);
+			if (!batch.previousName.empty()) {
+				batch.previousJournalPath = modelFile(batch.previousName, FreshJournalFile);
+				batch.previousSnapshotPath = modelFile(batch.previousName, FreshSnapshotFile);
+			}
+			batch.type = state->type;
+			batch.dropped = state->dropped;
+			batch.storageEpoch = state->storageEpoch;
+
+			size_t pendingBytes = 0;
+			if (!batch.dropped) {
+				for (const FreshPendingRecord &pending : state->pending) {
+					JsonDocument recordDoc = recordToJson(pending);
+					FreshJournalSyncRecord record;
+					record.sequence = pending.sequence;
+					record.op = pending.op;
+					record.payload.resize(measureMsgPack(recordDoc));
+					if (record.payload.empty()) {
+						return FreshResult::failure(FreshStatus::InternalError, "empty journal record");
+					}
+					serializeMsgPack(recordDoc, record.payload.data(), record.payload.size());
+					pendingBytes += record.payload.size();
+					batch.records.push_back(std::move(record));
+				}
+			}
+
+			batch.writeSnapshot = !batch.dropped &&
+			                      (force || state->snapshotRequired ||
+			                       state->recordsSinceSnapshot + batch.records.size() >= _config.snapshotRecordThreshold ||
+			                       state->bytesSinceSnapshot + pendingBytes >= _config.snapshotBytesThreshold);
+			if (batch.writeSnapshot) {
+				batch.snapshot["version"] = 1;
+				batch.snapshot["name"] = batch.name;
+				batch.snapshot["type"] = FreshModelTypeToString(batch.type);
+
+				if (batch.type == FreshModelType::Stream) {
+					JsonArray entries = batch.snapshot["entries"].to<JsonArray>();
+					for (const JsonDocument &streamEntry : state->streamEntries) {
+						entries.add(streamEntry.as<JsonVariantConst>());
+					}
+				} else {
+					JsonArray docs = batch.snapshot["docs"].to<JsonArray>();
+					for (const auto &docEntry : state->docs) {
+						docs.add(docEntry.second.as<JsonVariantConst>());
+					}
+				}
+			}
+
+			batches.push_back(std::move(batch));
+		}
+		if (!shouldWriteManifest && batches.empty()) {
 			return FreshResult::success("nothing dirty");
 		}
 	}
@@ -416,23 +482,70 @@ FreshResult Fresh::syncDirty(bool force) {
 
 	FreshResult last = FreshResult::success("nothing dirty");
 	if (shouldWriteManifest) {
-		FreshLock lock(*_mutex);
-		last = writeManifest();
+		last = writeManifest(manifest);
+		{
+			FreshLock lock(*_mutex);
+			if (last && _manifestEpoch == manifestEpoch) {
+				_manifestDirty = false;
+			}
+		}
 		if (!last) {
 			emitSync(last);
 			return last;
 		}
 	}
 
-	for (const auto &state : snapshot) {
+	for (const FreshModelSyncBatch &batch : batches) {
+		FreshModelSyncResult syncResult = FreshWriteModelBatch(batch);
 		FreshLock lock(*_mutex);
-		last = syncModel(state, force);
+
+		auto state = std::static_pointer_cast<FreshModel::State>(batch.state);
+		size_t recordsPopped = 0;
+		while (recordsPopped < syncResult.recordsWritten && !state->pending.empty() &&
+		       state->pending.front().sequence == batch.records[recordsPopped].sequence) {
+			state->pending.pop_front();
+			recordsPopped++;
+		}
+
+		if (state->storageEpoch == batch.storageEpoch) {
+			if (syncResult.snapshotWritten) {
+				state->recordsSinceSnapshot = 0;
+				state->bytesSinceSnapshot = 0;
+			} else {
+				state->recordsSinceSnapshot += static_cast<uint32_t>(syncResult.recordsWritten);
+				state->bytesSinceSnapshot += syncResult.bytesWritten;
+			}
+		}
+
+		if (syncResult.result && state->storageEpoch == batch.storageEpoch) {
+			if (syncResult.snapshotWritten) {
+				state->snapshotRequired = false;
+			}
+
+			if (syncResult.renamed && state->previousName == batch.previousName) {
+				state->previousName.clear();
+			}
+
+			if (syncResult.dropped) {
+				state->dirty = false;
+				state->pending.clear();
+				state->snapshotRequired = false;
+				auto found = _models.find(batch.name);
+				if (found != _models.end() && found->second == state) {
+					_models.erase(found);
+				}
+			} else {
+				state->dirty = state->dropped || !state->pending.empty() || state->snapshotRequired ||
+				               !state->previousName.empty();
+			}
+		} else {
+			state->dirty = true;
+		}
+
+		last = syncResult.result;
 		if (!last) {
 			emitSync(last);
 			return last;
-		}
-		if (state->dropped) {
-			_models.erase(state->name);
 		}
 	}
 
