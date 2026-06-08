@@ -141,6 +141,16 @@ FreshModelSyncResult FreshWriteModelBatch(const FreshModelSyncBatch &batch) {
 	return result;
 }
 
+FreshResult FreshLoadResult(FreshLoadStatus status, const char *message) {
+	FreshResult result = FreshResult::success(message);
+	result.affectedCount = static_cast<size_t>(status);
+	return result;
+}
+
+FreshLoadStatus FreshLoadStatusFromResult(const FreshResult &result) {
+	return static_cast<FreshLoadStatus>(result.affectedCount);
+}
+
 } // namespace
 
 std::string Fresh::modelPath(const std::string &name) const {
@@ -180,6 +190,7 @@ FreshResult Fresh::readManifest() {
 	}
 
 	JsonArrayConst modelsArray = doc["models"].as<JsonArrayConst>();
+	bool failed = false;
 	for (JsonObjectConst modelObject : modelsArray) {
 		const char *name = modelObject["name"] | "";
 		const char *type = modelObject["type"] | "general";
@@ -190,9 +201,29 @@ FreshResult Fresh::readManifest() {
 		state->name = name;
 		state->type = FreshModelTypeFromString(type);
 		_models[state->name] = state;
-		loadModel(state);
+		FreshResult loadResult = loadModel(state);
+		FreshLoadStatus loadStatus = FreshLoadStatusFromResult(loadResult);
+		FreshModelLoadInfo info;
+		info.modelName = state->name;
+		info.modelType = state->type;
+		info.status = loadStatus;
+		info.degraded = loadStatus != FreshLoadStatus::LoadedOk;
+		info.message = loadResult.message;
+		_diagnostics.modelLoads.push_back(info);
+		if (info.degraded) {
+			_diagnostics.degradedModelCount++;
+		}
+		if (!loadResult || loadStatus == FreshLoadStatus::FailedToLoad) {
+			failed = true;
+		}
 	}
 
+	if (failed) {
+		return FreshResult::failure(FreshStatus::CorruptData, "failed to load one or more models");
+	}
+	if (_diagnostics.degradedModelCount > 0) {
+		return FreshResult::success("manifest loaded with recovered models", _diagnostics.degradedModelCount);
+	}
 	return FreshResult::success();
 }
 
@@ -249,11 +280,12 @@ FreshResult Fresh::applyRecord(
 FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state) {
 	const std::string path = modelFile(state->name, FreshSnapshotFile);
 	if (!LittleFS.exists(path.c_str())) {
-		return FreshResult::success("snapshot not found");
+		return FreshLoadResult(FreshLoadStatus::LoadedOk, "snapshot not found");
 	}
 
 	File file = LittleFS.open(path.c_str(), "r");
 	if (!file) {
+		state->degraded = true;
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open snapshot");
 	}
 
@@ -273,7 +305,7 @@ FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state)
 			copy.set(entry);
 			state->streamEntries.push_back(copy);
 		}
-		return FreshResult::success();
+		return FreshLoadResult(FreshLoadStatus::LoadedOk, "snapshot loaded");
 	}
 
 	for (JsonVariantConst entry : snapshot["docs"].as<JsonArrayConst>()) {
@@ -284,20 +316,22 @@ FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state)
 			state->docs[id] = copy;
 		}
 	}
-	return FreshResult::success();
+	return FreshLoadResult(FreshLoadStatus::LoadedOk, "snapshot loaded");
 }
 
 FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) {
 	const std::string path = modelFile(state->name, FreshJournalFile);
 	if (!LittleFS.exists(path.c_str())) {
-		return FreshResult::success("journal not found");
+		return FreshLoadResult(FreshLoadStatus::LoadedOk, "journal not found");
 	}
 
 	File file = LittleFS.open(path.c_str(), "r");
 	if (!file) {
+		state->degraded = true;
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open journal");
 	}
 
+	bool journalRecovered = false;
 	while (file.available() > 0) {
 		uint32_t magic = 0;
 		uint16_t version = 0;
@@ -307,10 +341,12 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 		uint32_t expectedChecksum = 0;
 		if (!FreshReadU32(file, magic) || !FreshReadU16(file, version)) {
 			state->degraded = true;
+			journalRecovered = true;
 			break;
 		}
 		if (file.available() < 10) {
 			state->degraded = true;
+			journalRecovered = true;
 			break;
 		}
 		opByte = file.read();
@@ -318,24 +354,29 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 		(void)reserved;
 		if (!FreshReadU32(file, payloadSize) || !FreshReadU32(file, expectedChecksum)) {
 			state->degraded = true;
+			journalRecovered = true;
 			break;
 		}
 		if (magic != FreshJournalMagic || version != FreshJournalVersion || payloadSize > 1024 * 1024) {
 			state->degraded = true;
+			journalRecovered = true;
 			break;
 		}
 		if (file.available() < static_cast<int>(payloadSize)) {
 			state->degraded = true;
+			journalRecovered = true;
 			break;
 		}
 
 		FreshByteVector payload(payloadSize);
 		if (file.read(payload.data(), payloadSize) != static_cast<int>(payloadSize)) {
 			state->degraded = true;
+			journalRecovered = true;
 			break;
 		}
 		if (FreshChecksum(payload.data(), payload.size()) != expectedChecksum) {
 			state->degraded = true;
+			journalRecovered = true;
 			break;
 		}
 
@@ -343,6 +384,7 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 		DeserializationError error = deserializeMsgPack(recordDoc, payload.data(), payload.size());
 		if (error) {
 			state->degraded = true;
+			journalRecovered = true;
 			break;
 		}
 
@@ -355,19 +397,49 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 		state->bytesSinceSnapshot += payloadSize;
 	}
 	file.close();
-	return FreshResult::success(state->degraded ? "journal recovered with corruption" : "journal loaded");
+	return FreshLoadResult(
+	    journalRecovered ? FreshLoadStatus::LoadedWithRecoveredJournal : FreshLoadStatus::LoadedOk,
+	    journalRecovered ? "journal recovered with corruption" : "journal loaded"
+	);
 }
 
 FreshResult Fresh::loadModel(const std::shared_ptr<FreshModel::State> &state) {
 	FreshResult snapshotResult = loadSnapshot(state);
+	const bool snapshotFailed = !snapshotResult;
 	FreshResult journalResult = loadJournal(state);
-	if (!snapshotResult && !journalResult) {
-		return snapshotResult;
+	const bool journalFailed = !journalResult;
+	const std::string journalMessage = journalResult.message;
+
+	FreshLoadStatus status = FreshLoadStatus::LoadedOk;
+	const char *message = "model loaded";
+	if (snapshotFailed && journalFailed) {
+		status = FreshLoadStatus::FailedToLoad;
+		message = "failed to load snapshot and journal";
+	} else if (snapshotFailed && journalMessage == "journal not found") {
+		status = FreshLoadStatus::FailedToLoad;
+		message = "failed to load snapshot and journal";
+	} else if (snapshotFailed) {
+		status = FreshLoadStatus::LoadedWithCorruptSnapshot;
+		message = "model loaded with corrupt snapshot";
+	} else if (journalFailed) {
+		status = FreshLoadStatus::LoadedWithCorruptJournal;
+		message = "model loaded with corrupt journal";
+	} else {
+		FreshLoadStatus journalStatus = FreshLoadStatusFromResult(journalResult);
+		if (journalStatus == FreshLoadStatus::LoadedWithRecoveredJournal) {
+			status = journalStatus;
+			message = "model loaded with recovered journal";
+		}
 	}
+
 	state->dirty = false;
 	state->pending.clear();
 	state->snapshotRequired = false;
-	return FreshResult::success();
+	state->degraded = status != FreshLoadStatus::LoadedOk;
+	if (status == FreshLoadStatus::FailedToLoad) {
+		return FreshResult::failure(FreshStatus::CorruptData, message, static_cast<size_t>(status));
+	}
+	return FreshLoadResult(status, message);
 }
 
 JsonDocument Fresh::recordToJson(const FreshPendingRecord &record) {

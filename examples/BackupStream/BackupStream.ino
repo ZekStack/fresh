@@ -69,6 +69,8 @@ void loop() {
 		return;
 	}
 
+	// Keep draining the backup stream until completion. If this reader stops without
+	// calling cancelBackup(), the sync task can block on the full backup buffer.
 	uint8_t buffer[256];
 	size_t read = db.readBackup(buffer, sizeof(buffer), 50);
 	if (read > 0) {

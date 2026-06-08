@@ -67,6 +67,8 @@ model.setValidator([](const JsonDocument &doc) {
 
 `readBackup(...)`, `backupStatus()`, or `cancelBackup()` can report backup-not-running state when no backup is active.
 
+After `startBackup()`, keep calling `readBackup(...)` until backup completion/error, or call `cancelBackup()` if the reader stops. Backup generation writes into a bounded buffer from the sync task; if the buffer is not drained, normal persistence can stop progressing until space is available.
+
 Typical backup loop:
 
 ```cpp

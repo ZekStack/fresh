@@ -64,6 +64,7 @@ Common methods:
 | `forceSyncAsync()` | Request a forced checkpoint for dirty state captured by the sync task. |
 | `forceSync()` | Run a blocking forced checkpoint for captured dirty state that touches flash in the caller context. |
 | `storageInfo()` | Return LittleFS total, used, and free bytes. |
+| `diagnostics()` | Return model load diagnostics collected during `init()`. |
 
 `FreshDeinitOptions` controls explicit shutdown:
 
@@ -81,6 +82,7 @@ String helper methods:
 | --- | --- |
 | `eventToString(type)` | Convert `FreshEventType` to text. |
 | `backupErrorToString(error)` | Convert `FreshBackupError` to text. |
+| `loadStatusToString(status)` | Convert `FreshLoadStatus` to text. |
 | `statusToString(status)` | Convert `FreshStatus` to text. |
 
 ## Storage info
@@ -92,6 +94,21 @@ String helper methods:
 | `totalBytes` | Total LittleFS bytes reported by the filesystem. |
 | `usedBytes` | Used LittleFS bytes reported by the filesystem. |
 | `freeBytes` | Calculated free bytes. |
+
+## Diagnostics
+
+`FreshDiagnostics` is returned by `Fresh::diagnostics()` after `init()`.
+
+```cpp
+FreshDiagnostics diagnostics = db.diagnostics();
+for (const FreshModelLoadInfo &load : diagnostics.modelLoads) {
+    Serial.printf("%s: %s\n", load.modelName.c_str(), db.loadStatusToString(load.status));
+}
+```
+
+`FreshModelLoadInfo` includes `modelName`, `modelType`, `status`, `degraded`, and `message`.
+
+`FreshLoadStatus` values include `LoadedOk`, `LoadedWithRecoveredJournal`, `LoadedWithCorruptSnapshot`, `LoadedWithCorruptJournal`, and `FailedToLoad`.
 
 ## FreshModel
 
@@ -187,6 +204,9 @@ Callbacks use `std::function`, so lambdas and `std::bind` both work.
 ## Backup
 
 Backup generation runs through the sync task and is read in chunks.
+
+> [!IMPORTANT]
+> After `startBackup()`, repeatedly call `readBackup()` until `backupStatus()` reports completion/error or your backup callbacks fire. If the backup output is not drained or cancelled, the sync task can remain occupied and normal persistence may stop progressing. Use `cancelBackup()` if the consumer stops reading.
 
 ```cpp
 FreshResult started = db.startBackup();

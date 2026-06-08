@@ -92,6 +92,8 @@ Demonstrates chunked backup and restore:
 * `backupImport(data, length)`
 * restore into another `Fresh` instance
 
+After `startBackup()`, keep reading chunks until backup completion/error, or call `cancelBackup()` if the consumer stops. An undrained backup can occupy the sync task and delay normal persistence.
+
 Use this when building backup download, upload, or migration flows.
 
 ## ModelManagement
