@@ -236,6 +236,9 @@ FreshResult Fresh::startBackup() {
 	if (!_initialized) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 	}
+	if (_stopping) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	}
 	{
 		FreshLock backupLock(_backup->mutex);
 		if (_backup->running || _backup->requested) {
@@ -304,8 +307,14 @@ FreshResult Fresh::backupImport(Stream &input) {
 	if (backupActive) {
 		return FreshResult::failure(FreshStatus::Busy, "backup already running");
 	}
-	if (!_initialized) {
-		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	{
+		FreshLock dbLock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 	}
 
 	JsonDocument archive;
@@ -329,8 +338,14 @@ FreshResult Fresh::backupImport(const uint8_t *data, size_t length) {
 	if (backupActive) {
 		return FreshResult::failure(FreshStatus::Busy, "backup already running");
 	}
-	if (!_initialized) {
-		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	{
+		FreshLock dbLock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 	}
 
 	JsonDocument archive;
@@ -342,8 +357,14 @@ FreshResult Fresh::backupImport(const uint8_t *data, size_t length) {
 }
 
 FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
-	if (!_initialized) {
-		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	{
+		FreshLock dbLock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 	}
 	if ((archive["version"] | 0) != 1) {
 		return FreshResult::failure(FreshStatus::CorruptData, "unsupported backup version");
@@ -407,6 +428,12 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 	size_t affectedCount = 0;
 	{
 		FreshLock lock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 		for (const auto &entry : importedModels) {
 			const std::string &name = entry.first;
 			const auto &incoming = entry.second;

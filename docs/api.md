@@ -23,7 +23,7 @@ if (!result) {
 | `doc` | Optional returned `JsonDocument`. |
 | `affectedCount` | Number of affected documents, records, or models. |
 
-`FreshStatus` values include `Ok`, `NotInitialized`, `AlreadyInitialized`, `InvalidArgument`, `FileSystemError`, `ModelExists`, `ModelNotFound`, `InvalidModel`, `ValidationFailed`, `OutOfMemory`, `UnsupportedOperation`, `CorruptData`, `Busy`, `BackupNotRunning`, `Cancelled`, and `InternalError`.
+`FreshStatus` values include `Ok`, `NotInitialized`, `AlreadyInitialized`, `InvalidArgument`, `FileSystemError`, `ModelExists`, `ModelNotFound`, `InvalidModel`, `ValidationFailed`, `OutOfMemory`, `UnsupportedOperation`, `CorruptData`, `Busy`, `BackupNotRunning`, `Cancelled`, `Timeout`, and `InternalError`.
 
 ## FreshConfig
 
@@ -53,6 +53,7 @@ Common methods:
 | Method | Purpose |
 | --- | --- |
 | `init(path, config)` | Mount/load the database and start the sync task. |
+| `deinit(options)` | Stop the sync task, optionally run a final forced checkpoint, and release runtime state. |
 | `createModel(name)` | Create or open a model using the default model type. |
 | `createModel(name, type)` | Create or open a general or stream model. |
 | `model(name)` | Look up an existing model handle. |
@@ -63,6 +64,16 @@ Common methods:
 | `forceSyncAsync()` | Request a forced checkpoint for dirty state captured by the sync task. |
 | `forceSync()` | Run a blocking forced checkpoint for captured dirty state that touches flash in the caller context. |
 | `storageInfo()` | Return LittleFS total, used, and free bytes. |
+
+`FreshDeinitOptions` controls explicit shutdown:
+
+```cpp
+db.deinit();
+db.deinit({.sync = false});
+db.deinit({.sync = true, .timeoutMS = 5000});
+```
+
+`sync` defaults to `true`. When `sync` is `false`, Fresh stops without a final checkpoint, so dirty RAM state that has not already synced may be lost. The destructor calls `deinit()` with final sync enabled and waits indefinitely for the sync task to exit.
 
 String helper methods:
 

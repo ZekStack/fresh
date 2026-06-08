@@ -107,6 +107,7 @@ void loop() {
 * Sync captures dirty RAM state under a short database lock, then performs LittleFS writes without holding the global database mutex.
 * `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts.
 * `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context.
+* `deinit()` waits for the sync task to exit before owned state is destroyed. By default it performs a final forced checkpoint; pass `{.sync = false}` to stop without final persistence.
 * Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
 * The current storage and backup formats use ArduinoJson MessagePack and are not stable compatibility contracts yet.
 
