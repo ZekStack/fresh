@@ -66,11 +66,12 @@ void setup() {
         return;
     }
 
-    users = db.createModel("User");
-    if (!users) {
-        Serial.println("Failed to open User model");
+    FreshModelResult usersResult = db.createModel("User");
+    if (!usersResult) {
+        Serial.println(usersResult.message.c_str());
         return;
     }
+    users = usersResult.model;
 
     JsonDocument user;
     user["name"] = "Panna";
@@ -109,6 +110,7 @@ void loop() {
 * `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context.
 * `deinit()` waits for the sync task to exit before owned state is destroyed. By default it performs a final forced checkpoint; pass `{.sync = false}` to stop without final persistence.
 * `diagnostics()` reports model load recovery after `init()`, including corrupt snapshots or recovered journals.
+* `create()` intentionally mutates the input `JsonDocument` by adding `_id`, `createdAt`, and `updatedAt`.
 * After `startBackup()`, keep calling `readBackup()` until backup finishes or call `cancelBackup()`. An undrained backup can occupy the sync task and delay normal persistence.
 * Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
 * The current storage and backup formats use ArduinoJson MessagePack and are not stable compatibility contracts yet.
@@ -151,15 +153,21 @@ Detailed documentation is available in the `docs/` folder.
 Fresh db;
 FreshResult initResult = db.init("/fresh_app");
 
-FreshModel users = db.createModel("User");
+FreshModelResult usersResult = db.createModel("User");
+FreshModel users = usersResult.model;
 FreshResult created = users.create(userDoc);
 FreshResult found = users.findById(id);
 FreshResult updated = users.updateById(id, patchDoc);
 FreshResult removed = users.deleteById(id);
 
-FreshModel logs = db.createModel("Log", FreshModelType::Stream);
+FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
+FreshModel logs = logsResult.model;
 FreshResult appended = logs.append(logDoc);
-FreshResult entries = logs.retrieve();
+
+FreshStreamRetrieveOptions options;
+options.reverse = true;
+options.limit = 50;
+FreshResult entries = logs.retrieve(options);
 ```
 
 For the full API, see [`docs/api.md`](docs/api.md).

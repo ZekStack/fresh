@@ -50,7 +50,12 @@ void setup() {
 		backupFinished = true;
 	});
 
-	users = db.createModel("BackupUser");
+	FreshModelResult usersResult = db.createModel("BackupUser");
+	if (!usersResult) {
+		Serial.println(usersResult.message.c_str());
+		return;
+	}
+	users = usersResult.model;
 	for (int i = 0; i < 3; ++i) {
 		JsonDocument user;
 		user["name"] = String("user-") + i;

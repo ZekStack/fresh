@@ -73,6 +73,7 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 
 	FreshResult manifestResult = readManifest();
 	if (!manifestResult) {
+		_models.clear();
 		return manifestResult;
 	}
 
@@ -418,6 +419,8 @@ const char *Fresh::statusToString(FreshStatus status) const {
 		return "model exists";
 	case FreshStatus::ModelNotFound:
 		return "model not found";
+	case FreshStatus::DocumentNotFound:
+		return "document not found";
 	case FreshStatus::InvalidModel:
 		return "invalid model";
 	case FreshStatus::ValidationFailed:

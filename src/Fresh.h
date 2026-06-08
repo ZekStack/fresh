@@ -25,6 +25,7 @@ enum class FreshStatus : uint8_t {
 	FileSystemError,
 	ModelExists,
 	ModelNotFound,
+	DocumentNotFound,
 	InvalidModel,
 	ValidationFailed,
 	OutOfMemory,
@@ -44,6 +45,12 @@ enum class FreshCompressionType : uint8_t {
 enum class FreshModelType : uint8_t {
 	General,
 	Stream,
+};
+
+enum class FreshReturn : uint8_t {
+	None,
+	ChangedDocs,
+	AllDocs,
 };
 
 enum class FreshEventType : uint8_t {
@@ -203,10 +210,26 @@ class FreshModel {
 		return find([field, value](const JsonDocument &doc) { return doc[field] == value; }, true);
 	}
 
-	FreshResult updateById(const char *id, const JsonDocument &patch);
-	FreshResult updateById(const std::string &id, const JsonDocument &patch);
-	FreshResult updateOne(FreshPredicate predicate, const JsonDocument &patch);
-	FreshResult update(FreshPredicate predicate, const JsonDocument &patch);
+	FreshResult updateById(
+	    const char *id,
+	    const JsonDocument &patch,
+	    FreshReturn returnMode = FreshReturn::None
+	);
+	FreshResult updateById(
+	    const std::string &id,
+	    const JsonDocument &patch,
+	    FreshReturn returnMode = FreshReturn::None
+	);
+	FreshResult updateOne(
+	    FreshPredicate predicate,
+	    const JsonDocument &patch,
+	    FreshReturn returnMode = FreshReturn::None
+	);
+	FreshResult update(
+	    FreshPredicate predicate,
+	    const JsonDocument &patch,
+	    FreshReturn returnMode = FreshReturn::None
+	);
 
 	FreshResult deleteById(const char *id);
 	FreshResult deleteById(const std::string &id);
@@ -231,6 +254,18 @@ class FreshModel {
 	std::shared_ptr<State> _state;
 };
 
+struct FreshModelResult {
+	bool result = false;
+	FreshStatus status = FreshStatus::InternalError;
+	std::string message;
+	FreshModel model;
+	size_t affectedCount = 0;
+
+	explicit operator bool() const {
+		return result;
+	}
+};
+
 class Fresh {
   public:
 	Fresh();
@@ -243,8 +278,8 @@ class Fresh {
 	FreshResult deinit(const FreshDeinitOptions &options = FreshDeinitOptions());
 
 	FreshModel model(const char *modelName);
-	FreshModel createModel(const char *modelName);
-	FreshModel createModel(const char *modelName, FreshModelType type);
+	FreshModelResult createModel(const char *modelName);
+	FreshModelResult createModel(const char *modelName, FreshModelType type);
 	FreshResult dropModel(const char *modelName);
 	FreshResult dropModels(std::initializer_list<const char *> modelNames);
 	FreshResult dropAllModels();

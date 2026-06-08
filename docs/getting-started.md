@@ -50,18 +50,19 @@ void setup() {
 Models are lightweight handles owned by the database.
 
 ```cpp
-FreshModel users = db.createModel("User");
-if (!users) {
-    Serial.println("Failed to open User model");
+FreshModelResult usersResult = db.createModel("User");
+if (!usersResult) {
+    Serial.println(usersResult.message.c_str());
     return;
 }
+FreshModel users = usersResult.model;
 ```
 
 Use `createModel(name)` for a normal document model. Use `createModel(name, FreshModelType::Stream)` for an append-style stream model.
 
 ## Create a document
 
-Fresh stores ArduinoJson `JsonDocument` values. `create()` updates the input document in place with `_id`, `createdAt`, and `updatedAt`.
+Fresh stores ArduinoJson `JsonDocument` values. `create()` intentionally updates the input document in place with `_id`, `createdAt`, and `updatedAt`.
 
 ```cpp
 JsonDocument user;
@@ -98,6 +99,8 @@ if (!updated) {
 ```
 
 Patch documents merge into the existing document and update `updatedAt`.
+
+Update results default to count-only to avoid copying documents into RAM. Pass `FreshReturn::ChangedDocs` or `FreshReturn::AllDocs` when the updated JSON payload is needed.
 
 ## Persistence behavior
 
