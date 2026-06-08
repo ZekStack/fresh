@@ -57,12 +57,12 @@ Demonstrates append-style records:
 
 * `createModel(name, FreshModelType::Stream)`
 * `append`
-* `retrieve`
+* bounded `retrieve`
 * filtered `retrieve`
 * `FreshStreamRetrieveOptions`
 * `streamTo(Print&)`
 
-Use this for logs, telemetry records, and other append-heavy data.
+Use this for logs, telemetry records, and other append-heavy data. Prefer `reverse = true` with a `limit` for normal log views so reads stay bounded.
 
 ## ValidatorsAndCallbacks
 

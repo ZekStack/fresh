@@ -25,11 +25,12 @@ void setup() {
 		return;
 	}
 
-	users = db.createModel("CrudUser");
-	if (!users) {
-		Serial.println("Failed to open CrudUser model");
+	FreshModelResult usersResult = db.createModel("CrudUser");
+	if (!usersResult) {
+		Serial.println(usersResult.message.c_str());
 		return;
 	}
+	users = usersResult.model;
 
 	JsonDocument anna;
 	anna["name"] = "Anna";
@@ -73,7 +74,8 @@ void setup() {
 	        [](const JsonDocument &doc) {
 		        return doc["role"] == "guest";
 	        },
-	        rolePatch
+	        rolePatch,
+	        FreshReturn::ChangedDocs
 	    )
 	);
 
@@ -85,7 +87,8 @@ void setup() {
 	        [](const JsonDocument &doc) {
 		        return doc["age"].as<int>() >= 18;
 	        },
-	        activePatch
+	        activePatch,
+	        FreshReturn::AllDocs
 	    )
 	);
 

@@ -23,7 +23,17 @@ if (!result) {
 | `doc` | Optional returned `JsonDocument`. |
 | `affectedCount` | Number of affected documents, records, or models. |
 
-`FreshStatus` values include `Ok`, `NotInitialized`, `AlreadyInitialized`, `InvalidArgument`, `FileSystemError`, `ModelExists`, `ModelNotFound`, `InvalidModel`, `ValidationFailed`, `OutOfMemory`, `UnsupportedOperation`, `CorruptData`, `Busy`, `BackupNotRunning`, `Cancelled`, `Timeout`, and `InternalError`.
+`FreshStatus` values include `Ok`, `NotInitialized`, `AlreadyInitialized`, `InvalidArgument`, `FileSystemError`, `ModelExists`, `ModelNotFound`, `DocumentNotFound`, `InvalidModel`, `ValidationFailed`, `OutOfMemory`, `UnsupportedOperation`, `CorruptData`, `Busy`, `BackupNotRunning`, `Cancelled`, `Timeout`, and `InternalError`.
+
+`FreshModelResult` is returned by `createModel(...)`.
+
+| Field | Meaning |
+| --- | --- |
+| `result` | `true` on success, `false` on failure. |
+| `status` | Machine-readable `FreshStatus`. |
+| `message` | Human-readable status message. |
+| `model` | Opened `FreshModel` handle on success. |
+| `affectedCount` | `1` when a model was created or opened. |
 
 ## FreshConfig
 
@@ -54,8 +64,8 @@ Common methods:
 | --- | --- |
 | `init(path, config)` | Mount/load the database and start the sync task. |
 | `deinit(options)` | Stop the sync task, optionally run a final forced checkpoint, and release runtime state. |
-| `createModel(name)` | Create or open a model using the default model type. |
-| `createModel(name, type)` | Create or open a general or stream model. |
+| `createModel(name)` | Create or open a model using the default model type and return `FreshModelResult`. |
+| `createModel(name, type)` | Create or open a general or stream model and return `FreshModelResult`. |
 | `model(name)` | Look up an existing model handle. |
 | `dropModel(name)` | Drop one model. |
 | `dropModels({...})` | Drop selected models. |
@@ -115,10 +125,12 @@ for (const FreshModelLoadInfo &load : diagnostics.modelLoads) {
 `FreshModel` is a handle to a database-owned model.
 
 ```cpp
-FreshModel users = db.createModel("User");
-if (!users) {
-    Serial.println("Failed to open User model");
+FreshModelResult usersResult = db.createModel("User");
+if (!usersResult) {
+    Serial.println(usersResult.message.c_str());
+    return;
 }
+FreshModel users = usersResult.model;
 ```
 
 Shared methods:
@@ -134,23 +146,31 @@ Document model methods:
 
 | Method | Purpose |
 | --- | --- |
-| `create(doc)` | Insert a document and add `_id`, `createdAt`, and `updatedAt`. |
+| `create(doc)` | Insert a document and intentionally add `_id`, `createdAt`, and `updatedAt` to the input document. |
 | `findById(id)` | Find one document by `_id`. |
 | `findOne(field, value)` | Find the first matching field/value document. |
 | `find(predicate)` | Find matching documents with a custom predicate. |
-| `updateById(id, patch)` | Patch one document by `_id`. |
-| `updateOne(predicate, patch)` | Patch the first matching document. |
-| `update(predicate, patch)` | Patch every matching document. |
+| `updateById(id, patch, returnMode)` | Patch one document by `_id`. |
+| `updateOne(predicate, patch, returnMode)` | Patch the first matching document. |
+| `update(predicate, patch, returnMode)` | Patch every matching document. |
 | `deleteById(id)` | Delete one document by `_id`. |
 | `deleteOne(predicate)` | Delete the first matching document. |
 | `deleteMany(predicate)` | Delete every matching document. |
+
+`FreshReturn` controls update result payload size:
+
+| Value | Result payload |
+| --- | --- |
+| `FreshReturn::None` | Default. Return `affectedCount` only and leave `doc` empty. |
+| `FreshReturn::ChangedDocs` | Return only changed documents in `doc`. |
+| `FreshReturn::AllDocs` | Return the full model in `doc` after updates. |
 
 Stream model methods:
 
 | Method | Purpose |
 | --- | --- |
 | `append(doc)` | Append one stream record. |
-| `retrieve()` | Return stream records. |
+| `retrieve()` | Return all stream records into memory. Prefer bounded options for append-style logs. |
 | `retrieve(options)` | Return records with offset, limit, and reverse options. |
 | `retrieve(predicate, options)` | Return filtered records with options. |
 | `streamTo(Print&)` | Write stream records to an Arduino `Print`. |

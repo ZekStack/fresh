@@ -71,8 +71,8 @@ config.defaultModelType = FreshModelType::Stream;
 Prefer passing the type explicitly at the call site when mixed model types are used:
 
 ```cpp
-FreshModel users = db.createModel("User", FreshModelType::General);
-FreshModel logs = db.createModel("Log", FreshModelType::Stream);
+FreshModelResult usersResult = db.createModel("User", FreshModelType::General);
+FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
 ```
 
 ## Snapshot thresholds

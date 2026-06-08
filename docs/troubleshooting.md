@@ -32,16 +32,20 @@ Background sync is dirty-only, interval-based, and threshold-compacted. `storage
 
 Wait longer than `syncIntervalMS`, then check storage again.
 
-## Model creation returns an empty handle
+## Model creation fails
 
-Check that the database is initialized and the model name is valid.
+Check the returned `FreshModelResult` message and status.
 
 ```cpp
-FreshModel users = db.createModel("User");
-if (!users) {
-    Serial.println("Failed to open User model");
+FreshModelResult usersResult = db.createModel("User");
+if (!usersResult) {
+    Serial.println(usersResult.message.c_str());
+    return;
 }
+FreshModel users = usersResult.model;
 ```
+
+`createModel(...)` can report invalid names, uninitialized databases, stopping databases, dropped models, or an existing model with a different type.
 
 Use `db.model("User")` when you expect the model to already exist.
 
@@ -89,7 +93,12 @@ Use `onBackupEnd` and `onBackupError` callbacks to know when a backup has comple
 Confirm the model was created as a stream model:
 
 ```cpp
-FreshModel logs = db.createModel("Log", FreshModelType::Stream);
+FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
+if (!logsResult) {
+    Serial.println(logsResult.message.c_str());
+    return;
+}
+FreshModel logs = logsResult.model;
 ```
 
 `append()` is for stream models. Document CRUD methods are for general models.

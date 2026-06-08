@@ -30,27 +30,33 @@ void setup() {
 		return;
 	}
 
-	logs = db.createModel("DeviceLog", FreshModelType::Stream);
-	if (!logs) {
-		Serial.println("Failed to open DeviceLog stream model");
+	FreshModelResult logsResult = db.createModel("DeviceLog", FreshModelType::Stream);
+	if (!logsResult) {
+		Serial.println(logsResult.message.c_str());
 		return;
 	}
+	logs = logsResult.model;
 
 	appendLog("info", "boot");
 	appendLog("info", "wifi skipped");
 	appendLog("warn", "battery low");
 
-	printResult("retrieve all", logs.retrieve());
-	printResult(
-	    "retrieve warn",
-	    logs.retrieve([](const JsonDocument &entry) {
-		    const char *level = entry["level"] | "";
-		    return strcmp(level, "warn") == 0;
-	    })
-	);
-
 	FreshStreamRetrieveOptions latestOptions;
 	latestOptions.reverse = true;
+	latestOptions.limit = 50;
+	printResult("retrieve latest", logs.retrieve(latestOptions));
+
+	printResult(
+	    "retrieve warn",
+	    logs.retrieve(
+	        [](const JsonDocument &entry) {
+		        const char *level = entry["level"] | "";
+		        return strcmp(level, "warn") == 0;
+	        },
+	        latestOptions
+	    )
+	);
+
 	latestOptions.limit = 2;
 	printResult("retrieve latest 2", logs.retrieve(latestOptions));
 

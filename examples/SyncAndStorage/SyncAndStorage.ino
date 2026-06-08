@@ -32,11 +32,12 @@ void setup() {
 
 	printStorage("after init");
 
-	readings = db.createModel("Reading");
-	if (!readings) {
-		Serial.println("Failed to open Reading model");
+	FreshModelResult readingsResult = db.createModel("Reading");
+	if (!readingsResult) {
+		Serial.println(readingsResult.message.c_str());
 		return;
 	}
+	readings = readingsResult.model;
 
 	JsonDocument reading;
 	reading["sensor"] = "battery";

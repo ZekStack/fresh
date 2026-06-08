@@ -184,7 +184,7 @@ FreshResult FreshModel::findById(const std::string &id) const {
 	}
 	auto found = _state->docs.find(id);
 	if (found == _state->docs.end()) {
-		return FreshResult::failure(FreshStatus::ModelNotFound, "document not found");
+		return FreshResult::failure(FreshStatus::DocumentNotFound, "document not found");
 	}
 	FreshResult result = FreshResult::success("document found", 1);
 	FreshCopyJson(result.doc, found->second);
@@ -227,24 +227,36 @@ FreshResult FreshModel::find(FreshPredicate predicate, bool stopAtFirst) const {
 	return result;
 }
 
-FreshResult FreshModel::updateById(const char *id, const JsonDocument &patch) {
+FreshResult FreshModel::updateById(const char *id, const JsonDocument &patch, FreshReturn returnMode) {
 	if (id == nullptr) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "id is required");
 	}
-	return updateById(std::string(id), patch);
+	return updateById(std::string(id), patch, returnMode);
 }
 
-FreshResult FreshModel::updateById(const std::string &id, const JsonDocument &patch) {
+FreshResult FreshModel::updateById(
+    const std::string &id,
+    const JsonDocument &patch,
+    FreshReturn returnMode
+) {
 	return updateOne(
 	    [id](const JsonDocument &doc) {
 		    const char *docId = doc["_id"] | "";
 		    return id == docId;
 	    },
-	    patch
+	    patch,
+	    returnMode
 	);
 }
 
-FreshResult FreshModel::updateOne(FreshPredicate predicate, const JsonDocument &patch) {
+FreshResult FreshModel::updateOne(
+    FreshPredicate predicate,
+    const JsonDocument &patch,
+    FreshReturn returnMode
+) {
+	if (!predicate) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "predicate is required");
+	}
 	return update(
 	    [predicate, updated = false](const JsonDocument &doc) mutable {
 		    if (updated) {
@@ -256,11 +268,16 @@ FreshResult FreshModel::updateOne(FreshPredicate predicate, const JsonDocument &
 		    updated = true;
 		    return true;
 	    },
-	    patch
+	    patch,
+	    returnMode
 	);
 }
 
-FreshResult FreshModel::update(FreshPredicate predicate, const JsonDocument &patch) {
+FreshResult FreshModel::update(
+    FreshPredicate predicate,
+    const JsonDocument &patch,
+    FreshReturn returnMode
+) {
 	if (!_owner || !_state || _state->dropped) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
@@ -273,6 +290,7 @@ FreshResult FreshModel::update(FreshPredicate predicate, const JsonDocument &pat
 
 	std::vector<FreshEvent> events;
 	FreshResult result = FreshResult::success("documents updated");
+	bool changedDocsCreated = false;
 	{
 		FreshLock lock(*_owner->_mutex);
 		if (!_owner->_initialized) {
@@ -309,6 +327,12 @@ FreshResult FreshModel::update(FreshPredicate predicate, const JsonDocument &pat
 			_state->pending.push_back(record);
 			_state->dirty = true;
 			result.affectedCount++;
+			if (returnMode == FreshReturn::ChangedDocs) {
+				JsonArray changedDocs =
+				    changedDocsCreated ? result.doc.as<JsonArray>() : result.doc.to<JsonArray>();
+				changedDocsCreated = true;
+				changedDocs.add(candidate.as<JsonVariantConst>());
+			}
 			events.push_back({
 			    .type = FreshEventType::DocumentUpdated,
 			    .modelName = _state->name,
@@ -317,12 +341,12 @@ FreshResult FreshModel::update(FreshPredicate predicate, const JsonDocument &pat
 			    .result = FreshResult::success("document updated", 1)
 			});
 		}
-		if (result.affectedCount > 0) {
+		if (result.affectedCount > 0 && returnMode == FreshReturn::AllDocs) {
 			JsonArray array = result.doc.to<JsonArray>();
 			for (const auto &entry : _state->docs) {
 				array.add(entry.second.as<JsonVariantConst>());
 			}
-		} else {
+		} else if (result.affectedCount == 0) {
 			result.message = "no documents updated";
 		}
 	}
@@ -491,7 +515,7 @@ FreshResult FreshModel::streamTo(Print &out) const {
 	return FreshResult::success("stream exported", count);
 }
 
-FreshModel Fresh::createModel(const char *modelName) {
+FreshModelResult Fresh::createModel(const char *modelName) {
 	return createModel(modelName, _config.defaultModelType);
 }
 
@@ -508,24 +532,63 @@ FreshModel Fresh::model(const char *modelName) {
 	return FreshModel(this, found->second);
 }
 
-FreshModel Fresh::createModel(const char *modelName, FreshModelType type) {
+FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) {
 	if (!FreshIsValidName(modelName)) {
-		return FreshModel();
+		return {
+		    .result = false,
+		    .status = FreshStatus::InvalidArgument,
+		    .message = "invalid model name"
+		};
 	}
 
 	FreshEvent event;
 	std::shared_ptr<FreshModel::State> state;
 	{
 		FreshLock lock(*_mutex);
-		if (!_initialized || _stopping) {
-			return FreshModel();
+		if (!lock) {
+			return {
+			    .result = false,
+			    .status = FreshStatus::InternalError,
+			    .message = "failed to lock database"
+			};
+		}
+		if (!_initialized) {
+			return {
+			    .result = false,
+			    .status = FreshStatus::NotInitialized,
+			    .message = "database not initialized"
+			};
+		}
+		if (_stopping) {
+			return {
+			    .result = false,
+			    .status = FreshStatus::Busy,
+			    .message = "database is stopping"
+			};
 		}
 		auto existing = _models.find(modelName);
 		if (existing != _models.end()) {
-			if (existing->second->dropped || existing->second->type != type) {
-				return FreshModel();
+			if (existing->second->dropped) {
+				return {
+				    .result = false,
+				    .status = FreshStatus::InvalidModel,
+				    .message = "model was dropped"
+				};
 			}
-			return FreshModel(this, existing->second);
+			if (existing->second->type != type) {
+				return {
+				    .result = false,
+				    .status = FreshStatus::ModelExists,
+				    .message = "model already exists with different type"
+				};
+			}
+			return {
+			    .result = true,
+			    .status = FreshStatus::Ok,
+			    .message = "model opened",
+			    .model = FreshModel(this, existing->second),
+			    .affectedCount = 1
+			};
 		}
 		state = std::make_shared<FreshModel::State>();
 		state->name = modelName;
@@ -541,7 +604,13 @@ FreshModel Fresh::createModel(const char *modelName, FreshModelType type) {
 		};
 	}
 	emitEvent(event);
-	return FreshModel(this, state);
+	return {
+	    .result = true,
+	    .status = FreshStatus::Ok,
+	    .message = "model created",
+	    .model = FreshModel(this, state),
+	    .affectedCount = 1
+	};
 }
 
 FreshResult Fresh::dropModel(const char *modelName) {
