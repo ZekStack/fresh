@@ -7,6 +7,15 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+  ARDUINO_CLI_VERSION: 1.5.0
+  ARDUINO_NETWORK_CONNECTION_TIMEOUT: 240s
+  ESP32_CORE_VERSION: 3.3.9
+  PIOARDUINO_PLATFORM_URL: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.39/platform-espressif32.zip
+  PIOARDUINO_PLATFORM_VERSION: 55.03.39
+  PIOARDUINO_VERSION: 6.1.19
+
 jobs:
   source-audit:
     runs-on: ubuntu-latest
@@ -40,16 +49,18 @@ jobs:
       - name: Cache PIOArduino
         uses: actions/cache@v4
         with:
-          path: ~/.platformio
-          key: ${{ runner.os }}-pioarduino-core-6.1.19-${{ hashFiles('**/library.json') }}
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: ${{ runner.os }}-pioarduino-${{ env.PIOARDUINO_VERSION }}-${{ env.PIOARDUINO_PLATFORM_VERSION }}-${{ hashFiles('**/library.json') }}
           restore-keys: |
-            ${{ runner.os }}-pioarduino-core-6.1.19-
+            ${{ runner.os }}-pioarduino-${{ env.PIOARDUINO_VERSION }}-${{ env.PIOARDUINO_PLATFORM_VERSION }}-
 
       - name: Install PIOArduino Core
-        run: python -m pip install --upgrade https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+        run: python -m pip install --upgrade "pioarduino==${PIOARDUINO_VERSION}"
 
       - name: Install PIOArduino ESP32 Platform
-        run: pio pkg install -g -p https://github.com/pioarduino/platform-espressif32.git
+        run: pio pkg install -g -p "${PIOARDUINO_PLATFORM_URL}"
 
       - name: Build library examples (ESP32 Arduino)
         run: |
@@ -61,7 +72,7 @@ jobs:
               pio ci "$d" \
                 --board ${{ matrix.board }} \
                 --lib="." \
-                --project-option "platform=https://github.com/pioarduino/platform-espressif32.git" \
+                --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
                 --project-option "build_unflags=-std=gnu++11" \
                 --project-option "build_flags=-std=gnu++20"
             fi
@@ -87,12 +98,24 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Arduino CLI
-        uses: arduino/setup-arduino-cli@v1
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: ${{ env.ARDUINO_CLI_VERSION }}
+
+      - name: Cache Arduino CLI packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/.cache/arduino
+          key: ${{ runner.os }}-arduino-cli-${{ env.ARDUINO_CLI_VERSION }}-esp32-${{ env.ESP32_CORE_VERSION }}
+          restore-keys: |
+            ${{ runner.os }}-arduino-cli-${{ env.ARDUINO_CLI_VERSION }}-esp32-
 
       - name: Install ESP32 core
         run: |
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32
+          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}"
 
       - name: Install libraries
         run: |
