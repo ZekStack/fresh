@@ -49,6 +49,7 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 	}
 
 	_config = config;
+	_diagnostics = FreshDiagnostics();
 	_stopping = false;
 	_stopTask = false;
 	if (_syncTaskExited != nullptr) {
@@ -105,6 +106,9 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 		return FreshResult::failure(FreshStatus::InternalError, "failed to create sync task");
 	}
 
+	if (_diagnostics.degradedModelCount > 0) {
+		return FreshResult::success("database initialized with recovered models", _diagnostics.degradedModelCount);
+	}
 	return FreshResult::success("database initialized");
 }
 
@@ -170,6 +174,7 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 	{
 		FreshLock lock(*_mutex);
 		_models.clear();
+		_diagnostics = FreshDiagnostics();
 		_onSync = nullptr;
 		_onEvent = nullptr;
 		_onTimeGet = nullptr;
@@ -289,6 +294,11 @@ FreshStorageInfo Fresh::storageInfo() const {
 	return info;
 }
 
+FreshDiagnostics Fresh::diagnostics() const {
+	FreshLock lock(*_mutex);
+	return _diagnostics;
+}
+
 void Fresh::onSync(FreshSyncCallback callback) {
 	FreshLock lock(*_mutex);
 	_onSync = callback;
@@ -372,6 +382,22 @@ const char *Fresh::backupErrorToString(FreshBackupError error) const {
 		return "file system error";
 	case FreshBackupError::OutOfMemory:
 		return "out of memory";
+	}
+	return "unknown";
+}
+
+const char *Fresh::loadStatusToString(FreshLoadStatus status) const {
+	switch (status) {
+	case FreshLoadStatus::LoadedOk:
+		return "loaded ok";
+	case FreshLoadStatus::LoadedWithRecoveredJournal:
+		return "loaded with recovered journal";
+	case FreshLoadStatus::LoadedWithCorruptSnapshot:
+		return "loaded with corrupt snapshot";
+	case FreshLoadStatus::LoadedWithCorruptJournal:
+		return "loaded with corrupt journal";
+	case FreshLoadStatus::FailedToLoad:
+		return "failed to load";
 	}
 	return "unknown";
 }

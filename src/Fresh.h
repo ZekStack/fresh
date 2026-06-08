@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <map>
+#include <vector>
 
 #if defined(ESP32)
 #include <freertos/FreeRTOS.h>
@@ -59,6 +60,14 @@ enum class FreshEventType : uint8_t {
 	BackupFinished,
 	BackupCancelled,
 	BackupError,
+};
+
+enum class FreshLoadStatus : uint8_t {
+	LoadedOk,
+	LoadedWithRecoveredJournal,
+	LoadedWithCorruptSnapshot,
+	LoadedWithCorruptJournal,
+	FailedToLoad,
 };
 
 struct FreshConfig {
@@ -135,6 +144,19 @@ struct FreshStorageInfo {
 	size_t totalBytes = 0;
 	size_t usedBytes = 0;
 	size_t freeBytes = 0;
+};
+
+struct FreshModelLoadInfo {
+	std::string modelName;
+	FreshModelType modelType = FreshModelType::General;
+	FreshLoadStatus status = FreshLoadStatus::LoadedOk;
+	bool degraded = false;
+	std::string message;
+};
+
+struct FreshDiagnostics {
+	std::vector<FreshModelLoadInfo> modelLoads;
+	size_t degradedModelCount = 0;
 };
 
 struct FreshStreamRetrieveOptions {
@@ -233,6 +255,7 @@ class Fresh {
 	FreshResult forceSync();
 
 	FreshStorageInfo storageInfo() const;
+	FreshDiagnostics diagnostics() const;
 
 	FreshResult startBackup();
 	size_t readBackup(uint8_t *buffer, size_t length, uint32_t timeoutMS = 0);
@@ -251,6 +274,7 @@ class Fresh {
 
 	const char *eventToString(FreshEventType type) const;
 	const char *backupErrorToString(FreshBackupError error) const;
+	const char *loadStatusToString(FreshLoadStatus status) const;
 	const char *statusToString(FreshStatus status) const;
 
   private:
@@ -287,6 +311,7 @@ class Fresh {
 	void callBackupError(FreshBackupInfo info);
 
 	FreshConfig _config;
+	FreshDiagnostics _diagnostics;
 	std::string _rootPath;
 	bool _initialized = false;
 	bool _stopping = false;
