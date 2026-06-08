@@ -559,6 +559,9 @@ FreshResult Fresh::forceSyncAsync() {
 	if (!_initialized) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 	}
+	if (_stopping) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	}
 	_forceSyncRequested = true;
 	if (_syncTaskHandle != nullptr) {
 		xTaskNotifyGive(_syncTaskHandle);
@@ -567,5 +570,14 @@ FreshResult Fresh::forceSyncAsync() {
 }
 
 FreshResult Fresh::forceSync() {
+	{
+		FreshLock lock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
+	}
 	return syncDirty(true);
 }

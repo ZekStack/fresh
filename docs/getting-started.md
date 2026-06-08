@@ -107,6 +107,8 @@ The sync task persists dirty state to LittleFS later. It captures a batch under 
 
 Use the configured `syncIntervalMS` for normal background persistence. `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts. `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context, so reserve it for advanced checkpoints. Writes accepted after a forced sync captures its batch remain pending for a later sync.
 
+Call `deinit()` when a local or test database instance should shut down explicitly. It waits for the sync task to exit and performs a final forced checkpoint by default. Use `deinit({.sync = false})` only when stopping quickly is more important than persisting dirty RAM state that has not synced yet.
+
 ## Next steps
 
 Start with [`../examples/Basic/Basic.ino`](../examples/Basic/Basic.ino), then read [`examples.md`](examples.md) to choose a more specific example.

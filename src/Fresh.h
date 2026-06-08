@@ -32,6 +32,7 @@ enum class FreshStatus : uint8_t {
 	Busy,
 	BackupNotRunning,
 	Cancelled,
+	Timeout,
 	InternalError,
 };
 
@@ -71,6 +72,11 @@ struct FreshConfig {
 	uint32_t snapshotRecordThreshold = 128;
 	size_t snapshotBytesThreshold = 32 * 1024;
 	size_t backupBufferSize = 8 * 1024;
+};
+
+struct FreshDeinitOptions {
+	bool sync = true;
+	uint32_t timeoutMS = 2000;
 };
 
 struct FreshResult {
@@ -212,6 +218,7 @@ class Fresh {
 	Fresh &operator=(const Fresh &) = delete;
 
 	FreshResult init(const char *dbPath, const FreshConfig &config = FreshConfig());
+	FreshResult deinit(const FreshDeinitOptions &options = FreshDeinitOptions());
 
 	FreshModel model(const char *modelName);
 	FreshModel createModel(const char *modelName);
@@ -282,12 +289,14 @@ class Fresh {
 	FreshConfig _config;
 	std::string _rootPath;
 	bool _initialized = false;
+	bool _stopping = false;
 	bool _stopTask = false;
 	bool _manifestDirty = false;
 	bool _forceSyncRequested = false;
 	uint32_t _manifestEpoch = 0;
 	uint64_t _nextPendingSequence = 1;
 	TaskHandle_t _syncTaskHandle = nullptr;
+	SemaphoreHandle_t _syncTaskExited = nullptr;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> _models;
 	std::unique_ptr<FreshMutex> _mutex;
 	std::unique_ptr<FreshMutex> _syncMutex;
