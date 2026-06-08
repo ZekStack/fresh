@@ -24,11 +24,11 @@ If LittleFS mount recovery is acceptable for your product, set `eraseOnFileSyste
 
 Fresh is RAM-first. A successful public write means the change was accepted into memory. It may not have reached LittleFS yet.
 
-Reduce the loss window by lowering `syncIntervalMS`, or request a checkpoint with `forceSyncAsync()` after important operations. Use `forceSync()` only when blocking and touching flash in the caller context is acceptable.
+Reduce the loss window by lowering `syncIntervalMS`, or request a forced dirty-state checkpoint with `forceSyncAsync()` after important operations. Use `forceSync()` only when blocking and touching flash in the caller context is acceptable.
 
 ## Flash usage does not change immediately
 
-Background sync is dirty-only and interval-based. `storageInfo()` may look unchanged immediately after `create`, `update`, `delete`, or `append`.
+Background sync is dirty-only, interval-based, and threshold-compacted. `storageInfo()` may look unchanged immediately after `create`, `update`, `delete`, or `append`.
 
 Wait longer than `syncIntervalMS`, then check storage again.
 

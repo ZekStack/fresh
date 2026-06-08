@@ -272,7 +272,7 @@ class Fresh {
 	    const FreshPendingRecord &record
 	);
 	FreshResult writeSnapshot(const std::shared_ptr<FreshModel::State> &state);
-	FreshResult syncModel(const std::shared_ptr<FreshModel::State> &state);
+	FreshResult syncModel(const std::shared_ptr<FreshModel::State> &state, bool forceSnapshot);
 	FreshResult syncDirty(bool force);
 
 	bool backupWriteByte(uint8_t byte);
@@ -290,6 +290,7 @@ class Fresh {
 	bool _initialized = false;
 	bool _stopTask = false;
 	bool _manifestDirty = false;
+	bool _forceSyncRequested = false;
 	TaskHandle_t _syncTaskHandle = nullptr;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> _models;
 	std::unique_ptr<FreshMutex> _mutex;
