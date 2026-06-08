@@ -105,7 +105,7 @@ Fresh is RAM-first. A successful write result means the operation was accepted i
 
 The sync task persists dirty state to LittleFS later. If power is lost before the next sync, recent accepted changes can be lost.
 
-Use the configured `syncIntervalMS` for normal background persistence. `forceSyncAsync()` requests an explicit sync through the sync task. `forceSync()` blocks and touches flash in the caller context, so reserve it for advanced checkpoints.
+Use the configured `syncIntervalMS` for normal background persistence. `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state. `forceSync()` runs the same forced dirty-state checkpoint synchronously and touches flash in the caller context, so reserve it for advanced checkpoints.
 
 ## Next steps
 

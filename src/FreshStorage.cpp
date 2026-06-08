@@ -340,7 +340,7 @@ FreshResult Fresh::writeSnapshot(const std::shared_ptr<FreshModel::State> &state
 	return FreshResult::success("snapshot written");
 }
 
-FreshResult Fresh::syncModel(const std::shared_ptr<FreshModel::State> &state) {
+FreshResult Fresh::syncModel(const std::shared_ptr<FreshModel::State> &state, bool forceSnapshot) {
 	if (!state->dirty && state->pending.empty() && !state->snapshotRequired) {
 		return FreshResult::success("model clean");
 	}
@@ -380,7 +380,7 @@ FreshResult Fresh::syncModel(const std::shared_ptr<FreshModel::State> &state) {
 		state->pending.pop_front();
 	}
 
-	if (state->snapshotRequired || state->recordsSinceSnapshot >= _config.snapshotRecordThreshold ||
+	if (forceSnapshot || state->snapshotRequired || state->recordsSinceSnapshot >= _config.snapshotRecordThreshold ||
 	    state->bytesSinceSnapshot >= _config.snapshotBytesThreshold) {
 		FreshResult snapshotResult = writeSnapshot(state);
 		if (!snapshotResult) {
@@ -393,7 +393,6 @@ FreshResult Fresh::syncModel(const std::shared_ptr<FreshModel::State> &state) {
 }
 
 FreshResult Fresh::syncDirty(bool force) {
-	(void)force;
 	std::vector<std::shared_ptr<FreshModel::State>> snapshot;
 	bool shouldWriteManifest = false;
 	{
@@ -404,7 +403,7 @@ FreshResult Fresh::syncDirty(bool force) {
 		shouldWriteManifest = _manifestDirty;
 		for (const auto &entry : _models) {
 			const auto &state = entry.second;
-			if (state->dirty || !state->pending.empty()) {
+			if (state->dirty || !state->pending.empty() || state->snapshotRequired) {
 				snapshot.push_back(state);
 			}
 		}
@@ -427,7 +426,7 @@ FreshResult Fresh::syncDirty(bool force) {
 
 	for (const auto &state : snapshot) {
 		FreshLock lock(*_mutex);
-		last = syncModel(state);
+		last = syncModel(state, force);
 		if (!last) {
 			emitSync(last);
 			return last;
@@ -447,6 +446,7 @@ FreshResult Fresh::forceSyncAsync() {
 	if (!_initialized) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 	}
+	_forceSyncRequested = true;
 	if (_syncTaskHandle != nullptr) {
 		xTaskNotifyGive(_syncTaskHandle);
 	}

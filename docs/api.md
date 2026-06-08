@@ -60,8 +60,8 @@ Common methods:
 | `dropModels({...})` | Drop selected models. |
 | `dropAllModels()` | Drop every model. |
 | `renameModel(oldName, newName)` | Rename a model. |
-| `forceSyncAsync()` | Request sync through the sync task. |
-| `forceSync()` | Run a blocking sync that touches flash in the caller context. |
+| `forceSyncAsync()` | Request a forced dirty-state checkpoint through the sync task. |
+| `forceSync()` | Run a blocking forced dirty-state checkpoint that touches flash in the caller context. |
 | `storageInfo()` | Return LittleFS total, used, and free bytes. |
 
 String helper methods:

@@ -108,7 +108,13 @@ void Fresh::syncLoop() {
 		if (_stopTask) {
 			break;
 		}
-		syncDirty(false);
+		bool force = false;
+		{
+			FreshLock lock(*_mutex);
+			force = _forceSyncRequested;
+			_forceSyncRequested = false;
+		}
+		syncDirty(force);
 		runBackupIfRequested();
 	}
 	vTaskDelete(nullptr);
