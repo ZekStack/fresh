@@ -389,7 +389,11 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 		}
 
 		FreshPendingRecord record;
-		record.op = static_cast<FreshJournalOp>(opByte);
+		if (!FreshParseJournalOp(opByte, record.op)) {
+			state->degraded = true;
+			journalRecovered = true;
+			break;
+		}
 		record.id = recordDoc["id"] | "";
 		record.doc.set(recordDoc["doc"]);
 		applyRecord(state, record);

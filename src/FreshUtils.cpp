@@ -82,6 +82,25 @@ FreshModelType FreshModelTypeFromString(const char *type) {
 	return FreshModelType::General;
 }
 
+bool FreshParseJournalOp(uint8_t value, FreshJournalOp &op) {
+	switch (value) {
+	case static_cast<uint8_t>(FreshJournalOp::Create):
+		op = FreshJournalOp::Create;
+		return true;
+	case static_cast<uint8_t>(FreshJournalOp::Update):
+		op = FreshJournalOp::Update;
+		return true;
+	case static_cast<uint8_t>(FreshJournalOp::Delete):
+		op = FreshJournalOp::Delete;
+		return true;
+	case static_cast<uint8_t>(FreshJournalOp::Append):
+		op = FreshJournalOp::Append;
+		return true;
+	default:
+		return false;
+	}
+}
+
 const char *FreshJournalOpToString(FreshJournalOp op) {
 	switch (op) {
 	case FreshJournalOp::Create:

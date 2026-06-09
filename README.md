@@ -109,11 +109,26 @@ void loop() {
 * `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts.
 * `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context.
 * `deinit()` waits for the sync task to exit before owned state is destroyed. By default it performs a final forced checkpoint; pass `{.sync = false}` to stop without final persistence.
+* The destructor uses a bounded final `deinit({.sync = true, .timeoutMS = 2000})`. Applications that need guaranteed final persistence should call `FreshResult result = db.deinit();` manually and check the result before the object is destroyed.
 * `diagnostics()` reports model load recovery after `init()`, including corrupt snapshots or recovered journals.
 * `create()` intentionally mutates the input `JsonDocument` by adding `_id`, `createdAt`, and `updatedAt`.
 * After `startBackup()`, keep calling `readBackup()` until backup finishes or call `cancelBackup()`. An undrained backup can occupy the sync task and delay normal persistence.
 * Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
+* Callbacks are notification hooks. Do not call `deinit()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
 * The current storage and backup formats use ArduinoJson MessagePack and are not stable compatibility contracts yet.
+
+## When not to use Fresh
+
+Fresh is not intended for large datasets, high-frequency telemetry, SQL-like querying, multi-device concurrency, or data that must be flash-durable immediately after every write.
+
+## Persistence guarantees
+
+| Operation | RAM updated | Flash updated before return |
+| --- | --- | --- |
+| `create()` / `update()` / `delete()` / `append()` | yes | no |
+| `forceSyncAsync()` | yes | no |
+| `forceSync()` | yes | yes, if successful |
+| `deinit({ .sync = true })` | yes | yes, if successful |
 
 ## Examples
 
@@ -128,6 +143,7 @@ The repository includes topic-focused Arduino sketches in the `examples/` folder
 | `ValidatorsAndCallbacks` | Bool/result validators, `std::bind`, event/sync callbacks, and custom time. |
 | `BackupStream` | Backup callbacks, `startBackup`, chunked `readBackup`, status checks, and `backupImport`. |
 | `ModelManagement` | Create, rename, drop, drop selected, and drop all models. |
+| `SelfTest` | Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior. It uses `/fresh_selftest`, `/fresh_selftest_src`, and `/fresh_selftest_dst`, touches internal storage files, and should only be run on a test device or test partition. |
 
 Start with:
 
