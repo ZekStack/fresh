@@ -57,12 +57,12 @@ Demonstrates append-style records:
 
 * `createModel(name, FreshModelType::Stream)`
 * `append`
-* `retrieve`
+* bounded `retrieve`
 * filtered `retrieve`
 * `FreshStreamRetrieveOptions`
 * `streamTo(Print&)`
 
-Use this for logs, telemetry records, and other append-heavy data.
+Use this for logs, telemetry records, and other append-heavy data. Prefer `reverse = true` with a `limit` for normal log views so reads stay bounded.
 
 ## ValidatorsAndCallbacks
 
@@ -88,9 +88,11 @@ Demonstrates chunked backup and restore:
 * backup start/progress/end/error callbacks
 * `startBackup()`
 * repeated `readBackup(...)`
-* `backupStatus()`
+* `backupStatus()` with `FreshBackupState`
 * `backupImport(data, length)`
 * restore into another `Fresh` instance
+
+After `startBackup()`, keep reading chunks until `backupStatus().state` is `FreshBackupState::Finished`, `FreshBackupState::Cancelled`, or `FreshBackupState::Error`, or call `cancelBackup()` if the consumer stops. An undrained backup can occupy the sync task and delay normal persistence.
 
 Use this when building backup download, upload, or migration flows.
 
@@ -107,6 +109,23 @@ Demonstrates model lifecycle helpers:
 * `dropAllModels`
 
 Use this for setup tools, reset flows, and maintenance screens.
+
+## SelfTest
+
+Path: [`../examples/SelfTest/SelfTest.ino`](../examples/SelfTest/SelfTest.ino)
+
+Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior.
+
+It uses `/fresh_selftest`, `/fresh_selftest_src`, and `/fresh_selftest_dst`, touches internal storage files, and should only be run on a test device or test partition. SelfTest intentionally depends on the current Fresh storage layout and may need updates when the storage format changes.
+
+SelfTest is compiled by CI through the examples build loop, but it is not executed in CI. Run it manually on ESP32 hardware. A successful run ends like this:
+
+```txt
+Fresh SelfTest starting
+[PASS] create -> forceSync -> reload
+...
+SelfTest complete: 13 passed, 0 failed
+```
 
 ## Compiling examples
 

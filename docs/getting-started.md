@@ -50,18 +50,19 @@ void setup() {
 Models are lightweight handles owned by the database.
 
 ```cpp
-FreshModel users = db.createModel("User");
-if (!users) {
-    Serial.println("Failed to open User model");
+FreshModelResult usersResult = db.createModel("User");
+if (!usersResult) {
+    Serial.println(usersResult.message.c_str());
     return;
 }
+FreshModel users = usersResult.model;
 ```
 
 Use `createModel(name)` for a normal document model. Use `createModel(name, FreshModelType::Stream)` for an append-style stream model.
 
 ## Create a document
 
-Fresh stores ArduinoJson `JsonDocument` values. `create()` updates the input document in place with `_id`, `createdAt`, and `updatedAt`.
+Fresh stores ArduinoJson `JsonDocument` values. `create()` intentionally updates the input document in place with `_id`, `createdAt`, and `updatedAt`.
 
 ```cpp
 JsonDocument user;
@@ -99,13 +100,17 @@ if (!updated) {
 
 Patch documents merge into the existing document and update `updatedAt`.
 
+Update results default to count-only to avoid copying documents into RAM. Pass `FreshReturn::ChangedDocs` or `FreshReturn::AllDocs` when the updated JSON payload is needed.
+
 ## Persistence behavior
 
 Fresh is RAM-first. A successful write result means the operation was accepted into memory. It does not mean the change has already been written to flash.
 
-The sync task persists dirty state to LittleFS later. If power is lost before the next sync, recent accepted changes can be lost.
+The sync task persists dirty state to LittleFS later. It captures a batch under a short database lock, then performs LittleFS writes without holding the global database mutex. If power is lost before the next sync, recent accepted changes can be lost.
 
-Use the configured `syncIntervalMS` for normal background persistence. `forceSyncAsync()` requests an explicit sync through the sync task. `forceSync()` blocks and touches flash in the caller context, so reserve it for advanced checkpoints.
+Use the configured `syncIntervalMS` for normal background persistence. `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts. `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context, so reserve it for advanced checkpoints. Writes accepted after a forced sync captures its batch remain pending for a later sync.
+
+Call `deinit()` when a local or test database instance should shut down explicitly. It waits for the sync task to exit and performs a final forced checkpoint by default. Use `deinit({.sync = false})` only when stopping quickly is more important than persisting dirty RAM state that has not synced yet.
 
 ## Next steps
 

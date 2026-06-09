@@ -83,6 +83,7 @@ void Fresh::runBackupIfRequested() {
 		_backup->progress = 0;
 		_backup->total = 0;
 		_backup->lastProgressEvent = 0;
+		_backup->state = FreshBackupState::Running;
 		_backup->result = FreshResult::success("backup running");
 	}
 
@@ -142,6 +143,9 @@ void Fresh::runBackupIfRequested() {
 		FreshLock lock(_backup->mutex);
 		_backup->running = false;
 		_backup->done = true;
+		_backup->state = result ? FreshBackupState::Finished
+		                        : (result.status == FreshStatus::Cancelled ? FreshBackupState::Cancelled
+		                                                                  : FreshBackupState::Error);
 		_backup->result = result;
 	}
 
@@ -236,6 +240,9 @@ FreshResult Fresh::startBackup() {
 	if (!_initialized) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 	}
+	if (_stopping) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	}
 	{
 		FreshLock backupLock(_backup->mutex);
 		if (_backup->running || _backup->requested) {
@@ -244,6 +251,7 @@ FreshResult Fresh::startBackup() {
 		_backup->requested = true;
 		_backup->done = false;
 		_backup->cancelled = false;
+		_backup->state = FreshBackupState::Queued;
 		_backup->result = FreshResult::success("backup queued");
 	}
 	if (_syncTaskHandle != nullptr) {
@@ -279,9 +287,9 @@ size_t Fresh::readBackup(uint8_t *buffer, size_t length, uint32_t timeoutMS) {
 	return read;
 }
 
-FreshResult Fresh::backupStatus() const {
+FreshBackupStatus Fresh::backupStatus() const {
 	FreshLock lock(_backup->mutex);
-	return _backup->result;
+	return FreshBackupStatus{.state = _backup->state, .result = _backup->result};
 }
 
 FreshResult Fresh::cancelBackup() {
@@ -291,6 +299,7 @@ FreshResult Fresh::cancelBackup() {
 	}
 	_backup->cancelled = true;
 	_backup->requested = false;
+	_backup->state = FreshBackupState::Cancelled;
 	_backup->result = FreshResult::failure(FreshStatus::Cancelled, "backup cancelled");
 	return _backup->result;
 }
@@ -304,8 +313,14 @@ FreshResult Fresh::backupImport(Stream &input) {
 	if (backupActive) {
 		return FreshResult::failure(FreshStatus::Busy, "backup already running");
 	}
-	if (!_initialized) {
-		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	{
+		FreshLock dbLock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 	}
 
 	JsonDocument archive;
@@ -329,8 +344,14 @@ FreshResult Fresh::backupImport(const uint8_t *data, size_t length) {
 	if (backupActive) {
 		return FreshResult::failure(FreshStatus::Busy, "backup already running");
 	}
-	if (!_initialized) {
-		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	{
+		FreshLock dbLock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 	}
 
 	JsonDocument archive;
@@ -342,8 +363,14 @@ FreshResult Fresh::backupImport(const uint8_t *data, size_t length) {
 }
 
 FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
-	if (!_initialized) {
-		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	{
+		FreshLock dbLock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 	}
 	if ((archive["version"] | 0) != 1) {
 		return FreshResult::failure(FreshStatus::CorruptData, "unsupported backup version");
@@ -381,6 +408,11 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 			for (JsonVariantConst entry : modelObject["entries"].as<JsonArrayConst>()) {
 				JsonDocument copy;
 				copy.set(entry);
+				FreshResult sizeResult =
+				    checkPayloadSize(measureMsgPack(copy), _config.maxDocumentBytes, "stream entry");
+				if (!sizeResult) {
+					return sizeResult;
+				}
 				state->streamEntries.push_back(copy);
 			}
 		} else {
@@ -390,6 +422,11 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 			for (JsonVariantConst entry : modelObject["docs"].as<JsonArrayConst>()) {
 				JsonDocument copy;
 				copy.set(entry);
+				FreshResult sizeResult =
+				    checkPayloadSize(measureMsgPack(copy), _config.maxDocumentBytes, "document");
+				if (!sizeResult) {
+					return sizeResult;
+				}
 				const char *id = copy["_id"] | "";
 				if (*id == '\0') {
 					return FreshResult::failure(FreshStatus::CorruptData, "backup document is missing id");
@@ -407,6 +444,12 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 	size_t affectedCount = 0;
 	{
 		FreshLock lock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 		for (const auto &entry : importedModels) {
 			const std::string &name = entry.first;
 			const auto &incoming = entry.second;
@@ -428,6 +471,7 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 				target->bytesSinceSnapshot = 0;
 				target->dirty = true;
 				target->snapshotRequired = true;
+				target->storageEpoch++;
 			}
 			affectedCount++;
 		}
@@ -442,10 +486,12 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 				state->dirty = true;
 				state->snapshotRequired = false;
 				state->pending.clear();
+				state->storageEpoch++;
 				affectedCount++;
 			}
 		}
 		_manifestDirty = true;
+		_manifestEpoch++;
 	}
 
 	if (_syncTaskHandle != nullptr) {

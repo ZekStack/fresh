@@ -66,11 +66,12 @@ void setup() {
         return;
     }
 
-    users = db.createModel("User");
-    if (!users) {
-        Serial.println("Failed to open User model");
+    FreshModelResult usersResult = db.createModel("User");
+    if (!usersResult) {
+        Serial.println(usersResult.message.c_str());
         return;
     }
+    users = usersResult.model;
 
     JsonDocument user;
     user["name"] = "Panna";
@@ -104,9 +105,32 @@ void loop() {
 > Fresh accepts normal public writes into RAM first. A successful `create`, `update`, `delete`, or `append` result means the change was accepted in memory, not necessarily persisted to flash yet.
 
 * Flash persistence happens later in the sync task. Power loss before sync can lose recently accepted changes.
-* `forceSyncAsync()` requests a sync checkpoint through the sync task.
-* `forceSync()` is an advanced blocking call and touches flash in the caller context.
-* The current storage and backup formats use ArduinoJson MessagePack and are not stable compatibility contracts yet.
+* Sync captures dirty RAM state under a short database lock, then performs LittleFS writes without holding the global database mutex.
+* `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts.
+* `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context.
+* `deinit()` waits for the sync task to exit before owned state is destroyed. By default it performs a final forced checkpoint; pass `{.sync = false}` to stop without final persistence.
+* The destructor uses a bounded final `deinit({.sync = true, .timeoutMS = 2000})`, but automatic destructor cleanup is best-effort only. If shutdown times out, the destructor cannot report the failure. Production code that needs deterministic shutdown or guaranteed final persistence should call `FreshResult result = db.deinit();` manually and check the result before the object is destroyed.
+* `diagnostics()` reports model load recovery after `init()`, including corrupt snapshots or recovered journals.
+* `create()` intentionally mutates the input `JsonDocument` by adding `_id`, `createdAt`, and `updatedAt`.
+* After `startBackup()`, keep calling `readBackup()` until backup finishes or call `cancelBackup()`. An undrained backup can occupy the sync task and delay normal persistence.
+* `backupStatus()` returns `FreshBackupStatus`: use `state` as the stable `FreshBackupState` lifecycle signal and `result` for detailed success/failure diagnostics.
+* Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
+* Fresh enforces configurable document, journal, snapshot, and LittleFS reserve limits. Oversized payloads return `FreshStatus::SizeLimitExceeded`; sync preflight space failures return `FreshStatus::StorageFull`.
+* Callbacks are notification hooks. Do not call `deinit()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
+* The current storage and backup formats use ArduinoJson MessagePack. Manifest and snapshot files use two durable slot files with checksummed binary headers. Formats are not stable compatibility contracts yet, and Fresh does not migrate older single-file `manifest.msgpack` / `snapshot.msgpack` storage into the durable-slot format.
+
+## When not to use Fresh
+
+Fresh is not intended for large datasets, high-frequency telemetry, SQL-like querying, multi-device concurrency, or data that must be flash-durable immediately after every write.
+
+## Persistence guarantees
+
+| Operation | RAM updated | Flash updated before return |
+| --- | --- | --- |
+| `create()` / `update()` / `delete()` / `append()` | yes | no |
+| `forceSyncAsync()` | yes | no |
+| `forceSync()` | yes | yes, if successful |
+| `deinit({ .sync = true })` | yes | yes, if successful |
 
 ## Examples
 
@@ -121,6 +145,16 @@ The repository includes topic-focused Arduino sketches in the `examples/` folder
 | `ValidatorsAndCallbacks` | Bool/result validators, `std::bind`, event/sync callbacks, and custom time. |
 | `BackupStream` | Backup callbacks, `startBackup`, chunked `readBackup`, status checks, and `backupImport`. |
 | `ModelManagement` | Create, rename, drop, drop selected, and drop all models. |
+| `SelfTest` | Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior. It uses `/fresh_selftest`, `/fresh_selftest_src`, and `/fresh_selftest_dst`, touches internal storage files, and should only be run on a test device or test partition. |
+
+`SelfTest` is compiled by CI through the examples build loop, but it is not executed in CI. Run it manually on ESP32 hardware. A successful run ends like this:
+
+```txt
+Fresh SelfTest starting
+[PASS] create -> forceSync -> reload
+...
+SelfTest complete: 13 passed, 0 failed
+```
 
 Start with:
 
@@ -146,15 +180,21 @@ Detailed documentation is available in the `docs/` folder.
 Fresh db;
 FreshResult initResult = db.init("/fresh_app");
 
-FreshModel users = db.createModel("User");
+FreshModelResult usersResult = db.createModel("User");
+FreshModel users = usersResult.model;
 FreshResult created = users.create(userDoc);
 FreshResult found = users.findById(id);
 FreshResult updated = users.updateById(id, patchDoc);
 FreshResult removed = users.deleteById(id);
 
-FreshModel logs = db.createModel("Log", FreshModelType::Stream);
+FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
+FreshModel logs = logsResult.model;
 FreshResult appended = logs.append(logDoc);
-FreshResult entries = logs.retrieve();
+
+FreshStreamRetrieveOptions options;
+options.reverse = true;
+options.limit = 50;
+FreshResult entries = logs.retrieve(options);
 ```
 
 For the full API, see [`docs/api.md`](docs/api.md).
@@ -181,6 +221,10 @@ config.syncIntervalMS = 5000;
 config.syncTaskStackSize = 8192;
 config.snapshotRecordThreshold = 128;
 config.backupBufferSize = 8 * 1024;
+config.minFreeBytes = 4096;
+config.maxDocumentBytes = 16 * 1024;
+config.maxJournalRecordBytes = 32 * 1024;
+config.maxSnapshotBytes = 256 * 1024;
 
 FreshResult result = db.init("/fresh_app", config);
 ```
@@ -220,7 +264,7 @@ fresh/
 
 Fresh is currently early-stage software at `0.0.1`.
 
-The public API, storage format, and backup format may still change before a stable release. Test it on your target ESP32 board before using it in production.
+The public API, storage format, and backup format may still change before a stable release. Fresh does not currently migrate older single-file `manifest.msgpack` / `snapshot.msgpack` storage into the durable-slot format. Data written by early versions may require export/import, manual migration, or a storage reset after format changes. Test it on your target ESP32 board before using it in production.
 
 ## License
 
