@@ -113,6 +113,7 @@ void loop() {
 * `diagnostics()` reports model load recovery after `init()`, including corrupt snapshots or recovered journals.
 * `create()` intentionally mutates the input `JsonDocument` by adding `_id`, `createdAt`, and `updatedAt`.
 * After `startBackup()`, keep calling `readBackup()` until backup finishes or call `cancelBackup()`. An undrained backup can occupy the sync task and delay normal persistence.
+* `backupStatus()` returns `FreshBackupStatus`: use `state` as the stable `FreshBackupState` lifecycle signal and `result` for detailed success/failure diagnostics.
 * Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
 * Callbacks are notification hooks. Do not call `deinit()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
 * The current storage and backup formats use ArduinoJson MessagePack and are not stable compatibility contracts yet.

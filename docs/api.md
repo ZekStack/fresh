@@ -91,6 +91,7 @@ String helper methods:
 | Method | Purpose |
 | --- | --- |
 | `eventToString(type)` | Convert `FreshEventType` to text. |
+| `backupStateToString(state)` | Convert `FreshBackupState` to text. |
 | `backupErrorToString(error)` | Convert `FreshBackupError` to text. |
 | `loadStatusToString(status)` | Convert `FreshLoadStatus` to text. |
 | `statusToString(status)` | Convert `FreshStatus` to text. |
@@ -228,7 +229,7 @@ Callbacks are notification hooks. Do not call `deinit()`, `forceSync()`, `forceS
 Backup generation runs through the sync task and is read in chunks.
 
 > [!IMPORTANT]
-> After `startBackup()`, repeatedly call `readBackup()` until `backupStatus()` reports completion/error or your backup callbacks fire. If the backup output is not drained or cancelled, the sync task can remain occupied and normal persistence may stop progressing. Use `cancelBackup()` if the consumer stops reading.
+> After `startBackup()`, repeatedly call `readBackup()` until `backupStatus().state` reports `FreshBackupState::Finished`, `FreshBackupState::Cancelled`, or `FreshBackupState::Error`, or until your backup callbacks fire. If the backup output is not drained or cancelled, the sync task can remain occupied and normal persistence may stop progressing. Use `cancelBackup()` if the consumer stops reading.
 
 ```cpp
 FreshResult started = db.startBackup();
@@ -238,6 +239,10 @@ if (!started) {
 
 uint8_t buffer[256];
 size_t read = db.readBackup(buffer, sizeof(buffer), 50);
+FreshBackupStatus status = db.backupStatus();
+if (status.state == FreshBackupState::Finished) {
+    Serial.println(status.result.message.c_str());
+}
 ```
 
 Backup methods:
@@ -246,10 +251,14 @@ Backup methods:
 | --- | --- |
 | `startBackup()` | Request backup generation. |
 | `readBackup(buffer, length, timeoutMS)` | Read generated backup bytes. |
-| `backupStatus()` | Inspect backup state. |
+| `backupStatus()` | Return `FreshBackupStatus` with typed lifecycle state and detailed result. |
 | `cancelBackup()` | Cancel a running backup. |
 | `backupImport(Stream&)` | Import backup data from an Arduino `Stream`. |
 | `backupImport(data, length)` | Import backup data from memory. |
+
+`FreshBackupStatus.state` is the stable lifecycle signal. `FreshBackupStatus.result` is the detailed success/failure result. `FreshBackupStatus::operator bool()` reflects only `result`, not lifecycle state.
+
+`FreshBackupState` values are `NotRunning`, `Queued`, `Running`, `Finished`, `Cancelled`, and `Error`.
 
 `FreshBackupInfo` includes `progress`, `total`, `size`, `estimatedSize`, `error`, and `result`.
 

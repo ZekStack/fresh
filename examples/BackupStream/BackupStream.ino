@@ -95,9 +95,11 @@ void loop() {
 		restoreDone = true;
 	}
 
-	FreshResult status = db.backupStatus();
-	if (status.status != FreshStatus::Ok && status.status != FreshStatus::BackupNotRunning) {
-		Serial.println(status.message.c_str());
+	FreshBackupStatus status = db.backupStatus();
+	if (status.state == FreshBackupState::Finished) {
+		backupFinished = true;
+	} else if (status.state == FreshBackupState::Cancelled || status.state == FreshBackupState::Error) {
+		Serial.println(status.result.message.c_str());
 		backupFinished = true;
 	}
 }

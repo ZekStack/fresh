@@ -88,11 +88,11 @@ Demonstrates chunked backup and restore:
 * backup start/progress/end/error callbacks
 * `startBackup()`
 * repeated `readBackup(...)`
-* `backupStatus()`
+* `backupStatus()` with `FreshBackupState`
 * `backupImport(data, length)`
 * restore into another `Fresh` instance
 
-After `startBackup()`, keep reading chunks until backup completion/error, or call `cancelBackup()` if the consumer stops. An undrained backup can occupy the sync task and delay normal persistence.
+After `startBackup()`, keep reading chunks until `backupStatus().state` is `FreshBackupState::Finished`, `FreshBackupState::Cancelled`, or `FreshBackupState::Error`, or call `cancelBackup()` if the consumer stops. An undrained backup can occupy the sync task and delay normal persistence.
 
 Use this when building backup download, upload, or migration flows.
 

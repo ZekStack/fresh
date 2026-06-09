@@ -26,7 +26,7 @@ FreshResult FreshResult::failure(FreshStatus status, const char *message, size_t
 Fresh::Fresh()
     : _mutex(std::make_unique<FreshMutex>()),
       _syncMutex(std::make_unique<FreshMutex>()),
-      _backup(std::make_unique<FreshBackupState>()) {
+      _backup(std::make_unique<FreshBackupRuntimeState>()) {
 	_syncTaskExited = xSemaphoreCreateBinary();
 }
 
@@ -133,6 +133,7 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		_backup->requested = false;
 		_backup->cancelled = true;
 		if (!_backup->running) {
+			_backup->state = FreshBackupState::Cancelled;
 			_backup->result = FreshResult::failure(FreshStatus::Cancelled, "backup cancelled");
 		}
 	}
@@ -205,6 +206,7 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		_backup->running = false;
 		_backup->done = false;
 		_backup->cancelled = false;
+		_backup->state = FreshBackupState::NotRunning;
 		_backup->result = FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
 	}
 
@@ -383,6 +385,24 @@ const char *Fresh::backupErrorToString(FreshBackupError error) const {
 		return "file system error";
 	case FreshBackupError::OutOfMemory:
 		return "out of memory";
+	}
+	return "unknown";
+}
+
+const char *Fresh::backupStateToString(FreshBackupState state) const {
+	switch (state) {
+	case FreshBackupState::NotRunning:
+		return "not running";
+	case FreshBackupState::Queued:
+		return "queued";
+	case FreshBackupState::Running:
+		return "running";
+	case FreshBackupState::Finished:
+		return "finished";
+	case FreshBackupState::Cancelled:
+		return "cancelled";
+	case FreshBackupState::Error:
+		return "error";
 	}
 	return "unknown";
 }

@@ -47,7 +47,7 @@ struct FreshModel::State {
 	uint32_t storageEpoch = 0;
 };
 
-struct FreshBackupState {
+struct FreshBackupRuntimeState {
 	FreshByteVector buffer;
 	size_t head = 0;
 	size_t tail = 0;
@@ -59,6 +59,7 @@ struct FreshBackupState {
 	bool running = false;
 	bool done = false;
 	bool cancelled = false;
+	FreshBackupState state = FreshBackupState::NotRunning;
 	FreshResult result = FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
 	FreshMutex mutex;
 };

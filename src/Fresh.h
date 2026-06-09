@@ -138,6 +138,24 @@ enum class FreshBackupError : uint8_t {
 	OutOfMemory,
 };
 
+enum class FreshBackupState : uint8_t {
+	NotRunning,
+	Queued,
+	Running,
+	Finished,
+	Cancelled,
+	Error,
+};
+
+struct FreshBackupStatus {
+	FreshBackupState state = FreshBackupState::NotRunning;
+	FreshResult result = FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
+
+	explicit operator bool() const {
+		return result;
+	}
+};
+
 struct FreshBackupInfo {
 	size_t progress = 0;
 	size_t total = 0;
@@ -175,7 +193,7 @@ struct FreshStreamRetrieveOptions {
 class Fresh;
 class FreshModel;
 class FreshBackupPrint;
-struct FreshBackupState;
+struct FreshBackupRuntimeState;
 struct FreshMutex;
 struct FreshPendingRecord;
 
@@ -294,7 +312,7 @@ class Fresh {
 
 	FreshResult startBackup();
 	size_t readBackup(uint8_t *buffer, size_t length, uint32_t timeoutMS = 0);
-	FreshResult backupStatus() const;
+	FreshBackupStatus backupStatus() const;
 	FreshResult cancelBackup();
 	FreshResult backupImport(Stream &input);
 	FreshResult backupImport(const uint8_t *data, size_t length);
@@ -308,6 +326,7 @@ class Fresh {
 	void onBackupError(FreshBackupCallback callback);
 
 	const char *eventToString(FreshEventType type) const;
+	const char *backupStateToString(FreshBackupState state) const;
 	const char *backupErrorToString(FreshBackupError error) const;
 	const char *loadStatusToString(FreshLoadStatus status) const;
 	const char *statusToString(FreshStatus status) const;
@@ -368,5 +387,5 @@ class Fresh {
 	FreshBackupCallback _onBackupProgress;
 	FreshBackupCallback _onBackupEnd;
 	FreshBackupCallback _onBackupError;
-	mutable std::unique_ptr<FreshBackupState> _backup;
+	mutable std::unique_ptr<FreshBackupRuntimeState> _backup;
 };
