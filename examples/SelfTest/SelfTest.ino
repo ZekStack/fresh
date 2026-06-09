@@ -172,6 +172,9 @@ bool corruptFinalJournalOpByte(const char *modelName) {
 
 bool corruptSnapshotSlot(const char *modelName) {
 	const std::string path = joinPath(joinPath(TestPath, modelName).c_str(), "snapshot.a.msgpack");
+	if (!LittleFS.exists(path.c_str())) {
+		return false;
+	}
 	File output = LittleFS.open(path.c_str(), "w");
 	if (!output) {
 		return false;
@@ -184,6 +187,9 @@ bool corruptSnapshotSlot(const char *modelName) {
 
 bool corruptManifestSlot() {
 	const std::string path = joinPath(TestPath, "manifest.a.msgpack");
+	if (!LittleFS.exists(path.c_str())) {
+		return false;
+	}
 	File output = LittleFS.open(path.c_str(), "w");
 	if (!output) {
 		return false;
@@ -394,14 +400,11 @@ bool testCorruptFinalJournalOp() {
 	return ok;
 }
 
-bool testCorruptSnapshotDiagnostics() {
+bool testSnapshotNewerSlotRecovery() {
 	resetTestPath(TestPath);
 
-	FreshConfig config;
-	config.syncIntervalMS = 50;
-	config.snapshotRecordThreshold = 1000;
 	Fresh db;
-	if (!assertResult(db.init(TestPath, config), "init")) {
+	if (!assertResult(db.init(TestPath), "init")) {
 		return false;
 	}
 	FreshModelResult usersResult = db.createModel("User");
@@ -409,43 +412,49 @@ bool testCorruptSnapshotDiagnostics() {
 		return false;
 	}
 
-	JsonDocument base;
-	base["_id"] = "snapshot-base";
-	base["value"] = 1;
-	if (!assertResult(usersResult.model.create(base), "create base user")) {
+	JsonDocument oldDoc;
+	oldDoc["_id"] = "snapshot-old";
+	oldDoc["value"] = 1;
+	if (!assertResult(usersResult.model.create(oldDoc), "create old snapshot user")) {
 		return false;
 	}
-	if (!assertResult(db.forceSync(), "force snapshot")) {
+	if (!assertResult(db.forceSync(), "force snapshot generation 1")) {
 		return false;
 	}
 
-	JsonDocument extra;
-	extra["_id"] = "journal-after-snapshot";
-	extra["value"] = 2;
-	if (!assertResult(usersResult.model.create(extra), "create post-snapshot user")) {
+	JsonDocument newDoc;
+	newDoc["_id"] = "snapshot-new";
+	newDoc["value"] = 2;
+	if (!assertResult(usersResult.model.create(newDoc), "create new snapshot user")) {
 		return false;
 	}
 	const std::string journalPath = joinPath(joinPath(TestPath, "User").c_str(), "journal.log");
-	if (!assertTrue(waitForFile(journalPath.c_str()), "post-snapshot journal was not written")) {
+	if (!assertResult(db.forceSync(), "force snapshot generation 2")) {
 		return false;
 	}
-	delay(100);
-	if (!assertTrue(corruptSnapshotSlot("User"), "failed to corrupt snapshot slot")) {
+	if (!assertTrue(!LittleFS.exists(journalPath.c_str()), "journal remained after second snapshot")) {
 		return false;
 	}
 	db.deinit(FreshDeinitOptions{.sync = false});
 
+	if (!assertTrue(corruptSnapshotSlot("User"), "failed to corrupt newer snapshot slot")) {
+		return false;
+	}
+
 	Fresh loaded;
-	FreshResult initResult = loaded.init(TestPath);
+	if (!assertResult(loaded.init(TestPath), "reload")) {
+		return false;
+	}
 	const FreshDiagnostics diagnostics = loaded.diagnostics();
-	const bool controlled = initResult || initResult.status == FreshStatus::CorruptData;
-	const bool ok = assertTrue(controlled, "reload did not fail in a controlled way") &&
+	FreshResult oldFound = loaded.model("User").findById("snapshot-old");
+	FreshResult newFound = loaded.model("User").findById("snapshot-new");
+	const bool ok = assertResult(oldFound, "old snapshot not recovered") &&
+	                assertTrue(!newFound, "corrupt newer snapshot unexpectedly loaded") &&
 	                assertTrue(
-	                    hasDegradedLoad(diagnostics, FreshLoadStatus::LoadedWithCorruptSnapshot) ||
-	                        diagnostics.degradedModelCount > 0,
-	                    "corrupt snapshot diagnostic missing"
+	                    hasDegradedLoad(diagnostics, FreshLoadStatus::LoadedWithCorruptSnapshot),
+	                    "recovered snapshot diagnostic missing"
 	                );
-	loaded.deinit(FreshDeinitOptions{.sync = false});
+	loaded.deinit();
 	return ok;
 }
 
@@ -587,7 +596,7 @@ bool testEmptyDatabaseMissingManifestSlots() {
 	return ok;
 }
 
-bool testManifestSlotRecovery() {
+bool testManifestNewerSlotRecovery() {
 	resetTestPath(TestPath);
 
 	Fresh db;
@@ -600,16 +609,23 @@ bool testManifestSlotRecovery() {
 		return false;
 	}
 	JsonDocument user;
-	user["_id"] = "manifest-user";
+	user["_id"] = "some-user";
 	user["name"] = "Panna";
 	if (!assertResult(usersResult.model.create(user), "create user") ||
-	    !assertResult(db.forceSync(), "force sync")) {
+	    !assertResult(db.forceSync(), "force sync generation 1")) {
 		db.deinit(FreshDeinitOptions{.sync = false});
 		return false;
 	}
-	db.deinit();
 
-	if (!assertTrue(corruptManifestSlot(), "failed to corrupt manifest slot")) {
+	FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
+	if (!assertModelResult(logsResult, "create generation 2 model") ||
+	    !assertResult(db.forceSync(), "force sync generation 2")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+	db.deinit(FreshDeinitOptions{.sync = false});
+
+	if (!assertTrue(corruptManifestSlot(), "failed to corrupt newer manifest slot")) {
 		return false;
 	}
 
@@ -617,8 +633,8 @@ bool testManifestSlotRecovery() {
 	if (!assertResult(loaded.init(TestPath), "reload")) {
 		return false;
 	}
-	FreshResult found = loaded.model("User").findById("manifest-user");
-	const bool ok = assertResult(found, "find after manifest slot recovery");
+	FreshResult found = loaded.model("User").findById("some-user");
+	const bool ok = assertResult(found, "find after older manifest slot recovery");
 	loaded.deinit();
 	return ok;
 }
@@ -764,12 +780,12 @@ void setup() {
 	runTest("delete -> forceSync -> reload", testDeleteReload);
 	runTest("stream append -> snapshot threshold -> reload", testStreamSnapshotReload);
 	runTest("corrupt final journal op -> recovered reload", testCorruptFinalJournalOp);
-	runTest("corrupt snapshot -> diagnostics", testCorruptSnapshotDiagnostics);
+	runTest("snapshot newer slot corrupt -> older slot recovery", testSnapshotNewerSlotRecovery);
 	runTest("size limits reject oversized writes", testSizeLimits);
 	runTest("backup import size limit", testBackupImportSizeLimit);
 	runTest("storage full preflight", testStorageFullPreflight);
 	runTest("empty database missing manifest slots", testEmptyDatabaseMissingManifestSlots);
-	runTest("manifest slot recovery", testManifestSlotRecovery);
+	runTest("manifest newer slot corrupt -> older slot recovery", testManifestNewerSlotRecovery);
 	runTest("backup export -> import -> model equality", testBackupExportImport);
 	runTest("deinit while backup is running", testDeinitDuringBackup);
 
