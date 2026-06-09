@@ -31,6 +31,8 @@ enum class FreshStatus : uint8_t {
 	OutOfMemory,
 	UnsupportedOperation,
 	CorruptData,
+	StorageFull,
+	SizeLimitExceeded,
 	Busy,
 	BackupNotRunning,
 	Cancelled,
@@ -88,6 +90,10 @@ struct FreshConfig {
 	uint32_t snapshotRecordThreshold = 128;
 	size_t snapshotBytesThreshold = 32 * 1024;
 	size_t backupBufferSize = 8 * 1024;
+	size_t minFreeBytes = 4096;
+	size_t maxDocumentBytes = 16 * 1024;
+	size_t maxJournalRecordBytes = 32 * 1024;
+	size_t maxSnapshotBytes = 256 * 1024;
 };
 
 struct FreshDeinitOptions {
@@ -345,6 +351,8 @@ class Fresh {
 	std::string modelPath(const std::string &name) const;
 	std::string modelFile(const std::string &name, const char *fileName) const;
 	FreshResult ensureDir(const std::string &path);
+	FreshResult checkFreeSpace(size_t requiredBytes) const;
+	FreshResult checkPayloadSize(size_t payloadBytes, size_t limit, const char *label) const;
 	FreshResult readManifest();
 	FreshResult writeManifest(const JsonDocument &manifest);
 	FreshResult applyRecord(const std::shared_ptr<FreshModel::State> &state, const FreshPendingRecord &record);

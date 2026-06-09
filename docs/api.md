@@ -23,7 +23,7 @@ if (!result) {
 | `doc` | Optional returned `JsonDocument`. |
 | `affectedCount` | Number of affected documents, records, or models. |
 
-`FreshStatus` values include `Ok`, `NotInitialized`, `AlreadyInitialized`, `InvalidArgument`, `FileSystemError`, `ModelExists`, `ModelNotFound`, `DocumentNotFound`, `InvalidModel`, `ValidationFailed`, `OutOfMemory`, `UnsupportedOperation`, `CorruptData`, `Busy`, `BackupNotRunning`, `Cancelled`, `Timeout`, and `InternalError`.
+`FreshStatus` values include `Ok`, `NotInitialized`, `AlreadyInitialized`, `InvalidArgument`, `FileSystemError`, `ModelExists`, `ModelNotFound`, `DocumentNotFound`, `InvalidModel`, `ValidationFailed`, `OutOfMemory`, `UnsupportedOperation`, `CorruptData`, `StorageFull`, `SizeLimitExceeded`, `Busy`, `BackupNotRunning`, `Cancelled`, `Timeout`, and `InternalError`.
 
 `FreshModelResult` is returned by `createModel(...)`.
 
@@ -48,6 +48,8 @@ FreshResult result = db.init("/fresh_app", config);
 ```
 
 See [`configuration.md`](configuration.md) for every option and default.
+
+Storage limits can return `StorageFull` when sync preflight cannot preserve the configured LittleFS reserve, or `SizeLimitExceeded` when a document, stream entry, journal record, or snapshot exceeds configured serialized-size limits.
 
 ## Fresh
 

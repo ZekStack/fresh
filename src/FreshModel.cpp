@@ -90,6 +90,12 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 		doc["createdAt"] = time;
 		doc["updatedAt"] = time;
 
+		FreshResult sizeResult =
+		    _owner->checkPayloadSize(measureMsgPack(doc), _owner->_config.maxDocumentBytes, "document");
+		if (!sizeResult) {
+			return sizeResult;
+		}
+
 		if (_state->validator) {
 			FreshValidationResult validation = _state->validator(doc);
 			if (!validation) {
@@ -143,6 +149,11 @@ FreshResult FreshModel::append(JsonDocument &doc) {
 		}
 		JsonDocument stored;
 		FreshCopyJson(stored, doc);
+		FreshResult sizeResult =
+		    _owner->checkPayloadSize(measureMsgPack(stored), _owner->_config.maxDocumentBytes, "stream entry");
+		if (!sizeResult) {
+			return sizeResult;
+		}
 		_state->streamEntries.push_back(stored);
 
 		FreshPendingRecord record;
@@ -292,6 +303,11 @@ FreshResult FreshModel::update(
 	FreshResult result = FreshResult::success("documents updated");
 	bool changedDocsCreated = false;
 	{
+		struct FreshUpdateCandidate {
+			std::string id;
+			JsonDocument doc;
+		};
+		std::vector<FreshUpdateCandidate> candidates;
 		FreshLock lock(*_owner->_mutex);
 		if (!_owner->_initialized) {
 			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
@@ -307,6 +323,11 @@ FreshResult FreshModel::update(
 			FreshCopyJson(candidate, entry.second);
 			FreshMergePatch(candidate, patch);
 			candidate["updatedAt"] = _owner->now();
+			FreshResult sizeResult =
+			    _owner->checkPayloadSize(measureMsgPack(candidate), _owner->_config.maxDocumentBytes, "document");
+			if (!sizeResult) {
+				return sizeResult;
+			}
 			if (_state->validator) {
 				FreshValidationResult validation = _state->validator(candidate);
 				if (!validation) {
@@ -317,13 +338,20 @@ FreshResult FreshModel::update(
 					);
 				}
 			}
+			candidates.push_back(FreshUpdateCandidate{.id = entry.first, .doc = std::move(candidate)});
+		}
 
-			FreshCopyJson(entry.second, candidate);
+		for (const FreshUpdateCandidate &candidate : candidates) {
+			auto found = _state->docs.find(candidate.id);
+			if (found == _state->docs.end()) {
+				continue;
+			}
+			FreshCopyJson(found->second, candidate.doc);
 			FreshPendingRecord record;
 			record.op = FreshJournalOp::Update;
 			record.sequence = _owner->_nextPendingSequence++;
-			record.id = entry.first;
-			FreshCopyJson(record.doc, candidate);
+			record.id = candidate.id;
+			FreshCopyJson(record.doc, candidate.doc);
 			_state->pending.push_back(record);
 			_state->dirty = true;
 			result.affectedCount++;
@@ -331,12 +359,12 @@ FreshResult FreshModel::update(
 				JsonArray changedDocs =
 				    changedDocsCreated ? result.doc.as<JsonArray>() : result.doc.to<JsonArray>();
 				changedDocsCreated = true;
-				changedDocs.add(candidate.as<JsonVariantConst>());
+				changedDocs.add(candidate.doc.as<JsonVariantConst>());
 			}
 			events.push_back({
 			    .type = FreshEventType::DocumentUpdated,
 			    .modelName = _state->name,
-			    .documentId = entry.first,
+			    .documentId = candidate.id,
 			    .affectedCount = 1,
 			    .result = FreshResult::success("document updated", 1)
 			});

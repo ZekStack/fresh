@@ -32,6 +32,14 @@ Background sync is dirty-only, interval-based, and threshold-compacted. `storage
 
 Wait longer than `syncIntervalMS`, then check storage again.
 
+## Writes fail with storage limits
+
+`FreshStatus::SizeLimitExceeded` means the serialized document, stream entry, journal payload, or snapshot exceeded the configured limit.
+
+`FreshStatus::StorageFull` means Fresh could not preflight the next sync write while preserving `FreshConfig::minFreeBytes`.
+
+Use `storageInfo()` to inspect LittleFS space. If larger payloads are intentional, raise `maxDocumentBytes`, `maxJournalRecordBytes`, or `maxSnapshotBytes` only when the device has enough RAM and LittleFS capacity.
+
 ## Model creation fails
 
 Check the returned `FreshModelResult` message and status.

@@ -115,8 +115,9 @@ void loop() {
 * After `startBackup()`, keep calling `readBackup()` until backup finishes or call `cancelBackup()`. An undrained backup can occupy the sync task and delay normal persistence.
 * `backupStatus()` returns `FreshBackupStatus`: use `state` as the stable `FreshBackupState` lifecycle signal and `result` for detailed success/failure diagnostics.
 * Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
+* Fresh enforces configurable document, journal, snapshot, and LittleFS reserve limits. Oversized payloads return `FreshStatus::SizeLimitExceeded`; sync preflight space failures return `FreshStatus::StorageFull`.
 * Callbacks are notification hooks. Do not call `deinit()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
-* The current storage and backup formats use ArduinoJson MessagePack and are not stable compatibility contracts yet.
+* The current storage and backup formats use ArduinoJson MessagePack. Manifest and snapshot files use two durable slot files with checksummed binary headers. Formats are not stable compatibility contracts yet.
 
 ## When not to use Fresh
 
@@ -152,7 +153,7 @@ The repository includes topic-focused Arduino sketches in the `examples/` folder
 Fresh SelfTest starting
 [PASS] create -> forceSync -> reload
 ...
-SelfTest complete: 8 passed, 0 failed
+SelfTest complete: 13 passed, 0 failed
 ```
 
 Start with:
@@ -220,6 +221,10 @@ config.syncIntervalMS = 5000;
 config.syncTaskStackSize = 8192;
 config.snapshotRecordThreshold = 128;
 config.backupBufferSize = 8 * 1024;
+config.minFreeBytes = 4096;
+config.maxDocumentBytes = 16 * 1024;
+config.maxJournalRecordBytes = 32 * 1024;
+config.maxSnapshotBytes = 256 * 1024;
 
 FreshResult result = db.init("/fresh_app", config);
 ```
