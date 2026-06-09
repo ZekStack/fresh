@@ -50,7 +50,12 @@ void setup() {
 		backupFinished = true;
 	});
 
-	users = db.createModel("BackupUser");
+	FreshModelResult usersResult = db.createModel("BackupUser");
+	if (!usersResult) {
+		Serial.println(usersResult.message.c_str());
+		return;
+	}
+	users = usersResult.model;
 	for (int i = 0; i < 3; ++i) {
 		JsonDocument user;
 		user["name"] = String("user-") + i;
@@ -69,6 +74,8 @@ void loop() {
 		return;
 	}
 
+	// Keep draining the backup stream until completion. If this reader stops without
+	// calling cancelBackup(), the sync task can block on the full backup buffer.
 	uint8_t buffer[256];
 	size_t read = db.readBackup(buffer, sizeof(buffer), 50);
 	if (read > 0) {
@@ -88,9 +95,11 @@ void loop() {
 		restoreDone = true;
 	}
 
-	FreshResult status = db.backupStatus();
-	if (status.status != FreshStatus::Ok && status.status != FreshStatus::BackupNotRunning) {
-		Serial.println(status.message.c_str());
+	FreshBackupStatus status = db.backupStatus();
+	if (status.state == FreshBackupState::Finished) {
+		backupFinished = true;
+	} else if (status.state == FreshBackupState::Cancelled || status.state == FreshBackupState::Error) {
+		Serial.println(status.result.message.c_str());
 		backupFinished = true;
 	}
 }

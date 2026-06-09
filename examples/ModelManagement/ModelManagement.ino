@@ -16,27 +16,27 @@ void setup() {
 		return;
 	}
 
-	FreshModel alpha = db.createModel("AlphaModel");
-	FreshModel beta = db.createModel("BetaModel");
-	FreshModel gamma = db.createModel("GammaModel");
+	FreshModelResult alphaResult = db.createModel("AlphaModel");
+	FreshModelResult betaResult = db.createModel("BetaModel");
+	FreshModelResult gammaResult = db.createModel("GammaModel");
 
 	Serial.printf(
 	    "Alpha opened=%u Beta opened=%u Gamma opened=%u\n",
-	    static_cast<unsigned>(static_cast<bool>(alpha)),
-	    static_cast<unsigned>(static_cast<bool>(beta)),
-	    static_cast<unsigned>(static_cast<bool>(gamma))
+	    static_cast<unsigned>(static_cast<bool>(alphaResult)),
+	    static_cast<unsigned>(static_cast<bool>(betaResult)),
+	    static_cast<unsigned>(static_cast<bool>(gammaResult))
 	);
 
 	printResult("rename AlphaModel", db.renameModel("AlphaModel", "AlphaRenamed"));
 	printResult("drop BetaModel", db.dropModel("BetaModel"));
 	printResult("drop selected", db.dropModels({"GammaModel", "MissingModel"}));
 
-	FreshModel tempA = db.createModel("TempA");
-	FreshModel tempB = db.createModel("TempB");
+	FreshModelResult tempAResult = db.createModel("TempA");
+	FreshModelResult tempBResult = db.createModel("TempB");
 	Serial.printf(
 	    "Temp models opened=%u/%u\n",
-	    static_cast<unsigned>(static_cast<bool>(tempA)),
-	    static_cast<unsigned>(static_cast<bool>(tempB))
+	    static_cast<unsigned>(static_cast<bool>(tempAResult)),
+	    static_cast<unsigned>(static_cast<bool>(tempBResult))
 	);
 
 	printResult("drop all", db.dropAllModels());

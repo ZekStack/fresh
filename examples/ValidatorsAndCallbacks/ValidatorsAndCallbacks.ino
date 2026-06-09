@@ -46,11 +46,12 @@ void setup() {
 		return static_cast<uint64_t>(millis() / 1000);
 	});
 
-	sensors = db.createModel("Sensor");
-	if (!sensors) {
-		Serial.println("Failed to open Sensor model");
+	FreshModelResult sensorsResult = db.createModel("Sensor");
+	if (!sensorsResult) {
+		Serial.println(sensorsResult.message.c_str());
 		return;
 	}
+	sensors = sensorsResult.model;
 
 	sensors.setValidator([](const JsonDocument &doc) {
 		return !doc["type"].isNull();

@@ -5,7 +5,11 @@ FreshModel::FreshModel(Fresh *owner, std::shared_ptr<State> state) : _owner(owne
 }
 
 FreshModel::operator bool() const {
-	return _owner != nullptr && _state != nullptr && !_state->dropped;
+	if (_owner == nullptr || _state == nullptr) {
+		return false;
+	}
+	FreshLock lock(*_owner->_mutex);
+	return lock && _owner->_initialized && !_owner->_stopping && !_state->dropped;
 }
 
 const std::string &FreshModel::name() const {
@@ -22,6 +26,12 @@ FreshResult FreshModel::setValidator(FreshBoolValidator validator) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
 	FreshLock lock(*_owner->_mutex);
+	if (!_owner->_initialized) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	}
+	if (_owner->_stopping) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	}
 	_state->validator = [validator](const JsonDocument &doc) {
 		if (!validator || validator(doc)) {
 			return FreshValidationResult{.result = true, .message = "ok"};
@@ -36,6 +46,12 @@ FreshResult FreshModel::setValidator(FreshResultValidator validator) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
 	FreshLock lock(*_owner->_mutex);
+	if (!_owner->_initialized) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	}
+	if (_owner->_stopping) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	}
 	_state->validator = validator;
 	return FreshResult::success("validator set");
 }
@@ -55,6 +71,12 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 		if (!lock) {
 			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 		}
+		if (!_owner->_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_owner->_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 
 		std::string id = doc["_id"] | "";
 		if (id.empty() || _state->docs.find(id) != _state->docs.end()) {
@@ -67,6 +89,12 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 		uint64_t time = _owner->now();
 		doc["createdAt"] = time;
 		doc["updatedAt"] = time;
+
+		FreshResult sizeResult =
+		    _owner->checkPayloadSize(measureMsgPack(doc), _owner->_config.maxDocumentBytes, "document");
+		if (!sizeResult) {
+			return sizeResult;
+		}
 
 		if (_state->validator) {
 			FreshValidationResult validation = _state->validator(doc);
@@ -81,6 +109,7 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 
 		FreshPendingRecord record;
 		record.op = FreshJournalOp::Create;
+		record.sequence = _owner->_nextPendingSequence++;
 		record.id = id;
 		FreshCopyJson(record.doc, stored);
 		_state->pending.push_back(record);
@@ -112,12 +141,24 @@ FreshResult FreshModel::append(JsonDocument &doc) {
 	FreshResult result;
 	{
 		FreshLock lock(*_owner->_mutex);
+		if (!_owner->_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_owner->_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 		JsonDocument stored;
 		FreshCopyJson(stored, doc);
+		FreshResult sizeResult =
+		    _owner->checkPayloadSize(measureMsgPack(stored), _owner->_config.maxDocumentBytes, "stream entry");
+		if (!sizeResult) {
+			return sizeResult;
+		}
 		_state->streamEntries.push_back(stored);
 
 		FreshPendingRecord record;
 		record.op = FreshJournalOp::Append;
+		record.sequence = _owner->_nextPendingSequence++;
 		FreshCopyJson(record.doc, stored);
 		_state->pending.push_back(record);
 		_state->dirty = true;
@@ -146,9 +187,15 @@ FreshResult FreshModel::findById(const std::string &id) const {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
 	FreshLock lock(*_owner->_mutex);
+	if (!_owner->_initialized) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	}
+	if (_owner->_stopping) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	}
 	auto found = _state->docs.find(id);
 	if (found == _state->docs.end()) {
-		return FreshResult::failure(FreshStatus::ModelNotFound, "document not found");
+		return FreshResult::failure(FreshStatus::DocumentNotFound, "document not found");
 	}
 	FreshResult result = FreshResult::success("document found", 1);
 	FreshCopyJson(result.doc, found->second);
@@ -167,6 +214,12 @@ FreshResult FreshModel::find(FreshPredicate predicate, bool stopAtFirst) const {
 	}
 
 	FreshLock lock(*_owner->_mutex);
+	if (!_owner->_initialized) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	}
+	if (_owner->_stopping) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	}
 	FreshResult result = FreshResult::success("documents found");
 	JsonArray array = result.doc.to<JsonArray>();
 	for (const auto &entry : _state->docs) {
@@ -185,24 +238,36 @@ FreshResult FreshModel::find(FreshPredicate predicate, bool stopAtFirst) const {
 	return result;
 }
 
-FreshResult FreshModel::updateById(const char *id, const JsonDocument &patch) {
+FreshResult FreshModel::updateById(const char *id, const JsonDocument &patch, FreshReturn returnMode) {
 	if (id == nullptr) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "id is required");
 	}
-	return updateById(std::string(id), patch);
+	return updateById(std::string(id), patch, returnMode);
 }
 
-FreshResult FreshModel::updateById(const std::string &id, const JsonDocument &patch) {
+FreshResult FreshModel::updateById(
+    const std::string &id,
+    const JsonDocument &patch,
+    FreshReturn returnMode
+) {
 	return updateOne(
 	    [id](const JsonDocument &doc) {
 		    const char *docId = doc["_id"] | "";
 		    return id == docId;
 	    },
-	    patch
+	    patch,
+	    returnMode
 	);
 }
 
-FreshResult FreshModel::updateOne(FreshPredicate predicate, const JsonDocument &patch) {
+FreshResult FreshModel::updateOne(
+    FreshPredicate predicate,
+    const JsonDocument &patch,
+    FreshReturn returnMode
+) {
+	if (!predicate) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "predicate is required");
+	}
 	return update(
 	    [predicate, updated = false](const JsonDocument &doc) mutable {
 		    if (updated) {
@@ -214,11 +279,16 @@ FreshResult FreshModel::updateOne(FreshPredicate predicate, const JsonDocument &
 		    updated = true;
 		    return true;
 	    },
-	    patch
+	    patch,
+	    returnMode
 	);
 }
 
-FreshResult FreshModel::update(FreshPredicate predicate, const JsonDocument &patch) {
+FreshResult FreshModel::update(
+    FreshPredicate predicate,
+    const JsonDocument &patch,
+    FreshReturn returnMode
+) {
 	if (!_owner || !_state || _state->dropped) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
@@ -231,8 +301,20 @@ FreshResult FreshModel::update(FreshPredicate predicate, const JsonDocument &pat
 
 	std::vector<FreshEvent> events;
 	FreshResult result = FreshResult::success("documents updated");
+	bool changedDocsCreated = false;
 	{
+		struct FreshUpdateCandidate {
+			std::string id;
+			JsonDocument doc;
+		};
+		std::vector<FreshUpdateCandidate> candidates;
 		FreshLock lock(*_owner->_mutex);
+		if (!_owner->_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_owner->_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 		for (auto &entry : _state->docs) {
 			if (!predicate(entry.second)) {
 				continue;
@@ -241,6 +323,11 @@ FreshResult FreshModel::update(FreshPredicate predicate, const JsonDocument &pat
 			FreshCopyJson(candidate, entry.second);
 			FreshMergePatch(candidate, patch);
 			candidate["updatedAt"] = _owner->now();
+			FreshResult sizeResult =
+			    _owner->checkPayloadSize(measureMsgPack(candidate), _owner->_config.maxDocumentBytes, "document");
+			if (!sizeResult) {
+				return sizeResult;
+			}
 			if (_state->validator) {
 				FreshValidationResult validation = _state->validator(candidate);
 				if (!validation) {
@@ -251,29 +338,43 @@ FreshResult FreshModel::update(FreshPredicate predicate, const JsonDocument &pat
 					);
 				}
 			}
+			candidates.push_back(FreshUpdateCandidate{.id = entry.first, .doc = std::move(candidate)});
+		}
 
-			FreshCopyJson(entry.second, candidate);
+		for (const FreshUpdateCandidate &candidate : candidates) {
+			auto found = _state->docs.find(candidate.id);
+			if (found == _state->docs.end()) {
+				continue;
+			}
+			FreshCopyJson(found->second, candidate.doc);
 			FreshPendingRecord record;
 			record.op = FreshJournalOp::Update;
-			record.id = entry.first;
-			FreshCopyJson(record.doc, candidate);
+			record.sequence = _owner->_nextPendingSequence++;
+			record.id = candidate.id;
+			FreshCopyJson(record.doc, candidate.doc);
 			_state->pending.push_back(record);
 			_state->dirty = true;
 			result.affectedCount++;
+			if (returnMode == FreshReturn::ChangedDocs) {
+				JsonArray changedDocs =
+				    changedDocsCreated ? result.doc.as<JsonArray>() : result.doc.to<JsonArray>();
+				changedDocsCreated = true;
+				changedDocs.add(candidate.doc.as<JsonVariantConst>());
+			}
 			events.push_back({
 			    .type = FreshEventType::DocumentUpdated,
 			    .modelName = _state->name,
-			    .documentId = entry.first,
+			    .documentId = candidate.id,
 			    .affectedCount = 1,
 			    .result = FreshResult::success("document updated", 1)
 			});
 		}
-		if (result.affectedCount > 0) {
+		if (result.affectedCount > 0 && returnMode == FreshReturn::AllDocs) {
 			JsonArray array = result.doc.to<JsonArray>();
 			for (const auto &entry : _state->docs) {
 				array.add(entry.second.as<JsonVariantConst>());
 			}
-		} else {
+		} else if (result.affectedCount == 0) {
 			result.message = "no documents updated";
 		}
 	}
@@ -326,6 +427,12 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 	FreshResult result = FreshResult::success("documents deleted");
 	{
 		FreshLock lock(*_owner->_mutex);
+		if (!_owner->_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_owner->_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 		for (auto it = _state->docs.begin(); it != _state->docs.end();) {
 			if (!predicate(it->second)) {
 				++it;
@@ -336,6 +443,7 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 
 			FreshPendingRecord record;
 			record.op = FreshJournalOp::Delete;
+			record.sequence = _owner->_nextPendingSequence++;
 			record.id = id;
 			_state->pending.push_back(record);
 			_state->dirty = true;
@@ -381,6 +489,12 @@ FreshResult FreshModel::retrieve(
 	}
 
 	FreshLock lock(*_owner->_mutex);
+	if (!_owner->_initialized) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	}
+	if (_owner->_stopping) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	}
 	FreshResult result = FreshResult::success("stream entries found");
 	JsonArray array = result.doc.to<JsonArray>();
 	size_t skipped = 0;
@@ -416,6 +530,12 @@ FreshResult FreshModel::streamTo(Print &out) const {
 		return FreshResult::failure(FreshStatus::UnsupportedOperation, "streamTo is only valid for stream models");
 	}
 	FreshLock lock(*_owner->_mutex);
+	if (!_owner->_initialized) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	}
+	if (_owner->_stopping) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	}
 	size_t count = 0;
 	for (const JsonDocument &entry : _state->streamEntries) {
 		count += serializeMsgPack(entry, out);
@@ -423,7 +543,7 @@ FreshResult FreshModel::streamTo(Print &out) const {
 	return FreshResult::success("stream exported", count);
 }
 
-FreshModel Fresh::createModel(const char *modelName) {
+FreshModelResult Fresh::createModel(const char *modelName) {
 	return createModel(modelName, _config.defaultModelType);
 }
 
@@ -434,30 +554,69 @@ FreshModel Fresh::model(const char *modelName) {
 
 	FreshLock lock(*_mutex);
 	auto found = _models.find(modelName);
-	if (!_initialized || found == _models.end() || found->second->dropped) {
+	if (!_initialized || _stopping || found == _models.end() || found->second->dropped) {
 		return FreshModel();
 	}
 	return FreshModel(this, found->second);
 }
 
-FreshModel Fresh::createModel(const char *modelName, FreshModelType type) {
+FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) {
 	if (!FreshIsValidName(modelName)) {
-		return FreshModel();
+		return {
+		    .result = false,
+		    .status = FreshStatus::InvalidArgument,
+		    .message = "invalid model name"
+		};
 	}
 
 	FreshEvent event;
 	std::shared_ptr<FreshModel::State> state;
 	{
 		FreshLock lock(*_mutex);
+		if (!lock) {
+			return {
+			    .result = false,
+			    .status = FreshStatus::InternalError,
+			    .message = "failed to lock database"
+			};
+		}
 		if (!_initialized) {
-			return FreshModel();
+			return {
+			    .result = false,
+			    .status = FreshStatus::NotInitialized,
+			    .message = "database not initialized"
+			};
+		}
+		if (_stopping) {
+			return {
+			    .result = false,
+			    .status = FreshStatus::Busy,
+			    .message = "database is stopping"
+			};
 		}
 		auto existing = _models.find(modelName);
 		if (existing != _models.end()) {
-			if (existing->second->dropped || existing->second->type != type) {
-				return FreshModel();
+			if (existing->second->dropped) {
+				return {
+				    .result = false,
+				    .status = FreshStatus::InvalidModel,
+				    .message = "model was dropped"
+				};
 			}
-			return FreshModel(this, existing->second);
+			if (existing->second->type != type) {
+				return {
+				    .result = false,
+				    .status = FreshStatus::ModelExists,
+				    .message = "model already exists with different type"
+				};
+			}
+			return {
+			    .result = true,
+			    .status = FreshStatus::Ok,
+			    .message = "model opened",
+			    .model = FreshModel(this, existing->second),
+			    .affectedCount = 1
+			};
 		}
 		state = std::make_shared<FreshModel::State>();
 		state->name = modelName;
@@ -465,6 +624,7 @@ FreshModel Fresh::createModel(const char *modelName, FreshModelType type) {
 		state->dirty = true;
 		_models[state->name] = state;
 		_manifestDirty = true;
+		_manifestEpoch++;
 		event = {
 		    .type = FreshEventType::ModelCreated,
 		    .modelName = state->name,
@@ -472,7 +632,13 @@ FreshModel Fresh::createModel(const char *modelName, FreshModelType type) {
 		};
 	}
 	emitEvent(event);
-	return FreshModel(this, state);
+	return {
+	    .result = true,
+	    .status = FreshStatus::Ok,
+	    .message = "model created",
+	    .model = FreshModel(this, state),
+	    .affectedCount = 1
+	};
 }
 
 FreshResult Fresh::dropModel(const char *modelName) {
@@ -485,12 +651,20 @@ FreshResult Fresh::dropModel(const char *modelName) {
 	{
 		FreshLock lock(*_mutex);
 		auto found = _models.find(modelName);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 		if (found == _models.end()) {
 			return FreshResult::failure(FreshStatus::ModelNotFound, "model not found");
 		}
 		found->second->dropped = true;
 		found->second->dirty = true;
+		found->second->storageEpoch++;
 		_manifestDirty = true;
+		_manifestEpoch++;
 		result = FreshResult::success("model dropped", 1);
 		event = {
 		    .type = FreshEventType::ModelDropped,
@@ -541,6 +715,12 @@ FreshResult Fresh::renameModel(const char *oldName, const char *newName) {
 	FreshResult result;
 	{
 		FreshLock lock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
 		auto found = _models.find(oldName);
 		if (found == _models.end()) {
 			return FreshResult::failure(FreshStatus::ModelNotFound, "model not found");
@@ -553,8 +733,10 @@ FreshResult Fresh::renameModel(const char *oldName, const char *newName) {
 		state->previousName = oldName;
 		state->name = newName;
 		state->dirty = true;
+		state->storageEpoch++;
 		_models[state->name] = state;
 		_manifestDirty = true;
+		_manifestEpoch++;
 		result = FreshResult::success("model renamed", 1);
 		event = {
 		    .type = FreshEventType::ModelRenamed,

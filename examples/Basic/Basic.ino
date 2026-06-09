@@ -16,11 +16,12 @@ void setup() {
 		return;
 	}
 
-	users = db.createModel("User");
-	if (!users) {
-		Serial.println("User model already exists or could not be created");
+	FreshModelResult usersResult = db.createModel("User");
+	if (!usersResult) {
+		Serial.println(usersResult.message.c_str());
 		return;
 	}
+	users = usersResult.model;
 
 	JsonDocument user;
 	user["name"] = "Panna";

@@ -26,6 +26,12 @@ void FreshWriteU32(File &file, uint32_t value) {
 	file.write(static_cast<uint8_t>((value >> 24) & 0xff));
 }
 
+void FreshWriteU64(File &file, uint64_t value) {
+	for (uint8_t shift = 0; shift < 64; shift += 8) {
+		file.write(static_cast<uint8_t>((value >> shift) & 0xff));
+	}
+}
+
 bool FreshReadU16(File &file, uint16_t &value) {
 	if (file.available() < 2) {
 		return false;
@@ -45,6 +51,18 @@ bool FreshReadU32(File &file, uint32_t &value) {
 	uint32_t b2 = file.read();
 	uint32_t b3 = file.read();
 	value = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+	return true;
+}
+
+bool FreshReadU64(File &file, uint64_t &value) {
+	if (file.available() < 8) {
+		return false;
+	}
+	value = 0;
+	for (uint8_t shift = 0; shift < 64; shift += 8) {
+		const uint64_t byte = static_cast<uint8_t>(file.read());
+		value |= byte << shift;
+	}
 	return true;
 }
 
@@ -80,6 +98,25 @@ FreshModelType FreshModelTypeFromString(const char *type) {
 		return FreshModelType::Stream;
 	}
 	return FreshModelType::General;
+}
+
+bool FreshParseJournalOp(uint8_t value, FreshJournalOp &op) {
+	switch (value) {
+	case static_cast<uint8_t>(FreshJournalOp::Create):
+		op = FreshJournalOp::Create;
+		return true;
+	case static_cast<uint8_t>(FreshJournalOp::Update):
+		op = FreshJournalOp::Update;
+		return true;
+	case static_cast<uint8_t>(FreshJournalOp::Delete):
+		op = FreshJournalOp::Delete;
+		return true;
+	case static_cast<uint8_t>(FreshJournalOp::Append):
+		op = FreshJournalOp::Append;
+		return true;
+	default:
+		return false;
+	}
 }
 
 const char *FreshJournalOpToString(FreshJournalOp op) {
