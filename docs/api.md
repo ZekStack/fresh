@@ -84,7 +84,7 @@ db.deinit({.sync = false});
 db.deinit({.sync = true, .timeoutMS = 5000});
 ```
 
-`sync` defaults to `true`. When `sync` is `false`, Fresh stops without a final checkpoint, so dirty RAM state that has not already synced may be lost. The destructor calls `deinit()` with final sync enabled and waits indefinitely for the sync task to exit.
+`sync` defaults to `true`. When `sync` is `false`, Fresh stops without a final checkpoint, so dirty RAM state that has not already synced may be lost. The destructor calls `deinit({.sync = true, .timeoutMS = 2000})` because destructors should not block indefinitely and cannot return failures. Applications that need guaranteed final persistence should call `FreshResult result = db.deinit();` manually and check the result before the object is destroyed.
 
 String helper methods:
 
@@ -220,6 +220,8 @@ Callbacks use `std::function`, so lambdas and `std::bind` both work.
 | `onBackupError(callback)` | Receives backup errors. |
 
 `FreshEventType` values include model lifecycle events, document events, stream append, sync events, and backup events.
+
+Callbacks are notification hooks. Do not call `deinit()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
 
 ## Backup
 

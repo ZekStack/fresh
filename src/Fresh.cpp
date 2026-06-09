@@ -31,7 +31,7 @@ Fresh::Fresh()
 }
 
 Fresh::~Fresh() {
-	deinit(FreshDeinitOptions{.sync = true, .timeoutMS = UINT32_MAX});
+	deinit(FreshDeinitOptions{.sync = true, .timeoutMS = 2000});
 	if (_syncTaskExited != nullptr) {
 		vSemaphoreDelete(_syncTaskExited);
 		_syncTaskExited = nullptr;

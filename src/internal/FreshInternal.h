@@ -72,6 +72,7 @@ std::string FreshJoinPath(const std::string &base, const std::string &name);
 bool FreshIsValidName(const char *name);
 const char *FreshModelTypeToString(FreshModelType type);
 FreshModelType FreshModelTypeFromString(const char *type);
+bool FreshParseJournalOp(uint8_t value, FreshJournalOp &op);
 const char *FreshJournalOpToString(FreshJournalOp op);
 std::string FreshMakeId();
 void FreshCopyJson(JsonDocument &target, const JsonDocument &source);
