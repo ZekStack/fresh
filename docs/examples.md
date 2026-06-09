@@ -110,6 +110,23 @@ Demonstrates model lifecycle helpers:
 
 Use this for setup tools, reset flows, and maintenance screens.
 
+## SelfTest
+
+Path: [`../examples/SelfTest/SelfTest.ino`](../examples/SelfTest/SelfTest.ino)
+
+Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior.
+
+It uses `/fresh_selftest`, `/fresh_selftest_src`, and `/fresh_selftest_dst`, touches internal storage files, and should only be run on a test device or test partition. SelfTest intentionally depends on the current Fresh storage layout and may need updates when the storage format changes.
+
+SelfTest is compiled by CI through the examples build loop, but it is not executed in CI. Run it manually on ESP32 hardware. A successful run ends like this:
+
+```txt
+Fresh SelfTest starting
+[PASS] create -> forceSync -> reload
+...
+SelfTest complete: 8 passed, 0 failed
+```
+
 ## Compiling examples
 
 Compile an example with PlatformIO CI:

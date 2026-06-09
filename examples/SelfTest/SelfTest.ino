@@ -109,6 +109,21 @@ bool hasDegradedLoad(const FreshDiagnostics &diagnostics, FreshLoadStatus status
 	return false;
 }
 
+bool waitForBackupRunning(Fresh &db, uint32_t timeoutMS) {
+	const uint32_t started = millis();
+	while (millis() - started < timeoutMS) {
+		FreshResult status = db.backupStatus();
+		if (status.message == "backup running") {
+			return true;
+		}
+		if (!status && status.status != FreshStatus::Cancelled) {
+			return false;
+		}
+		delay(5);
+	}
+	return false;
+}
+
 bool corruptFinalJournalOpByte(const char *modelName) {
 	const std::string path = joinPath(joinPath(TestPath, modelName).c_str(), "journal.log");
 	File input = LittleFS.open(path.c_str(), "r");
@@ -514,7 +529,11 @@ bool testDeinitDuringBackup() {
 	if (!assertResult(db.startBackup(), "start backup")) {
 		return false;
 	}
-	delay(50);
+	if (!assertTrue(waitForBackupRunning(db, 1000), "backup did not enter running state")) {
+		db.cancelBackup();
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
 
 	const uint32_t started = millis();
 	FreshResult result = db.deinit(FreshDeinitOptions{.sync = true, .timeoutMS = 2000});
