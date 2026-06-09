@@ -117,7 +117,7 @@ void loop() {
 * Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
 * Fresh enforces configurable document, journal, snapshot, and LittleFS reserve limits. Oversized payloads return `FreshStatus::SizeLimitExceeded`; sync preflight space failures return `FreshStatus::StorageFull`.
 * Callbacks are notification hooks. Do not call `deinit()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
-* The current storage and backup formats use ArduinoJson MessagePack. Manifest and snapshot files use two durable slot files with checksummed binary headers. Formats are not stable compatibility contracts yet.
+* The current storage and backup formats use ArduinoJson MessagePack. Manifest and snapshot files use two durable slot files with checksummed binary headers. Formats are not stable compatibility contracts yet, and Fresh does not migrate older single-file `manifest.msgpack` / `snapshot.msgpack` storage into the durable-slot format.
 
 ## When not to use Fresh
 
@@ -264,7 +264,7 @@ fresh/
 
 Fresh is currently early-stage software at `0.0.1`.
 
-The public API, storage format, and backup format may still change before a stable release. Test it on your target ESP32 board before using it in production.
+The public API, storage format, and backup format may still change before a stable release. Fresh does not currently migrate older single-file `manifest.msgpack` / `snapshot.msgpack` storage into the durable-slot format. Data written by early versions may require export/import, manual migration, or a storage reset after format changes. Test it on your target ESP32 board before using it in production.
 
 ## License
 

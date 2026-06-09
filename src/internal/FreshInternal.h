@@ -38,7 +38,6 @@ struct FreshSlotReadResult {
 	FreshResult result = FreshResult::success("slot missing");
 	JsonDocument payload;
 	uint64_t generation = 0;
-	bool usedFallback = false;
 	bool hadCorruptSlot = false;
 	bool hadValidSlot = false;
 	bool missing = true;
