@@ -152,7 +152,7 @@ struct FreshBackupStatus {
 	FreshResult result = FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
 
 	explicit operator bool() const {
-		return result;
+		return static_cast<bool>(result);
 	}
 };
 
