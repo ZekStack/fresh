@@ -69,7 +69,7 @@ model.setValidator([](const JsonDocument &doc) {
 
 `startBackup()` can fail with `FreshStatus::Busy` if a backup is already running or the sync task is occupied.
 
-`readBackup(...)`, `backupStatus()`, or `cancelBackup()` can report backup-not-running state when no backup is active.
+`readBackup(...)`, `backupStatus()`, or `cancelBackup()` can report backup-not-running state when no backup is active. Use `backupStatus().state` for lifecycle control and `backupStatus().result` for detailed diagnostics.
 
 After `startBackup()`, keep calling `readBackup(...)` until backup completion/error, or call `cancelBackup()` if the reader stops. Backup generation writes into a bounded buffer from the sync task; if the buffer is not drained, normal persistence can stop progressing until space is available.
 
@@ -84,6 +84,10 @@ if (!started) {
 
 uint8_t buffer[256];
 size_t read = db.readBackup(buffer, sizeof(buffer), 50);
+FreshBackupStatus status = db.backupStatus();
+if (status.state == FreshBackupState::Finished) {
+    Serial.println(status.result.message.c_str());
+}
 ```
 
 Use `onBackupEnd` and `onBackupError` callbacks to know when a backup has completed or failed.

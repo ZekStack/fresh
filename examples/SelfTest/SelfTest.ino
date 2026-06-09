@@ -112,11 +112,11 @@ bool hasDegradedLoad(const FreshDiagnostics &diagnostics, FreshLoadStatus status
 bool waitForBackupRunning(Fresh &db, uint32_t timeoutMS) {
 	const uint32_t started = millis();
 	while (millis() - started < timeoutMS) {
-		FreshResult status = db.backupStatus();
-		if (status.message == "backup running") {
+		FreshBackupStatus status = db.backupStatus();
+		if (status.state == FreshBackupState::Running) {
 			return true;
 		}
-		if (!status && status.status != FreshStatus::Cancelled) {
+		if (!status && status.state != FreshBackupState::Cancelled) {
 			return false;
 		}
 		delay(5);
@@ -467,12 +467,12 @@ bool testBackupExportImport() {
 	while (millis() - started < 3000) {
 		const size_t read = source.readBackup(buffer, sizeof(buffer), 50);
 		archive.insert(archive.end(), buffer, buffer + read);
-		FreshResult status = source.backupStatus();
-		if (!status && status.status != FreshStatus::Cancelled) {
+		FreshBackupStatus status = source.backupStatus();
+		if (status.state == FreshBackupState::Finished) {
+			backupFinished = true;
 			break;
 		}
-		if (status.message == "backup finished") {
-			backupFinished = true;
+		if (status.state == FreshBackupState::Cancelled || status.state == FreshBackupState::Error) {
 			break;
 		}
 	}
@@ -538,11 +538,11 @@ bool testDeinitDuringBackup() {
 	const uint32_t started = millis();
 	FreshResult result = db.deinit(FreshDeinitOptions{.sync = true, .timeoutMS = 2000});
 	const uint32_t elapsed = millis() - started;
-	FreshResult status = db.backupStatus();
+	FreshBackupStatus status = db.backupStatus();
 	return assertResult(result, "deinit during backup") &&
 	       assertTrue(elapsed < 3000, "deinit did not return within bounded time") &&
 	       assertTrue(
-	           status.status == FreshStatus::BackupNotRunning || status.status == FreshStatus::Cancelled,
+	           status.state == FreshBackupState::NotRunning || status.state == FreshBackupState::Cancelled,
 	           "backup was still running after deinit"
 	       );
 }

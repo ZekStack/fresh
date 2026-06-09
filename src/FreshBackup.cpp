@@ -83,6 +83,7 @@ void Fresh::runBackupIfRequested() {
 		_backup->progress = 0;
 		_backup->total = 0;
 		_backup->lastProgressEvent = 0;
+		_backup->state = FreshBackupState::Running;
 		_backup->result = FreshResult::success("backup running");
 	}
 
@@ -142,6 +143,9 @@ void Fresh::runBackupIfRequested() {
 		FreshLock lock(_backup->mutex);
 		_backup->running = false;
 		_backup->done = true;
+		_backup->state = result ? FreshBackupState::Finished
+		                        : (result.status == FreshStatus::Cancelled ? FreshBackupState::Cancelled
+		                                                                  : FreshBackupState::Error);
 		_backup->result = result;
 	}
 
@@ -247,6 +251,7 @@ FreshResult Fresh::startBackup() {
 		_backup->requested = true;
 		_backup->done = false;
 		_backup->cancelled = false;
+		_backup->state = FreshBackupState::Queued;
 		_backup->result = FreshResult::success("backup queued");
 	}
 	if (_syncTaskHandle != nullptr) {
@@ -282,9 +287,9 @@ size_t Fresh::readBackup(uint8_t *buffer, size_t length, uint32_t timeoutMS) {
 	return read;
 }
 
-FreshResult Fresh::backupStatus() const {
+FreshBackupStatus Fresh::backupStatus() const {
 	FreshLock lock(_backup->mutex);
-	return _backup->result;
+	return FreshBackupStatus{.state = _backup->state, .result = _backup->result};
 }
 
 FreshResult Fresh::cancelBackup() {
@@ -294,6 +299,7 @@ FreshResult Fresh::cancelBackup() {
 	}
 	_backup->cancelled = true;
 	_backup->requested = false;
+	_backup->state = FreshBackupState::Cancelled;
 	_backup->result = FreshResult::failure(FreshStatus::Cancelled, "backup cancelled");
 	return _backup->result;
 }

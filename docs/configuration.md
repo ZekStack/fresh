@@ -87,7 +87,7 @@ Lower thresholds compact more often and may reduce startup replay work. Higher t
 
 `backupBufferSize` controls the internal buffer used while backup data is generated and read in chunks.
 
-Backup generation runs on the sync task. After `startBackup()`, the application must keep calling `readBackup()` until backup completion/error, or call `cancelBackup()` if the consumer stops. If the buffer fills because the application does not drain it, normal persistence can stop progressing until space is available.
+Backup generation runs on the sync task. After `startBackup()`, the application must keep calling `readBackup()` until `backupStatus().state` is `FreshBackupState::Finished`, `FreshBackupState::Cancelled`, or `FreshBackupState::Error`, or call `cancelBackup()` if the consumer stops. If the buffer fills because the application does not drain it, normal persistence can stop progressing until space is available.
 
 Applications still choose their own read chunk size:
 
@@ -95,3 +95,5 @@ Applications still choose their own read chunk size:
 uint8_t buffer[256];
 size_t read = db.readBackup(buffer, sizeof(buffer), 50);
 ```
+
+Use `FreshBackupStatus.state` for lifecycle control and `FreshBackupStatus.result` for detailed success/failure diagnostics.
