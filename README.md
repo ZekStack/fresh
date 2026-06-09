@@ -109,7 +109,7 @@ void loop() {
 * `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts.
 * `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context.
 * `deinit()` waits for the sync task to exit before owned state is destroyed. By default it performs a final forced checkpoint; pass `{.sync = false}` to stop without final persistence.
-* The destructor uses a bounded final `deinit({.sync = true, .timeoutMS = 2000})`. Applications that need guaranteed final persistence should call `FreshResult result = db.deinit();` manually and check the result before the object is destroyed.
+* The destructor uses a bounded final `deinit({.sync = true, .timeoutMS = 2000})`, but automatic destructor cleanup is best-effort only. If shutdown times out, the destructor cannot report the failure. Production code that needs deterministic shutdown or guaranteed final persistence should call `FreshResult result = db.deinit();` manually and check the result before the object is destroyed.
 * `diagnostics()` reports model load recovery after `init()`, including corrupt snapshots or recovered journals.
 * `create()` intentionally mutates the input `JsonDocument` by adding `_id`, `createdAt`, and `updatedAt`.
 * After `startBackup()`, keep calling `readBackup()` until backup finishes or call `cancelBackup()`. An undrained backup can occupy the sync task and delay normal persistence.
@@ -144,6 +144,15 @@ The repository includes topic-focused Arduino sketches in the `examples/` folder
 | `BackupStream` | Backup callbacks, `startBackup`, chunked `readBackup`, status checks, and `backupImport`. |
 | `ModelManagement` | Create, rename, drop, drop selected, and drop all models. |
 | `SelfTest` | Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior. It uses `/fresh_selftest`, `/fresh_selftest_src`, and `/fresh_selftest_dst`, touches internal storage files, and should only be run on a test device or test partition. |
+
+`SelfTest` is compiled by CI through the examples build loop, but it is not executed in CI. Run it manually on ESP32 hardware. A successful run ends like this:
+
+```txt
+Fresh SelfTest starting
+[PASS] create -> forceSync -> reload
+...
+SelfTest complete: 8 passed, 0 failed
+```
 
 Start with:
 
