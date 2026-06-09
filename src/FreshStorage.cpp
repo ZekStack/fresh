@@ -19,16 +19,14 @@ struct FreshModelSyncBatch {
 	std::string path;
 	std::string previousPath;
 	std::string journalPath;
-	std::string snapshotTempPath;
-	std::string snapshotPath;
 	std::string previousJournalPath;
-	std::string previousSnapshotPath;
 	FreshModelType type = FreshModelType::General;
 	bool dropped = false;
 	bool writeSnapshot = false;
 	uint32_t storageEpoch = 0;
 	std::vector<FreshJournalSyncRecord> records;
 	JsonDocument snapshot;
+	size_t snapshotPayloadBytes = 0;
 };
 
 struct FreshModelSyncResult {
@@ -39,6 +37,160 @@ struct FreshModelSyncResult {
 	bool dropped = false;
 	bool renamed = false;
 };
+
+std::string FreshSlotPath(const std::string &basePath, const char *fileBaseName, char slot) {
+	std::string fileName = fileBaseName;
+	fileName += ".";
+	fileName.push_back(slot);
+	fileName += ".msgpack";
+	return FreshJoinPath(basePath, fileName);
+}
+
+FreshResult FreshSerializePayload(const JsonDocument &payload, FreshByteVector &bytes, const char *label) {
+	const size_t payloadBytes = measureMsgPack(payload);
+	if (payloadBytes == 0) {
+		return FreshResult::failure(FreshStatus::FileSystemError, label);
+	}
+	bytes.resize(payloadBytes);
+	const size_t written = serializeMsgPack(payload, bytes.data(), bytes.size());
+	if (written != payloadBytes) {
+		bytes.clear();
+		return FreshResult::failure(FreshStatus::FileSystemError, label);
+	}
+	return FreshResult::success();
+}
+
+FreshResult FreshReadSlotFile(
+    const std::string &path,
+    JsonDocument &payload,
+    uint64_t &generation
+) {
+	File file = LittleFS.open(path.c_str(), "r");
+	if (!file) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open durable slot");
+	}
+
+	uint32_t magic = 0;
+	uint16_t version = 0;
+	uint64_t slotGeneration = 0;
+	uint32_t payloadSize = 0;
+	uint32_t expectedChecksum = 0;
+	const bool headerOk = FreshReadU32(file, magic) && FreshReadU16(file, version) &&
+	                      FreshReadU64(file, slotGeneration) && FreshReadU32(file, payloadSize) &&
+	                      FreshReadU32(file, expectedChecksum);
+	if (!headerOk || magic != FreshSlotMagic || version != FreshSlotVersion || payloadSize == 0 ||
+	    payloadSize > 1024 * 1024 ||
+	    file.available() < static_cast<int>(payloadSize)) {
+		file.close();
+		return FreshResult::failure(FreshStatus::CorruptData, "invalid durable slot header");
+	}
+
+	FreshByteVector bytes(payloadSize);
+	const int read = file.read(bytes.data(), bytes.size());
+	file.close();
+	if (read != static_cast<int>(bytes.size())) {
+		return FreshResult::failure(FreshStatus::CorruptData, "truncated durable slot");
+	}
+	if (FreshChecksum(bytes.data(), bytes.size()) != expectedChecksum) {
+		return FreshResult::failure(FreshStatus::CorruptData, "durable slot checksum mismatch");
+	}
+
+	JsonDocument decoded;
+	DeserializationError error = deserializeMsgPack(decoded, bytes.data(), bytes.size());
+	if (error) {
+		return FreshResult::failure(FreshStatus::CorruptData, "failed to decode durable slot");
+	}
+	payload.clear();
+	payload.set(decoded.as<JsonVariantConst>());
+	generation = slotGeneration;
+	return FreshResult::success("durable slot loaded");
+}
+
+FreshSlotReadResult readDurableSlot(const std::string &basePath, const char *fileBaseName) {
+	FreshSlotReadResult result;
+	const std::string slotAPath = FreshSlotPath(basePath, fileBaseName, 'a');
+	const std::string slotBPath = FreshSlotPath(basePath, fileBaseName, 'b');
+	const bool existsA = LittleFS.exists(slotAPath.c_str());
+	const bool existsB = LittleFS.exists(slotBPath.c_str());
+	if (!existsA && !existsB) {
+		result.missing = true;
+		result.result = FreshResult::success("durable slot missing");
+		return result;
+	}
+
+	for (const std::string &path : {slotAPath, slotBPath}) {
+		if (!LittleFS.exists(path.c_str())) {
+			continue;
+		}
+		JsonDocument candidate;
+		uint64_t candidateGeneration = 0;
+		FreshResult readResult = FreshReadSlotFile(path, candidate, candidateGeneration);
+		if (!readResult) {
+			result.hadCorruptSlot = true;
+			continue;
+		}
+		if (!result.hadValidSlot || candidateGeneration > result.generation) {
+			result.payload.clear();
+			result.payload.set(candidate.as<JsonVariantConst>());
+			result.generation = candidateGeneration;
+		}
+		result.hadValidSlot = true;
+	}
+
+	result.missing = false;
+	if (!result.hadValidSlot) {
+		result.result = FreshResult::failure(FreshStatus::CorruptData, "no valid durable slot");
+		return result;
+	}
+	result.result = FreshResult::success(
+	    result.hadCorruptSlot ? "durable slot loaded with recovery" : "durable slot loaded"
+	);
+	return result;
+}
+
+FreshResult writeDurableSlot(
+    const std::string &basePath,
+    const char *fileBaseName,
+    const JsonDocument &payload,
+    uint64_t currentGeneration
+) {
+	FreshByteVector bytes;
+	FreshResult serializeResult = FreshSerializePayload(payload, bytes, "failed to serialize durable slot");
+	if (!serializeResult) {
+		return serializeResult;
+	}
+	if (bytes.size() > UINT32_MAX) {
+		return FreshResult::failure(FreshStatus::SizeLimitExceeded, "durable slot payload is too large");
+	}
+
+	const uint64_t nextGeneration = currentGeneration + 1;
+	const char targetSlot = nextGeneration % 2 == 0 ? 'a' : 'b';
+	const std::string targetPath = FreshSlotPath(basePath, fileBaseName, targetSlot);
+	File file = LittleFS.open(targetPath.c_str(), "w");
+	if (!file) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open durable slot");
+	}
+
+	FreshWriteU32(file, FreshSlotMagic);
+	FreshWriteU16(file, FreshSlotVersion);
+	FreshWriteU64(file, nextGeneration);
+	FreshWriteU32(file, static_cast<uint32_t>(bytes.size()));
+	FreshWriteU32(file, FreshChecksum(bytes.data(), bytes.size()));
+	const size_t written = file.write(bytes.data(), bytes.size());
+	file.flush();
+	file.close();
+	if (written != bytes.size()) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write durable slot");
+	}
+
+	JsonDocument verified;
+	uint64_t verifiedGeneration = 0;
+	FreshResult verifyResult = FreshReadSlotFile(targetPath, verified, verifiedGeneration);
+	if (!verifyResult || verifiedGeneration != nextGeneration) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to verify durable slot");
+	}
+	return FreshResult::success("durable slot written");
+}
 
 FreshResult FreshWriteJournalRecord(const FreshModelSyncBatch &batch, const FreshJournalSyncRecord &record) {
 	if (!LittleFS.exists(batch.path.c_str()) && !LittleFS.mkdir(batch.path.c_str())) {
@@ -71,21 +223,15 @@ FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create directory");
 	}
 
-	File file = LittleFS.open(batch.snapshotTempPath.c_str(), "w");
-	if (!file) {
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open snapshot");
+	FreshSlotReadResult slot = readDurableSlot(batch.path, FreshSnapshotFile);
+	if (!slot.result) {
+		return slot.result;
 	}
-	size_t written = serializeMsgPack(batch.snapshot, file);
-	file.close();
-	if (written == 0) {
-		LittleFS.remove(batch.snapshotTempPath.c_str());
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write snapshot");
+	FreshResult writeResult = writeDurableSlot(batch.path, FreshSnapshotFile, batch.snapshot, slot.generation);
+	if (!writeResult) {
+		return writeResult;
 	}
-	LittleFS.remove(batch.snapshotPath.c_str());
-	if (!LittleFS.rename(batch.snapshotTempPath.c_str(), batch.snapshotPath.c_str())) {
-		LittleFS.remove(batch.snapshotTempPath.c_str());
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to replace snapshot");
-	}
+
 	LittleFS.remove(batch.journalPath.c_str());
 	return FreshResult::success("snapshot written");
 }
@@ -97,11 +243,13 @@ FreshModelSyncResult FreshWriteModelBatch(const FreshModelSyncBatch &batch) {
 	if (batch.dropped) {
 		if (!batch.previousName.empty()) {
 			LittleFS.remove(batch.previousJournalPath.c_str());
-			LittleFS.remove(batch.previousSnapshotPath.c_str());
+			LittleFS.remove(FreshSlotPath(batch.previousPath, FreshSnapshotFile, 'a').c_str());
+			LittleFS.remove(FreshSlotPath(batch.previousPath, FreshSnapshotFile, 'b').c_str());
 			LittleFS.rmdir(batch.previousPath.c_str());
 		}
 		LittleFS.remove(batch.journalPath.c_str());
-		LittleFS.remove(batch.snapshotPath.c_str());
+		LittleFS.remove(FreshSlotPath(batch.path, FreshSnapshotFile, 'a').c_str());
+		LittleFS.remove(FreshSlotPath(batch.path, FreshSnapshotFile, 'b').c_str());
 		LittleFS.rmdir(batch.path.c_str());
 		result.dropped = true;
 		result.result = FreshResult::success("model dropped");
@@ -171,25 +319,35 @@ FreshResult Fresh::ensureDir(const std::string &path) {
 	return FreshResult::success();
 }
 
+FreshResult Fresh::checkFreeSpace(size_t requiredBytes) const {
+	const size_t total = LittleFS.totalBytes();
+	const size_t used = LittleFS.usedBytes();
+	const size_t freeBytes = total > used ? total - used : 0;
+	if (freeBytes < _config.minFreeBytes || freeBytes - _config.minFreeBytes < requiredBytes) {
+		return FreshResult::failure(FreshStatus::StorageFull, "not enough LittleFS space");
+	}
+	return FreshResult::success();
+}
+
+FreshResult Fresh::checkPayloadSize(size_t payloadBytes, size_t limit, const char *label) const {
+	if (limit > 0 && payloadBytes > limit) {
+		std::string message = label != nullptr ? label : "payload";
+		message += " size limit exceeded";
+		return FreshResult::failure(FreshStatus::SizeLimitExceeded, message.c_str(), payloadBytes);
+	}
+	return FreshResult::success();
+}
+
 FreshResult Fresh::readManifest() {
-	const std::string path = FreshJoinPath(_rootPath, FreshManifestFile);
-	if (!LittleFS.exists(path.c_str())) {
+	FreshSlotReadResult manifestSlot = readDurableSlot(_rootPath, FreshManifestFile);
+	if (!manifestSlot.result) {
+		return manifestSlot.result;
+	}
+	if (manifestSlot.missing) {
 		return FreshResult::success("manifest not found");
 	}
 
-	File file = LittleFS.open(path.c_str(), "r");
-	if (!file) {
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open manifest");
-	}
-
-	JsonDocument doc;
-	DeserializationError error = deserializeMsgPack(doc, file);
-	file.close();
-	if (error) {
-		return FreshResult::failure(FreshStatus::CorruptData, "failed to read manifest");
-	}
-
-	JsonArrayConst modelsArray = doc["models"].as<JsonArrayConst>();
+	JsonArrayConst modelsArray = manifestSlot.payload["models"].as<JsonArrayConst>();
 	bool failed = false;
 	for (JsonObjectConst modelObject : modelsArray) {
 		const char *name = modelObject["name"] | "";
@@ -224,6 +382,9 @@ FreshResult Fresh::readManifest() {
 	if (_diagnostics.degradedModelCount > 0) {
 		return FreshResult::success("manifest loaded with recovered models", _diagnostics.degradedModelCount);
 	}
+	if (manifestSlot.hadCorruptSlot) {
+		return FreshResult::success("manifest loaded with recovered slot");
+	}
 	return FreshResult::success();
 }
 
@@ -233,22 +394,13 @@ FreshResult Fresh::writeManifest(const JsonDocument &manifest) {
 		return dirResult;
 	}
 
-	const std::string tempPath = FreshJoinPath(_rootPath, "manifest.tmp");
-	const std::string finalPath = FreshJoinPath(_rootPath, FreshManifestFile);
-	File file = LittleFS.open(tempPath.c_str(), "w");
-	if (!file) {
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write manifest");
+	FreshSlotReadResult slot = readDurableSlot(_rootPath, FreshManifestFile);
+	if (!slot.result) {
+		return slot.result;
 	}
-	size_t written = serializeMsgPack(manifest, file);
-	file.close();
-	if (written == 0) {
-		LittleFS.remove(tempPath.c_str());
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to serialize manifest");
-	}
-	LittleFS.remove(finalPath.c_str());
-	if (!LittleFS.rename(tempPath.c_str(), finalPath.c_str())) {
-		LittleFS.remove(tempPath.c_str());
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to replace manifest");
+	FreshResult writeResult = writeDurableSlot(_rootPath, FreshManifestFile, manifest, slot.generation);
+	if (!writeResult) {
+		return writeResult;
 	}
 	return FreshResult::success("manifest written");
 }
@@ -278,43 +430,41 @@ FreshResult Fresh::applyRecord(
 }
 
 FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state) {
-	const std::string path = modelFile(state->name, FreshSnapshotFile);
-	if (!LittleFS.exists(path.c_str())) {
+	FreshSlotReadResult snapshotSlot = readDurableSlot(modelPath(state->name), FreshSnapshotFile);
+	if (!snapshotSlot.result) {
+		state->degraded = true;
+		return snapshotSlot.result;
+	}
+	if (snapshotSlot.missing) {
 		return FreshLoadResult(FreshLoadStatus::LoadedOk, "snapshot not found");
-	}
-
-	File file = LittleFS.open(path.c_str(), "r");
-	if (!file) {
-		state->degraded = true;
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open snapshot");
-	}
-
-	JsonDocument snapshot;
-	DeserializationError error = deserializeMsgPack(snapshot, file);
-	file.close();
-	if (error) {
-		state->degraded = true;
-		return FreshResult::failure(FreshStatus::CorruptData, "failed to read snapshot");
 	}
 
 	state->docs.clear();
 	state->streamEntries.clear();
 	if (state->type == FreshModelType::Stream) {
-		for (JsonVariantConst entry : snapshot["entries"].as<JsonArrayConst>()) {
+		for (JsonVariantConst entry : snapshotSlot.payload["entries"].as<JsonArrayConst>()) {
 			JsonDocument copy;
 			copy.set(entry);
 			state->streamEntries.push_back(copy);
 		}
+		if (snapshotSlot.hadCorruptSlot) {
+			state->degraded = true;
+			return FreshLoadResult(FreshLoadStatus::LoadedWithCorruptSnapshot, "snapshot loaded with recovery");
+		}
 		return FreshLoadResult(FreshLoadStatus::LoadedOk, "snapshot loaded");
 	}
 
-	for (JsonVariantConst entry : snapshot["docs"].as<JsonArrayConst>()) {
+	for (JsonVariantConst entry : snapshotSlot.payload["docs"].as<JsonArrayConst>()) {
 		JsonDocument copy;
 		copy.set(entry);
 		const char *id = copy["_id"] | "";
 		if (*id != '\0') {
 			state->docs[id] = copy;
 		}
+	}
+	if (snapshotSlot.hadCorruptSlot) {
+		state->degraded = true;
+		return FreshLoadResult(FreshLoadStatus::LoadedWithCorruptSnapshot, "snapshot loaded with recovery");
 	}
 	return FreshLoadResult(FreshLoadStatus::LoadedOk, "snapshot loaded");
 }
@@ -429,8 +579,12 @@ FreshResult Fresh::loadModel(const std::shared_ptr<FreshModel::State> &state) {
 		status = FreshLoadStatus::LoadedWithCorruptJournal;
 		message = "model loaded with corrupt journal";
 	} else {
+		FreshLoadStatus snapshotStatus = FreshLoadStatusFromResult(snapshotResult);
 		FreshLoadStatus journalStatus = FreshLoadStatusFromResult(journalResult);
-		if (journalStatus == FreshLoadStatus::LoadedWithRecoveredJournal) {
+		if (snapshotStatus == FreshLoadStatus::LoadedWithCorruptSnapshot) {
+			status = snapshotStatus;
+			message = "model loaded with recovered snapshot slot";
+		} else if (journalStatus == FreshLoadStatus::LoadedWithRecoveredJournal) {
 			status = journalStatus;
 			message = "model loaded with recovered journal";
 		}
@@ -463,6 +617,7 @@ FreshResult Fresh::syncDirty(bool force) {
 	JsonDocument manifest;
 	bool shouldWriteManifest = false;
 	uint32_t manifestEpoch = 0;
+	size_t requiredBytes = 0;
 	std::vector<FreshModelSyncBatch> batches;
 	{
 		FreshLock lock(*_mutex);
@@ -483,6 +638,11 @@ FreshResult Fresh::syncDirty(bool force) {
 				modelObject["name"] = state->name;
 				modelObject["type"] = FreshModelTypeToString(state->type);
 			}
+			const size_t manifestPayloadBytes = measureMsgPack(manifest);
+			if (manifestPayloadBytes == 0) {
+				return FreshResult::failure(FreshStatus::InternalError, "empty manifest");
+			}
+			requiredBytes += FreshSlotHeaderSize + manifestPayloadBytes;
 		}
 
 		for (const auto &entry : _models) {
@@ -498,11 +658,8 @@ FreshResult Fresh::syncDirty(bool force) {
 			batch.path = modelPath(batch.name);
 			batch.previousPath = batch.previousName.empty() ? std::string() : modelPath(batch.previousName);
 			batch.journalPath = modelFile(batch.name, FreshJournalFile);
-			batch.snapshotTempPath = modelFile(batch.name, "snapshot.tmp");
-			batch.snapshotPath = modelFile(batch.name, FreshSnapshotFile);
 			if (!batch.previousName.empty()) {
 				batch.previousJournalPath = modelFile(batch.previousName, FreshJournalFile);
-				batch.previousSnapshotPath = modelFile(batch.previousName, FreshSnapshotFile);
 			}
 			batch.type = state->type;
 			batch.dropped = state->dropped;
@@ -519,8 +676,17 @@ FreshResult Fresh::syncDirty(bool force) {
 					if (record.payload.empty()) {
 						return FreshResult::failure(FreshStatus::InternalError, "empty journal record");
 					}
-					serializeMsgPack(recordDoc, record.payload.data(), record.payload.size());
+					const size_t written = serializeMsgPack(recordDoc, record.payload.data(), record.payload.size());
+					if (written != record.payload.size()) {
+						return FreshResult::failure(FreshStatus::InternalError, "failed to serialize journal record");
+					}
+					FreshResult sizeResult =
+					    checkPayloadSize(record.payload.size(), _config.maxJournalRecordBytes, "journal record");
+					if (!sizeResult) {
+						return sizeResult;
+					}
 					pendingBytes += record.payload.size();
+					requiredBytes += FreshJournalHeaderSize + record.payload.size();
 					batch.records.push_back(std::move(record));
 				}
 			}
@@ -545,6 +711,16 @@ FreshResult Fresh::syncDirty(bool force) {
 						docs.add(docEntry.second.as<JsonVariantConst>());
 					}
 				}
+				batch.snapshotPayloadBytes = measureMsgPack(batch.snapshot);
+				if (batch.snapshotPayloadBytes == 0) {
+					return FreshResult::failure(FreshStatus::InternalError, "empty snapshot");
+				}
+				FreshResult snapshotSizeResult =
+				    checkPayloadSize(batch.snapshotPayloadBytes, _config.maxSnapshotBytes, "snapshot");
+				if (!snapshotSizeResult) {
+					return snapshotSizeResult;
+				}
+				requiredBytes += FreshSlotHeaderSize + batch.snapshotPayloadBytes;
 			}
 
 			batches.push_back(std::move(batch));
@@ -557,6 +733,12 @@ FreshResult Fresh::syncDirty(bool force) {
 	emitEvent({.type = FreshEventType::SyncStarted, .result = FreshResult::success("sync started")});
 
 	FreshResult last = FreshResult::success("nothing dirty");
+	FreshResult spaceResult = checkFreeSpace(requiredBytes);
+	if (!spaceResult) {
+		emitSync(spaceResult);
+		return spaceResult;
+	}
+
 	if (shouldWriteManifest) {
 		last = writeManifest(manifest);
 		{

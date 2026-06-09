@@ -39,14 +39,14 @@ std::string joinPath(const char *base, const char *name) {
 void removeModelFiles(const char *path, const char *modelName) {
 	const std::string modelPath = joinPath(path, modelName);
 	LittleFS.remove(joinPath(modelPath.c_str(), "journal.log").c_str());
-	LittleFS.remove(joinPath(modelPath.c_str(), "snapshot.msgpack").c_str());
-	LittleFS.remove(joinPath(modelPath.c_str(), "snapshot.tmp").c_str());
+	LittleFS.remove(joinPath(modelPath.c_str(), "snapshot.a.msgpack").c_str());
+	LittleFS.remove(joinPath(modelPath.c_str(), "snapshot.b.msgpack").c_str());
 	LittleFS.rmdir(modelPath.c_str());
 }
 
 void resetTestPath(const char *path) {
-	LittleFS.remove(joinPath(path, "manifest.msgpack").c_str());
-	LittleFS.remove(joinPath(path, "manifest.tmp").c_str());
+	LittleFS.remove(joinPath(path, "manifest.a.msgpack").c_str());
+	LittleFS.remove(joinPath(path, "manifest.b.msgpack").c_str());
 	removeModelFiles(path, "User");
 	removeModelFiles(path, "Log");
 	LittleFS.rmdir(path);
@@ -170,13 +170,25 @@ bool corruptFinalJournalOpByte(const char *modelName) {
 	return written == bytes.size();
 }
 
-bool corruptSnapshotFile(const char *modelName) {
-	const std::string path = joinPath(joinPath(TestPath, modelName).c_str(), "snapshot.msgpack");
+bool corruptSnapshotSlot(const char *modelName) {
+	const std::string path = joinPath(joinPath(TestPath, modelName).c_str(), "snapshot.a.msgpack");
 	File output = LittleFS.open(path.c_str(), "w");
 	if (!output) {
 		return false;
 	}
 	const uint8_t corrupt[] = {0xde, 0xad, 0xbe, 0xef};
+	const size_t written = output.write(corrupt, sizeof(corrupt));
+	output.close();
+	return written == sizeof(corrupt);
+}
+
+bool corruptManifestSlot() {
+	const std::string path = joinPath(TestPath, "manifest.a.msgpack");
+	File output = LittleFS.open(path.c_str(), "w");
+	if (!output) {
+		return false;
+	}
+	const uint8_t corrupt[] = {0xba, 0xad, 0xf0, 0x0d};
 	const size_t written = output.write(corrupt, sizeof(corrupt));
 	output.close();
 	return written == sizeof(corrupt);
@@ -418,7 +430,7 @@ bool testCorruptSnapshotDiagnostics() {
 		return false;
 	}
 	delay(100);
-	if (!assertTrue(corruptSnapshotFile("User"), "failed to corrupt snapshot")) {
+	if (!assertTrue(corruptSnapshotSlot("User"), "failed to corrupt snapshot slot")) {
 		return false;
 	}
 	db.deinit(FreshDeinitOptions{.sync = false});
@@ -434,6 +446,180 @@ bool testCorruptSnapshotDiagnostics() {
 	                    "corrupt snapshot diagnostic missing"
 	                );
 	loaded.deinit(FreshDeinitOptions{.sync = false});
+	return ok;
+}
+
+bool testSizeLimits() {
+	resetTestPath(TestPath);
+
+	FreshConfig config;
+	config.maxDocumentBytes = 256;
+	Fresh db;
+	if (!assertResult(db.init(TestPath, config), "init")) {
+		return false;
+	}
+	FreshModelResult usersResult = db.createModel("User");
+	FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
+	if (!assertModelResult(usersResult, "create user model") ||
+	    !assertModelResult(logsResult, "create stream model")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	JsonDocument oversizedCreate;
+	oversizedCreate["payload"] =
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+	FreshResult createResult = usersResult.model.create(oversizedCreate);
+
+	JsonDocument oversizedAppend;
+	oversizedAppend["payload"] =
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+	FreshResult appendResult = logsResult.model.append(oversizedAppend);
+
+	JsonDocument first;
+	first["_id"] = "size-first";
+	first["group"] = "same";
+	first["payload"] = "small";
+	JsonDocument second;
+	second["_id"] = "size-second";
+	second["group"] = "same";
+	second["payload"] = "small";
+	if (!assertResult(usersResult.model.create(first), "create first small doc") ||
+	    !assertResult(usersResult.model.create(second), "create second small doc")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	JsonDocument patch;
+	patch["payload"] =
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+	FreshResult updateResult = usersResult.model.update(
+	    [](const JsonDocument &doc) { return strcmp(doc["group"] | "", "same") == 0; },
+	    patch
+	);
+	FreshResult firstAfter = usersResult.model.findById("size-first");
+	FreshResult secondAfter = usersResult.model.findById("size-second");
+
+	const bool ok =
+	    assertTrue(!createResult && createResult.status == FreshStatus::SizeLimitExceeded, "create size limit failed") &&
+	    assertTrue(!appendResult && appendResult.status == FreshStatus::SizeLimitExceeded, "append size limit failed") &&
+	    assertTrue(!updateResult && updateResult.status == FreshStatus::SizeLimitExceeded, "update size limit failed") &&
+	    assertResult(firstAfter, "find first after failed update") &&
+	    assertResult(secondAfter, "find second after failed update") &&
+	    assertTrue(strcmp(firstAfter.doc["payload"] | "", "small") == 0, "first doc changed after failed update") &&
+	    assertTrue(strcmp(secondAfter.doc["payload"] | "", "small") == 0, "second doc changed after failed update");
+	db.deinit(FreshDeinitOptions{.sync = false});
+	return ok;
+}
+
+bool testBackupImportSizeLimit() {
+	resetTestPath(BackupDestPath);
+
+	FreshConfig config;
+	config.maxDocumentBytes = 256;
+	Fresh db;
+	if (!assertResult(db.init(BackupDestPath, config), "init")) {
+		return false;
+	}
+
+	JsonDocument archive;
+	archive["version"] = 1;
+	JsonArray models = archive["models"].to<JsonArray>();
+	JsonObject model = models.add<JsonObject>();
+	model["name"] = "User";
+	model["type"] = "general";
+	JsonArray docs = model["docs"].to<JsonArray>();
+	JsonObject doc = docs.add<JsonObject>();
+	doc["_id"] = "oversized-import";
+	doc["payload"] =
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+	    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+
+	std::vector<uint8_t> bytes(measureMsgPack(archive));
+	serializeMsgPack(archive, bytes.data(), bytes.size());
+	FreshResult importResult = db.backupImport(bytes.data(), bytes.size());
+	const bool ok =
+	    assertTrue(!importResult && importResult.status == FreshStatus::SizeLimitExceeded, "backup import size limit failed");
+	db.deinit(FreshDeinitOptions{.sync = false});
+	return ok;
+}
+
+bool testStorageFullPreflight() {
+	resetTestPath(TestPath);
+
+	FreshConfig config;
+	config.minFreeBytes = LittleFS.totalBytes();
+	Fresh db;
+	if (!assertResult(db.init(TestPath, config), "init")) {
+		return false;
+	}
+	FreshModelResult usersResult = db.createModel("User");
+	if (!assertModelResult(usersResult, "create model")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+	JsonDocument user;
+	user["_id"] = "storage-full";
+	user["name"] = "Panna";
+	if (!assertResult(usersResult.model.create(user), "create user")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+	FreshResult syncResult = db.forceSync();
+	const bool ok = assertTrue(!syncResult && syncResult.status == FreshStatus::StorageFull, "storage full preflight failed");
+	db.deinit(FreshDeinitOptions{.sync = false});
+	return ok;
+}
+
+bool testEmptyDatabaseMissingManifestSlots() {
+	resetTestPath(TestPath);
+	Fresh db;
+	FreshResult initResult = db.init(TestPath);
+	const bool ok = assertResult(initResult, "init empty database");
+	db.deinit(FreshDeinitOptions{.sync = false});
+	return ok;
+}
+
+bool testManifestSlotRecovery() {
+	resetTestPath(TestPath);
+
+	Fresh db;
+	if (!assertResult(db.init(TestPath), "init")) {
+		return false;
+	}
+	FreshModelResult usersResult = db.createModel("User");
+	if (!assertModelResult(usersResult, "create model")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+	JsonDocument user;
+	user["_id"] = "manifest-user";
+	user["name"] = "Panna";
+	if (!assertResult(usersResult.model.create(user), "create user") ||
+	    !assertResult(db.forceSync(), "force sync")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+	db.deinit();
+
+	if (!assertTrue(corruptManifestSlot(), "failed to corrupt manifest slot")) {
+		return false;
+	}
+
+	Fresh loaded;
+	if (!assertResult(loaded.init(TestPath), "reload")) {
+		return false;
+	}
+	FreshResult found = loaded.model("User").findById("manifest-user");
+	const bool ok = assertResult(found, "find after manifest slot recovery");
+	loaded.deinit();
 	return ok;
 }
 
@@ -579,6 +765,11 @@ void setup() {
 	runTest("stream append -> snapshot threshold -> reload", testStreamSnapshotReload);
 	runTest("corrupt final journal op -> recovered reload", testCorruptFinalJournalOp);
 	runTest("corrupt snapshot -> diagnostics", testCorruptSnapshotDiagnostics);
+	runTest("size limits reject oversized writes", testSizeLimits);
+	runTest("backup import size limit", testBackupImportSizeLimit);
+	runTest("storage full preflight", testStorageFullPreflight);
+	runTest("empty database missing manifest slots", testEmptyDatabaseMissingManifestSlots);
+	runTest("manifest slot recovery", testManifestSlotRecovery);
 	runTest("backup export -> import -> model equality", testBackupExportImport);
 	runTest("deinit while backup is running", testDeinitDuringBackup);
 

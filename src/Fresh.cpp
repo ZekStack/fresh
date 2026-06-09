@@ -451,6 +451,10 @@ const char *Fresh::statusToString(FreshStatus status) const {
 		return "unsupported operation";
 	case FreshStatus::CorruptData:
 		return "corrupt data";
+	case FreshStatus::StorageFull:
+		return "storage full";
+	case FreshStatus::SizeLimitExceeded:
+		return "size limit exceeded";
 	case FreshStatus::Busy:
 		return "busy";
 	case FreshStatus::BackupNotRunning:

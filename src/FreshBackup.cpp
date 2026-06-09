@@ -408,6 +408,11 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 			for (JsonVariantConst entry : modelObject["entries"].as<JsonArrayConst>()) {
 				JsonDocument copy;
 				copy.set(entry);
+				FreshResult sizeResult =
+				    checkPayloadSize(measureMsgPack(copy), _config.maxDocumentBytes, "stream entry");
+				if (!sizeResult) {
+					return sizeResult;
+				}
 				state->streamEntries.push_back(copy);
 			}
 		} else {
@@ -417,6 +422,11 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 			for (JsonVariantConst entry : modelObject["docs"].as<JsonArrayConst>()) {
 				JsonDocument copy;
 				copy.set(entry);
+				FreshResult sizeResult =
+				    checkPayloadSize(measureMsgPack(copy), _config.maxDocumentBytes, "document");
+				if (!sizeResult) {
+					return sizeResult;
+				}
 				const char *id = copy["_id"] | "";
 				if (*id == '\0') {
 					return FreshResult::failure(FreshStatus::CorruptData, "backup document is missing id");

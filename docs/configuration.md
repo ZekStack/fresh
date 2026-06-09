@@ -14,6 +14,10 @@ config.defaultModelType = FreshModelType::General;
 config.snapshotRecordThreshold = 128;
 config.snapshotBytesThreshold = 32 * 1024;
 config.backupBufferSize = 8 * 1024;
+config.minFreeBytes = 4096;
+config.maxDocumentBytes = 16 * 1024;
+config.maxJournalRecordBytes = 32 * 1024;
+config.maxSnapshotBytes = 256 * 1024;
 
 FreshResult result = db.init("/fresh_app", config);
 ```
@@ -32,6 +36,10 @@ FreshResult result = db.init("/fresh_app", config);
 | `snapshotRecordThreshold` | `128` | Journal record count threshold before snapshot compaction. |
 | `snapshotBytesThreshold` | `32 * 1024` | Journal byte threshold before snapshot compaction. |
 | `backupBufferSize` | `8 * 1024` | Internal backup buffer size in bytes. |
+| `minFreeBytes` | `4096` | LittleFS free-space reserve Fresh leaves unused during sync preflight. |
+| `maxDocumentBytes` | `16 * 1024` | Maximum serialized MessagePack size for stored documents and stream entries. |
+| `maxJournalRecordBytes` | `32 * 1024` | Maximum serialized journal payload size, excluding the fixed journal header. |
+| `maxSnapshotBytes` | `256 * 1024` | Maximum serialized snapshot payload size, excluding the durable slot header. |
 
 ## Sync interval
 
@@ -82,6 +90,16 @@ Fresh stores changes as journal records and writes snapshots when compaction thr
 Lower thresholds compact more often and may reduce startup replay work. Higher thresholds compact less often and may reduce snapshot writes.
 
 `forceSync()` and `forceSyncAsync()` bypass these thresholds for dirty models captured by that sync, forcing a checkpoint snapshot after pending journal records are written. Clean models are not snapshotted just because a forced sync was requested.
+
+## Storage limits
+
+Fresh checks document, journal record, snapshot, and LittleFS free-space limits before accepting large writes or starting sync writes.
+
+`maxDocumentBytes` is measured after Fresh applies stored metadata such as `_id`, `createdAt`, and `updatedAt`. `maxJournalRecordBytes` applies to the serialized journal payload only. `maxSnapshotBytes` applies to the serialized snapshot payload only. Fresh accounts for fixed journal and durable-slot headers separately during free-space preflight.
+
+`minFreeBytes` prevents Fresh from intentionally filling LittleFS to the end of the partition. A sync fails with `FreshStatus::StorageFull` when the bytes Fresh needs to write now plus this reserve exceed reported free space.
+
+The defaults are strict embedded defaults. Raise them only when the LittleFS partition and RAM budget can support larger payloads.
 
 ## Backup buffer
 
