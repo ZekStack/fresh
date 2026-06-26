@@ -91,5 +91,6 @@ FreshModelType FreshModelTypeFromString(const char *type);
 bool FreshParseJournalOp(uint8_t value, FreshJournalOp &op);
 const char *FreshJournalOpToString(FreshJournalOp op);
 std::string FreshMakeId();
+FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label);
 void FreshCopyJson(JsonDocument &target, const JsonDocument &source);
 void FreshMergePatch(JsonDocument &target, const JsonDocument &patch);

@@ -2,6 +2,7 @@
 #include "internal/FreshInternal.h"
 
 #include <cstring>
+#include <utility>
 
 class FreshBackupPrint : public Print {
   public:
@@ -407,13 +408,16 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 			}
 			for (JsonVariantConst entry : modelObject["entries"].as<JsonArrayConst>()) {
 				JsonDocument copy;
-				copy.set(entry);
+				FreshResult cloneResult = FreshCloneJson(copy, entry, "backup stream entry");
+				if (!cloneResult) {
+					return cloneResult;
+				}
 				FreshResult sizeResult =
 				    checkPayloadSize(measureMsgPack(copy), _config.maxDocumentBytes, "stream entry");
 				if (!sizeResult) {
 					return sizeResult;
 				}
-				state->streamEntries.push_back(copy);
+				state->streamEntries.push_back(std::move(copy));
 			}
 		} else {
 			if (!modelObject["docs"].is<JsonArrayConst>()) {
@@ -421,7 +425,10 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 			}
 			for (JsonVariantConst entry : modelObject["docs"].as<JsonArrayConst>()) {
 				JsonDocument copy;
-				copy.set(entry);
+				FreshResult cloneResult = FreshCloneJson(copy, entry, "backup document");
+				if (!cloneResult) {
+					return cloneResult;
+				}
 				FreshResult sizeResult =
 				    checkPayloadSize(measureMsgPack(copy), _config.maxDocumentBytes, "document");
 				if (!sizeResult) {
@@ -434,7 +441,7 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 				if (state->docs.find(id) != state->docs.end()) {
 					return FreshResult::failure(FreshStatus::CorruptData, "backup contains duplicate document id");
 				}
-				state->docs[id] = copy;
+				state->docs[id] = std::move(copy);
 			}
 		}
 
@@ -460,10 +467,30 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 				_models[name] = target;
 			} else {
 				target = found->second;
+				std::map<std::string, JsonDocument> clonedDocs;
+				std::vector<JsonDocument> clonedStreamEntries;
+				for (const auto &docEntry : incoming->docs) {
+					JsonDocument clone;
+					FreshResult cloneResult =
+					    FreshCloneJson(clone, docEntry.second.as<JsonVariantConst>(), "backup document");
+					if (!cloneResult) {
+						return cloneResult;
+					}
+					clonedDocs[docEntry.first] = std::move(clone);
+				}
+				for (const JsonDocument &streamEntry : incoming->streamEntries) {
+					JsonDocument clone;
+					FreshResult cloneResult =
+					    FreshCloneJson(clone, streamEntry.as<JsonVariantConst>(), "backup stream entry");
+					if (!cloneResult) {
+						return cloneResult;
+					}
+					clonedStreamEntries.push_back(std::move(clone));
+				}
 				target->name = incoming->name;
 				target->type = incoming->type;
-				target->docs = incoming->docs;
-				target->streamEntries = incoming->streamEntries;
+				target->docs = std::move(clonedDocs);
+				target->streamEntries = std::move(clonedStreamEntries);
 				target->pending.clear();
 				target->dropped = false;
 				target->degraded = false;

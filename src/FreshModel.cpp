@@ -1,6 +1,8 @@
 #include "Fresh.h"
 #include "internal/FreshInternal.h"
 
+#include <utility>
+
 FreshModel::FreshModel(Fresh *owner, std::shared_ptr<State> state) : _owner(owner), _state(state) {
 }
 
@@ -90,33 +92,46 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 		doc["createdAt"] = time;
 		doc["updatedAt"] = time;
 
+		JsonDocument stored;
+		FreshResult cloneResult = FreshCloneJson(stored, doc.as<JsonVariantConst>(), "document");
+		if (!cloneResult) {
+			return cloneResult;
+		}
+
 		FreshResult sizeResult =
-		    _owner->checkPayloadSize(measureMsgPack(doc), _owner->_config.maxDocumentBytes, "document");
+		    _owner->checkPayloadSize(measureMsgPack(stored), _owner->_config.maxDocumentBytes, "document");
 		if (!sizeResult) {
 			return sizeResult;
 		}
 
 		if (_state->validator) {
-			FreshValidationResult validation = _state->validator(doc);
+			FreshValidationResult validation = _state->validator(stored);
 			if (!validation) {
 				return FreshResult::failure(FreshStatus::ValidationFailed, validation.message.c_str());
 			}
 		}
 
-		JsonDocument stored;
-		FreshCopyJson(stored, doc);
-		_state->docs[id] = stored;
-
 		FreshPendingRecord record;
 		record.op = FreshJournalOp::Create;
-		record.sequence = _owner->_nextPendingSequence++;
 		record.id = id;
-		FreshCopyJson(record.doc, stored);
-		_state->pending.push_back(record);
+		cloneResult = FreshCloneJson(record.doc, stored.as<JsonVariantConst>(), "journal document");
+		if (!cloneResult) {
+			return cloneResult;
+		}
+
+		JsonDocument resultDoc;
+		cloneResult = FreshCloneJson(resultDoc, stored.as<JsonVariantConst>(), "result document");
+		if (!cloneResult) {
+			return cloneResult;
+		}
+
+		record.sequence = _owner->_nextPendingSequence++;
+		_state->docs[id] = std::move(stored);
+		_state->pending.push_back(std::move(record));
 		_state->dirty = true;
 
 		result = FreshResult::success("document created", 1);
-		FreshCopyJson(result.doc, stored);
+		result.doc = std::move(resultDoc);
 		event = {
 		    .type = FreshEventType::DocumentCreated,
 		    .modelName = _state->name,
@@ -148,19 +163,26 @@ FreshResult FreshModel::append(JsonDocument &doc) {
 			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
 		}
 		JsonDocument stored;
-		FreshCopyJson(stored, doc);
+		FreshResult cloneResult = FreshCloneJson(stored, doc.as<JsonVariantConst>(), "stream entry");
+		if (!cloneResult) {
+			return cloneResult;
+		}
 		FreshResult sizeResult =
 		    _owner->checkPayloadSize(measureMsgPack(stored), _owner->_config.maxDocumentBytes, "stream entry");
 		if (!sizeResult) {
 			return sizeResult;
 		}
-		_state->streamEntries.push_back(stored);
 
 		FreshPendingRecord record;
 		record.op = FreshJournalOp::Append;
+		cloneResult = FreshCloneJson(record.doc, stored.as<JsonVariantConst>(), "journal stream entry");
+		if (!cloneResult) {
+			return cloneResult;
+		}
+
 		record.sequence = _owner->_nextPendingSequence++;
-		FreshCopyJson(record.doc, stored);
-		_state->pending.push_back(record);
+		_state->streamEntries.push_back(std::move(stored));
+		_state->pending.push_back(std::move(record));
 		_state->dirty = true;
 
 		result = FreshResult::success("stream entry appended", 1);
@@ -301,11 +323,11 @@ FreshResult FreshModel::update(
 
 	std::vector<FreshEvent> events;
 	FreshResult result = FreshResult::success("documents updated");
-	bool changedDocsCreated = false;
 	{
 		struct FreshUpdateCandidate {
 			std::string id;
 			JsonDocument doc;
+			JsonDocument journalDoc;
 		};
 		std::vector<FreshUpdateCandidate> candidates;
 		FreshLock lock(*_owner->_mutex);
@@ -320,16 +342,25 @@ FreshResult FreshModel::update(
 				continue;
 			}
 			JsonDocument candidate;
-			FreshCopyJson(candidate, entry.second);
+			FreshResult cloneResult =
+			    FreshCloneJson(candidate, entry.second.as<JsonVariantConst>(), "existing document");
+			if (!cloneResult) {
+				return cloneResult;
+			}
 			FreshMergePatch(candidate, patch);
 			candidate["updatedAt"] = _owner->now();
+			JsonDocument storedCandidate;
+			cloneResult = FreshCloneJson(storedCandidate, candidate.as<JsonVariantConst>(), "updated document");
+			if (!cloneResult) {
+				return cloneResult;
+			}
 			FreshResult sizeResult =
-			    _owner->checkPayloadSize(measureMsgPack(candidate), _owner->_config.maxDocumentBytes, "document");
+			    _owner->checkPayloadSize(measureMsgPack(storedCandidate), _owner->_config.maxDocumentBytes, "document");
 			if (!sizeResult) {
 				return sizeResult;
 			}
 			if (_state->validator) {
-				FreshValidationResult validation = _state->validator(candidate);
+				FreshValidationResult validation = _state->validator(storedCandidate);
 				if (!validation) {
 					return FreshResult::failure(
 					    FreshStatus::ValidationFailed,
@@ -338,29 +369,65 @@ FreshResult FreshModel::update(
 					);
 				}
 			}
-			candidates.push_back(FreshUpdateCandidate{.id = entry.first, .doc = std::move(candidate)});
+
+			JsonDocument journalDoc;
+			cloneResult = FreshCloneJson(journalDoc, storedCandidate.as<JsonVariantConst>(), "journal document");
+			if (!cloneResult) {
+				return cloneResult;
+			}
+			candidates.push_back(
+			    FreshUpdateCandidate{
+			        .id = entry.first,
+			        .doc = std::move(storedCandidate),
+			        .journalDoc = std::move(journalDoc)
+			    }
+			);
 		}
 
-		for (const FreshUpdateCandidate &candidate : candidates) {
+		if (!candidates.empty() && returnMode == FreshReturn::ChangedDocs) {
+			JsonDocument changedDocs;
+			JsonArray array = changedDocs.to<JsonArray>();
+			for (const FreshUpdateCandidate &candidate : candidates) {
+				array.add(candidate.doc.as<JsonVariantConst>());
+			}
+			FreshResult cloneResult =
+			    FreshCloneJson(result.doc, changedDocs.as<JsonVariantConst>(), "changed documents");
+			if (!cloneResult) {
+				return cloneResult;
+			}
+		} else if (!candidates.empty() && returnMode == FreshReturn::AllDocs) {
+			JsonDocument allDocs;
+			JsonArray array = allDocs.to<JsonArray>();
+			for (const auto &entry : _state->docs) {
+				const JsonDocument *doc = &entry.second;
+				for (const FreshUpdateCandidate &candidate : candidates) {
+					if (candidate.id == entry.first) {
+						doc = &candidate.doc;
+						break;
+					}
+				}
+				array.add(doc->as<JsonVariantConst>());
+			}
+			FreshResult cloneResult = FreshCloneJson(result.doc, allDocs.as<JsonVariantConst>(), "all documents");
+			if (!cloneResult) {
+				return cloneResult;
+			}
+		}
+
+		for (FreshUpdateCandidate &candidate : candidates) {
 			auto found = _state->docs.find(candidate.id);
 			if (found == _state->docs.end()) {
 				continue;
 			}
-			FreshCopyJson(found->second, candidate.doc);
 			FreshPendingRecord record;
 			record.op = FreshJournalOp::Update;
 			record.sequence = _owner->_nextPendingSequence++;
 			record.id = candidate.id;
-			FreshCopyJson(record.doc, candidate.doc);
-			_state->pending.push_back(record);
+			record.doc = std::move(candidate.journalDoc);
+			found->second = std::move(candidate.doc);
+			_state->pending.push_back(std::move(record));
 			_state->dirty = true;
 			result.affectedCount++;
-			if (returnMode == FreshReturn::ChangedDocs) {
-				JsonArray changedDocs =
-				    changedDocsCreated ? result.doc.as<JsonArray>() : result.doc.to<JsonArray>();
-				changedDocsCreated = true;
-				changedDocs.add(candidate.doc.as<JsonVariantConst>());
-			}
 			events.push_back({
 			    .type = FreshEventType::DocumentUpdated,
 			    .modelName = _state->name,
@@ -369,12 +436,7 @@ FreshResult FreshModel::update(
 			    .result = FreshResult::success("document updated", 1)
 			});
 		}
-		if (result.affectedCount > 0 && returnMode == FreshReturn::AllDocs) {
-			JsonArray array = result.doc.to<JsonArray>();
-			for (const auto &entry : _state->docs) {
-				array.add(entry.second.as<JsonVariantConst>());
-			}
-		} else if (result.affectedCount == 0) {
+		if (result.affectedCount == 0) {
 			result.message = "no documents updated";
 		}
 	}

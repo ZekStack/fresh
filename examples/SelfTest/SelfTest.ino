@@ -560,6 +560,160 @@ bool testBackupImportSizeLimit() {
 	return ok;
 }
 
+void overwriteBuffer(char *buffer, size_t size) {
+	if (buffer == nullptr || size == 0) {
+		return;
+	}
+	memset(buffer, 'X', size - 1);
+	buffer[size - 1] = '\0';
+}
+
+bool verifyOwnedJsonDocuments(Fresh &db) {
+	FreshResult found = db.model("User").findById("owned-create");
+	if (!assertResult(found, "find owned document")) {
+		return false;
+	}
+
+	const double ratio = found.doc["ratio"] | 0.0;
+	const bool userOk =
+	    assertTrue(strcmp(found.doc["name"] | "", "Updated One") == 0, "owned updateOne string changed") &&
+	    assertTrue(strcmp(found.doc["status"] | "", "Updated By Id") == 0, "owned updateById string changed") &&
+	    assertTrue(strcmp(found.doc["profile"]["label"] | "", "Patch Nested") == 0, "owned nested string changed") &&
+	    assertTrue(strcmp(found.doc["tags"][0] | "", "Create Array") == 0, "owned array string changed") &&
+	    assertTrue((found.doc["enabled"] | false), "owned bool changed") &&
+	    assertTrue((found.doc["count"] | 0) == 42, "owned integer changed") &&
+	    assertTrue(ratio > 12.49 && ratio < 12.51, "owned float changed") &&
+	    assertTrue(found.doc["nothing"].isNull(), "owned null changed");
+	if (!userOk) {
+		return false;
+	}
+
+	FreshResult entries = db.model("Log").retrieve();
+	if (!assertResult(entries, "retrieve owned stream entry")) {
+		return false;
+	}
+	JsonArrayConst streamEntries = entries.doc.as<JsonArrayConst>();
+	JsonObjectConst entry = streamEntries[0].as<JsonObjectConst>();
+	const double streamRatio = entry["ratio"] | 0.0;
+	return assertTrue(entries.affectedCount == 1, "owned stream count mismatch") &&
+	       assertTrue(strcmp(entry["message"] | "", "Stream Message") == 0, "owned stream string changed") &&
+	       assertTrue(strcmp(entry["details"]["label"] | "", "Stream Nested") == 0, "owned stream nested string changed") &&
+	       assertTrue(strcmp(entry["values"][0] | "", "Stream Array") == 0, "owned stream array string changed") &&
+	       assertTrue((entry["ok"] | false), "owned stream bool changed") &&
+	       assertTrue((entry["count"] | 0) == 7, "owned stream integer changed") &&
+	       assertTrue(streamRatio > 3.24 && streamRatio < 3.26, "owned stream float changed") &&
+	       assertTrue(entry["nothing"].isNull(), "owned stream null changed");
+}
+
+bool testOwnedJsonStackStrings() {
+	resetTestPath(TestPath);
+
+	Fresh db;
+	if (!assertResult(db.init(TestPath), "init")) {
+		return false;
+	}
+	FreshModelResult usersResult = db.createModel("User");
+	FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
+	if (!assertModelResult(usersResult, "create user model") ||
+	    !assertModelResult(logsResult, "create stream model")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	char createName[] = "Create Name";
+	char createNested[] = "Create Nested";
+	char createArray[] = "Create Array";
+	JsonDocument user;
+	user["_id"] = "owned-create";
+	user["name"] = JsonString(createName, true);
+	user["enabled"] = true;
+	user["count"] = 42;
+	user["ratio"] = 12.5;
+	user["nothing"] = nullptr;
+	user["profile"]["label"] = JsonString(createNested, true);
+	JsonArray tags = user["tags"].to<JsonArray>();
+	tags.add(JsonString(createArray, true));
+	tags.add(99);
+	if (!assertResult(usersResult.model.create(user), "create owned document")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	char updateName[] = "Updated One";
+	char updateNested[] = "Patch Nested";
+	JsonDocument updateOnePatch;
+	updateOnePatch["name"] = JsonString(updateName, true);
+	updateOnePatch["profile"]["label"] = JsonString(updateNested, true);
+	if (!assertResult(
+	        usersResult.model.updateOne(
+	            [](const JsonDocument &doc) {
+		            return strcmp(doc["_id"] | "", "owned-create") == 0;
+	            },
+	            updateOnePatch
+	        ),
+	        "updateOne owned document"
+	    )) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	char updateByIdStatus[] = "Updated By Id";
+	JsonDocument updateByIdPatch;
+	updateByIdPatch["status"] = JsonString(updateByIdStatus, true);
+	if (!assertResult(usersResult.model.updateById("owned-create", updateByIdPatch), "updateById owned document")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	char streamMessage[] = "Stream Message";
+	char streamNested[] = "Stream Nested";
+	char streamArray[] = "Stream Array";
+	JsonDocument streamEntry;
+	streamEntry["message"] = JsonString(streamMessage, true);
+	streamEntry["ok"] = true;
+	streamEntry["count"] = 7;
+	streamEntry["ratio"] = 3.25;
+	streamEntry["nothing"] = nullptr;
+	streamEntry["details"]["label"] = JsonString(streamNested, true);
+	JsonArray streamValues = streamEntry["values"].to<JsonArray>();
+	streamValues.add(JsonString(streamArray, true));
+	streamValues.add(11);
+	if (!assertResult(logsResult.model.append(streamEntry), "append owned stream entry")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	overwriteBuffer(createName, sizeof(createName));
+	overwriteBuffer(createNested, sizeof(createNested));
+	overwriteBuffer(createArray, sizeof(createArray));
+	overwriteBuffer(updateName, sizeof(updateName));
+	overwriteBuffer(updateNested, sizeof(updateNested));
+	overwriteBuffer(updateByIdStatus, sizeof(updateByIdStatus));
+	overwriteBuffer(streamMessage, sizeof(streamMessage));
+	overwriteBuffer(streamNested, sizeof(streamNested));
+	overwriteBuffer(streamArray, sizeof(streamArray));
+
+	if (!verifyOwnedJsonDocuments(db)) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+	if (!assertResult(db.forceSync(), "force sync owned documents")) {
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+	if (!assertResult(db.deinit(), "deinit owned documents")) {
+		return false;
+	}
+
+	Fresh loaded;
+	if (!assertResult(loaded.init(TestPath), "reload owned documents")) {
+		return false;
+	}
+	const bool ok = verifyOwnedJsonDocuments(loaded);
+	loaded.deinit();
+	return ok;
+}
+
 bool testStorageFullPreflight() {
 	resetTestPath(TestPath);
 
@@ -783,6 +937,7 @@ void setup() {
 	runTest("snapshot newer slot corrupt -> older slot recovery", testSnapshotNewerSlotRecovery);
 	runTest("size limits reject oversized writes", testSizeLimits);
 	runTest("backup import size limit", testBackupImportSizeLimit);
+	runTest("owned JSON survives stack buffer overwrite", testOwnedJsonStackStrings);
 	runTest("storage full preflight", testStorageFullPreflight);
 	runTest("empty database missing manifest slots", testEmptyDatabaseMissingManifestSlots);
 	runTest("manifest newer slot corrupt -> older slot recovery", testManifestNewerSlotRecovery);

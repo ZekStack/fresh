@@ -100,8 +100,7 @@ FreshResult FreshReadSlotFile(
 	if (error) {
 		return FreshResult::failure(FreshStatus::CorruptData, "failed to decode durable slot");
 	}
-	payload.clear();
-	payload.set(decoded.as<JsonVariantConst>());
+	payload = std::move(decoded);
 	generation = slotGeneration;
 	return FreshResult::success("durable slot loaded");
 }
@@ -130,8 +129,7 @@ FreshSlotReadResult readDurableSlot(const std::string &basePath, const char *fil
 			continue;
 		}
 		if (!result.hadValidSlot || candidateGeneration > result.generation) {
-			result.payload.clear();
-			result.payload.set(candidate.as<JsonVariantConst>());
+			result.payload = std::move(candidate);
 			result.generation = candidateGeneration;
 		}
 		result.hadValidSlot = true;
@@ -412,8 +410,11 @@ FreshResult Fresh::applyRecord(
 	if (state->type == FreshModelType::Stream) {
 		if (record.op == FreshJournalOp::Append) {
 			JsonDocument copy;
-			FreshCopyJson(copy, record.doc);
-			state->streamEntries.push_back(copy);
+			FreshResult cloneResult = FreshCloneJson(copy, record.doc.as<JsonVariantConst>(), "stream record");
+			if (!cloneResult) {
+				return cloneResult;
+			}
+			state->streamEntries.push_back(std::move(copy));
 		}
 		return FreshResult::success();
 	}
@@ -424,8 +425,11 @@ FreshResult Fresh::applyRecord(
 	}
 
 	JsonDocument copy;
-	FreshCopyJson(copy, record.doc);
-	state->docs[record.id] = copy;
+	FreshResult cloneResult = FreshCloneJson(copy, record.doc.as<JsonVariantConst>(), "journal document");
+	if (!cloneResult) {
+		return cloneResult;
+	}
+	state->docs[record.id] = std::move(copy);
 	return FreshResult::success();
 }
 
@@ -444,8 +448,12 @@ FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state)
 	if (state->type == FreshModelType::Stream) {
 		for (JsonVariantConst entry : snapshotSlot.payload["entries"].as<JsonArrayConst>()) {
 			JsonDocument copy;
-			copy.set(entry);
-			state->streamEntries.push_back(copy);
+			FreshResult cloneResult = FreshCloneJson(copy, entry, "snapshot stream entry");
+			if (!cloneResult) {
+				state->degraded = true;
+				return cloneResult;
+			}
+			state->streamEntries.push_back(std::move(copy));
 		}
 		if (snapshotSlot.hadCorruptSlot) {
 			state->degraded = true;
@@ -456,10 +464,14 @@ FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state)
 
 	for (JsonVariantConst entry : snapshotSlot.payload["docs"].as<JsonArrayConst>()) {
 		JsonDocument copy;
-		copy.set(entry);
+		FreshResult cloneResult = FreshCloneJson(copy, entry, "snapshot document");
+		if (!cloneResult) {
+			state->degraded = true;
+			return cloneResult;
+		}
 		const char *id = copy["_id"] | "";
 		if (*id != '\0') {
-			state->docs[id] = copy;
+			state->docs[id] = std::move(copy);
 		}
 	}
 	if (snapshotSlot.hadCorruptSlot) {
@@ -545,8 +557,18 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 			break;
 		}
 		record.id = recordDoc["id"] | "";
-		record.doc.set(recordDoc["doc"]);
-		applyRecord(state, record);
+		FreshResult cloneResult = FreshCloneJson(record.doc, recordDoc["doc"].as<JsonVariantConst>(), "journal document");
+		if (!cloneResult) {
+			state->degraded = true;
+			file.close();
+			return cloneResult;
+		}
+		FreshResult applyResult = applyRecord(state, record);
+		if (!applyResult) {
+			state->degraded = true;
+			file.close();
+			return applyResult;
+		}
 		state->recordsSinceSnapshot++;
 		state->bytesSinceSnapshot += payloadSize;
 	}
