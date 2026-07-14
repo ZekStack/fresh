@@ -1,0 +1,258 @@
+ *document = &entry.second;
+				for (const FreshUpdateCandidate &candidate : candidates) {
+					if (candidate.id == entry.first) {
+						document = &candidate.doc;
+						break;
+					}
+				}
+				array.add(document->as<JsonVariantConst>());
+			}
+		}
+
+		_owner->_nextPendingSequence = nextSequence;
+		for (FreshUpdateCandidate &candidate : candidates) {
+			auto found = _state->docs.find(candidate.id);
+			if (found == _state->docs.end()) {
+				continue;
+			}
+			_state->lastSequence = candidate.record.sequence;
+			found->second = std::move(candidate.doc);
+			_state->pending.push_back(std::move(candidate.record));
+			_state->dirty = true;
+			result.affectedCount++;
+			events.push_back({
+			    .type = FreshEventType::DocumentUpdated,
+			    .modelName = _state->name,
+			    .documentId = candidate.id,
+			    .affectedCount = 1,
+			    .result = FreshResult::success("document updated", 1)
+			});
+		}
+		if (result.affectedCount == 0) {
+			result.message = "no documents updated";
+		}
+	}
+	for (const FreshEvent &event : events) {
+		_owner->emitEvent(event);
+	}
+	return result;
+}
+
+FreshResult FreshModel::deleteById(const char *id) {
+	if (id == nullptr) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "id is required");
+	}
+	return deleteById(std::string(id));
+}
+
+FreshResult FreshModel::deleteById(const std::string &id) {
+	return deleteOne(
+	    [id](const JsonDocument &doc) {
+		    const char *docId = doc["_id"] | "";
+		    return id == docId;
+	    }
+	);
+}
+
+FreshResult FreshModel::deleteOne(FreshPredicate predicate) {
+	if (!predicate) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "predicate is required");
+	}
+	return deleteMany(
+	    [predicate, deleted = false](const JsonDocument &doc) mutable {
+		    if (deleted || !predicate(doc)) {
+			    return false;
+		    }
+		    deleted = true;
+		    return true;
+	    }
+	);
+}
+
+FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
+	if (_owner == nullptr || _state == nullptr) {
+		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
+	}
+	if (!predicate) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "predicate is required");
+	}
+
+	std::vector<FreshEvent> events;
+	FreshResult result = FreshResult::success("documents deleted");
+	{
+		FreshLock lock(*_owner->_mutex);
+		if (!lock) {
+			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		}
+		FreshResult valid = validateLocked(
+		    true,
+		    FreshModelType::General,
+		    "delete is only valid for general models"
+		);
+		if (!valid) {
+			return valid;
+		}
+
+		std::vector<std::string> ids;
+		for (const auto &entry : _state->docs) {
+			if (predicate(entry.second)) {
+				ids.push_back(entry.first);
+			}
+		}
+
+		std::vector<FreshPendingRecord> records;
+		records.reserve(ids.size());
+		uint64_t nextSequence = _owner->_nextPendingSequence;
+		for (const std::string &id : ids) {
+			FreshPendingRecord record;
+			record.op = FreshJournalOp::Delete;
+			record.sequence = nextSequence++;
+			record.id = id;
+			JsonDocument recordDoc = _owner->recordToJson(record);
+			FreshResult sizeResult = _owner->checkPayloadSize(
+			    measureMsgPack(recordDoc),
+			    _owner->_config.maxJournalRecordBytes,
+			    "journal record"
+			);
+			if (!sizeResult) {
+				return sizeResult;
+			}
+			records.push_back(std::move(record));
+		}
+
+		_owner->_nextPendingSequence = nextSequence;
+		for (FreshPendingRecord &record : records) {
+			_state->docs.erase(record.id);
+			_state->lastSequence = record.sequence;
+			const std::string id = record.id;
+			_state->pending.push_back(std::move(record));
+			_state->dirty = true;
+			result.affectedCount++;
+			events.push_back({
+			    .type = FreshEventType::DocumentDeleted,
+			    .modelName = _state->name,
+			    .documentId = id,
+			    .affectedCount = 1,
+			    .result = FreshResult::success("document deleted", 1)
+			});
+		}
+		if (result.affectedCount == 0) {
+			result.message = "no documents deleted";
+		}
+	}
+	for (const FreshEvent &event : events) {
+		_owner->emitEvent(event);
+	}
+	return result;
+}
+
+FreshResult FreshModel::retrieve() const {
+	return retrieve(nullptr, FreshStreamRetrieveOptions());
+}
+
+FreshResult FreshModel::retrieve(const FreshStreamRetrieveOptions &options) const {
+	return retrieve(nullptr, options);
+}
+
+FreshResult FreshModel::retrieve(
+    FreshPredicate predicate,
+    const FreshStreamRetrieveOptions &options
+) const {
+	if (_owner == nullptr || _state == nullptr) {
+		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
+	}
+	FreshLock lock(*_owner->_mutex);
+	if (!lock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+	}
+	FreshResult valid = validateLocked(
+	    true,
+	    FreshModelType::Stream,
+	    "retrieve is only valid for stream models"
+	);
+	if (!valid) {
+		return valid;
+	}
+
+	FreshResult result = FreshResult::success("stream entries found");
+	JsonArray array = result.doc.to<JsonArray>();
+	size_t skipped = 0;
+	const size_t total = _state->streamEntries.size();
+	for (size_t i = 0; i < total; ++i) {
+		const size_t index = options.reverse ? total - 1 - i : i;
+		const JsonDocument &entry = _state->streamEntries[index];
+		if (predicate && !predicate(entry)) {
+			continue;
+		}
+		if (skipped < options.offset) {
+			skipped++;
+			continue;
+		}
+		array.add(entry.as<JsonVariantConst>());
+		result.affectedCount++;
+		if (options.limit > 0 && result.affectedCount >= options.limit) {
+			break;
+		}
+	}
+	if (result.affectedCount == 0) {
+		result.message = "no stream entries found";
+	}
+	return result;
+}
+
+FreshResult FreshModel::streamTo(Print &out) const {
+	if (_owner == nullptr || _state == nullptr) {
+		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
+	}
+	FreshLock lock(*_owner->_mutex);
+	if (!lock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+	}
+	FreshResult valid = validateLocked(
+	    true,
+	    FreshModelType::Stream,
+	    "streamTo is only valid for stream models"
+	);
+	if (!valid) {
+		return valid;
+	}
+	size_t count = 0;
+	for (const JsonDocument &entry : _state->streamEntries) {
+		count += serializeMsgPack(entry, out);
+	}
+	return FreshResult::success("stream exported", count);
+}
+
+FreshModelResult Fresh::createModel(const char *modelName) {
+	FreshModelType type = FreshModelType::General;
+	{
+		FreshLock lock(*_mutex);
+		if (!lock) {
+			return {
+			    .result = false,
+			    .status = FreshStatus::InternalError,
+			    .message = "failed to lock database"
+			};
+		}
+		if (!_initialized) {
+			return {
+			    .result = false,
+			    .status = FreshStatus::NotInitialized,
+			    .message = "database not initialized"
+			};
+		}
+		type = _config.defaultModelType;
+	}
+	return createModel(modelName, type);
+}
+
+FreshModel Fresh::model(const char *modelName) {
+	if (!FreshIsValidName(modelName)) {
+		return FreshModel();
+	}
+	FreshLock lock(*_mutex);
+	if (!lock || !_initialized || _stopping) {
+		return FreshModel();
+	}
+	auto found = _models.find(modelName);
+	if (found == _models
