@@ -11,12 +11,24 @@
 namespace {
 
 struct FreshJournalSyncRecord {
+	FreshJournalSyncRecord() = default;
+	FreshJournalSyncRecord(const FreshJournalSyncRecord &) = delete;
+	FreshJournalSyncRecord &operator=(const FreshJournalSyncRecord &) = delete;
+	FreshJournalSyncRecord(FreshJournalSyncRecord &&) noexcept = default;
+	FreshJournalSyncRecord &operator=(FreshJournalSyncRecord &&) noexcept = default;
+
 	uint64_t sequence = 0;
 	FreshJournalOp op = FreshJournalOp::Create;
 	FreshBuffer payload;
 };
 
 struct FreshModelSyncBatch {
+	FreshModelSyncBatch() = default;
+	FreshModelSyncBatch(const FreshModelSyncBatch &) = delete;
+	FreshModelSyncBatch &operator=(const FreshModelSyncBatch &) = delete;
+	FreshModelSyncBatch(FreshModelSyncBatch &&) noexcept = default;
+	FreshModelSyncBatch &operator=(FreshModelSyncBatch &&) noexcept = default;
+
 	std::shared_ptr<void> state;
 	std::string name;
 	std::string storageId;
