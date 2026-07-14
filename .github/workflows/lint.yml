@@ -1,4 +1,4 @@
-name: Lint (Advisory)
+name: Lint
 
 on:
   pull_request:
@@ -11,12 +11,14 @@ permissions:
 
 jobs:
   metadata_lint:
-    name: Metadata Lint (advisory)
+    name: Metadata Lint
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Check version consistency
+        run: python3 scripts/check_version_consistency.py
 
       - name: Verify library metadata
         run: grep -qx 'name=Fresh' library.properties
