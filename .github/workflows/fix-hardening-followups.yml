@@ -1,0 +1,54 @@
+name: Fix hardening follow-ups
+
+on:
+  push:
+    branches:
+      - agent/v0.1.0-release-hardening
+    paths:
+      - '.github/workflows/fix-hardening-followups.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply follow-up fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          storage = Path('src/FreshStorage.cpp')
+          text = storage.read_text()
+          old = '''\tFreshResult verifyResult = FreshReadSlotFile(targetPath, verified, verifiedGeneration, maxPayloadBytes);\n\tif (!verifyResult || verifiedGeneration != nextGeneration) {\n\t\treturn FreshResult::failure(FreshStatus::FileSystemError, "failed to verify durable slot");\n\t}'''
+          new = '''\tFreshResult verifyResult = FreshReadSlotFile(targetPath, verified, verifiedGeneration, maxPayloadBytes);\n\tif (!verifyResult) {\n\t\treturn verifyResult;\n\t}\n\tif (verifiedGeneration != nextGeneration) {\n\t\treturn FreshResult::failure(FreshStatus::FileSystemError, "failed to verify durable slot");\n\t}'''
+          if old not in text:
+              raise SystemExit('durable-slot verification block not found')
+          storage.write_text(text.replace(old, new, 1))
+
+          backup = Path('src/FreshBackup.cpp')
+          text = backup.read_text()
+          old = '''\tsize_t affectedCount = 0;\n\t{\n\t\tFreshLock lock(*_mutex);'''
+          new = '''\tsize_t affectedCount = 0;\n\tTaskHandle_t syncTaskHandle = nullptr;\n\t{\n\t\tFreshLock lock(*_mutex);'''
+          if old not in text:
+              raise SystemExit('backup import lock block not found')
+          text = text.replace(old, new, 1)
+          old = '''\t\t_manifestDirty = true;\n\t\t_manifestEpoch++;\n\t}\n\n\tif (_syncTaskHandle != nullptr) {\n\t\txTaskNotifyGive(_syncTaskHandle);\n\t}'''
+          new = '''\t\t_manifestDirty = true;\n\t\t_manifestEpoch++;\n\t\tsyncTaskHandle = _syncTaskHandle;\n\t}\n\n\tif (syncTaskHandle != nullptr) {\n\t\txTaskNotifyGive(syncTaskHandle);\n\t}'''
+          if old not in text:
+              raise SystemExit('backup import notification block not found')
+          backup.write_text(text.replace(old, new, 1))
+          PY
+
+          rm -f .github/workflows/fix-hardening-followups.yml
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Tighten OOM and backup synchronization paths'
+          git push
