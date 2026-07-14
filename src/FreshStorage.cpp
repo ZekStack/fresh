@@ -872,7 +872,9 @@ FreshResult Fresh::syncDirty(bool force) {
 			if (!state->dropped && state->storageId.empty()) {
 				do {
 					state->storageId = FreshMakeId();
-				} while (!usedStorageIds.insert(state->storageId).second);
+				} while (usedStorageIds.find(state->storageId) != usedStorageIds.end() ||
+				         LittleFS.exists(modelPath(state->storageId).c_str()));
+				usedStorageIds.insert(state->storageId);
 				state->storageEpoch++;
 				state->dirty = true;
 				state->snapshotRequired = true;

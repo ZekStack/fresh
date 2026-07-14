@@ -1,6 +1,8 @@
 #include "Fresh.h"
 #include "internal/FreshInternal.h"
 
+#include <LittleFS.h>
+
 #include <utility>
 
 FreshModel::FreshModel(Fresh *owner, std::shared_ptr<State> state) : _owner(owner), _state(state) {
@@ -822,7 +824,7 @@ FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) 
 		bool duplicate = false;
 		do {
 			storageId = FreshMakeId();
-			duplicate = false;
+			duplicate = LittleFS.exists(modelPath(storageId).c_str());
 			for (const auto &entry : _models) {
 				if (entry.second->storageId == storageId) {
 					duplicate = true;
