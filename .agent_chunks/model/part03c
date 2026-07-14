@@ -1,0 +1,11 @@
+{
+		    .type = FreshEventType::ModelRenamed,
+		    .modelName = newName,
+		    .previousModelName = oldName,
+		    .affectedCount = 1,
+		    .result = result
+		};
+	}
+	emitEvent(event);
+	return result;
+}
