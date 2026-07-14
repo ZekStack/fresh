@@ -18,7 +18,7 @@ The sync commit order is:
 2. Commit the durable manifest slot.
 3. Remove storage for models no longer referenced by the committed manifest.
 
-A reset at any persistence boundary therefore exposes either the old committed manifest or the new committed manifest. A manifest never points at storage that Fresh has not attempted to make durable first. Cleanup failures may leave unreferenced storage, but cannot remove data still referenced by the committed manifest.
+A reset at any persistence boundary therefore exposes either the old committed manifest or the new committed manifest. A manifest never points at storage that Fresh has not attempted to make durable first. Cleanup failures may leave unreferenced storage, but cannot remove data still referenced by the committed manifest. Storage ID generation also rejects IDs whose directories already exist, so an orphan left before manifest commit cannot be reused by a later model.
 
 ## Synchronization policy
 
