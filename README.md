@@ -110,7 +110,7 @@ void loop() {
 * `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context.
 * `flush()` synchronously persists captured pending journal operations without forcing a checkpoint snapshot. Use it as a durability barrier before a controlled reboot.
 * `deinit()` waits for the sync task to exit before owned state is destroyed. By default it performs a final forced checkpoint; pass `{.sync = false}` to stop without final persistence.
-* The destructor uses a bounded final `deinit({.sync = true, .timeoutMS = 2000})`, but automatic destructor cleanup is best-effort only. If shutdown times out, the destructor cannot report the failure. Production code that needs deterministic shutdown or guaranteed final persistence should call `FreshResult result = db.deinit();` manually and check the result before the object is destroyed.
+* A bounded explicit `deinit()` may return `FreshStatus::Timeout`; the object remains in a stopping state and a later `deinit()` can finish waiting. The destructor uses an unbounded task-exit barrier because owned state cannot be destroyed while the sync task may still access it. Production code should still call `FreshResult result = db.deinit();` manually when it needs to observe final-sync failures.
 * `diagnostics()` reports model load recovery after `init()`, including corrupt snapshots or recovered journals.
 * `create()` intentionally mutates the input `JsonDocument` by adding `_id`, `createdAt`, and `updatedAt`.
 * After `startBackup()`, keep calling `readBackup()` until backup finishes or call `cancelBackup()`. An undrained backup can occupy the sync task and delay normal persistence.
@@ -119,7 +119,7 @@ void loop() {
 * Fresh enforces configurable document, journal, snapshot, and LittleFS reserve limits. Oversized payloads return `FreshStatus::SizeLimitExceeded`; sync preflight space failures return `FreshStatus::StorageFull`.
 * Callbacks are notification hooks. Do not call `deinit()`, `flush()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
 * The current storage and backup formats use ArduinoJson MessagePack. Manifest and snapshot files use two durable slot files with checksummed binary headers. Formats are not stable compatibility contracts yet, and Fresh does not migrate older single-file `manifest.msgpack` / `snapshot.msgpack` storage into the durable-slot format.
-* Fresh `0.1.0` uses manifest/snapshot payload v2 and journal v2 with replay checkpoints. It intentionally does not load `0.0.x` database files; erase the development database when upgrading.
+* Fresh `0.1.0` uses manifest/snapshot payload v3 and journal v3. Manifest entries map logical names to immutable storage IDs, so rename never moves model directories. The release intentionally rejects earlier pre-release storage formats; erase the development database when upgrading.
 
 ## When not to use Fresh
 
@@ -149,8 +149,9 @@ The repository includes topic-focused Arduino sketches in the `examples/` folder
 | `BackupStream` | Backup callbacks, `startBackup`, chunked `readBackup`, status checks, and `backupImport`. |
 | `ModelManagement` | Create, rename, drop, drop selected, and drop all models. |
 | `SelfTest` | Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior. It uses `/fresh_selftest`, `/fresh_selftest_src`, and `/fresh_selftest_dst`, touches internal storage files, and should only be run on a test device or test partition. |
+| `ReleaseHardeningTest` | Focused v0.1.0 validation for immutable storage IDs, rename persistence, configuration ceilings, synchronized metadata access, and repeatable shutdown. |
 
-`SelfTest` is compiled by CI through the examples build loop, but it is not executed in CI. Run it manually on ESP32 hardware. A successful run ends like this:
+`SelfTest` and `ReleaseHardeningTest` are compiled by CI through the examples build loop, but they are not executed in CI. Run both manually on ESP32 hardware. A successful run ends like this:
 
 ```txt
 Fresh SelfTest starting
@@ -176,6 +177,7 @@ Detailed documentation is available in the `docs/` folder.
 | [`docs/api.md`](docs/api.md) | Public classes, result types, callbacks, and backup API. |
 | [`docs/examples.md`](docs/examples.md) | Explanation of all included examples. |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common issues and solutions. |
+| [`docs/release-hardening.md`](docs/release-hardening.md) | v0.1.0 persistence, synchronization, shutdown, allocation, and validation invariants. |
 
 ## API overview
 
