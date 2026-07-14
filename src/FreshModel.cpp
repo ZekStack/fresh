@@ -101,6 +101,7 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
 
+	const uint64_t time = _owner->now();
 	FreshEvent event;
 	FreshResult result;
 	{
@@ -125,7 +126,6 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 			doc["_id"] = id;
 		}
 
-		const uint64_t time = _owner->now();
 		doc["createdAt"] = time;
 		doc["updatedAt"] = time;
 
@@ -393,6 +393,7 @@ FreshResult FreshModel::update(
 		return FreshResult::failure(FreshStatus::InvalidArgument, "predicate is required");
 	}
 
+	const uint64_t updateTime = _owner->now();
 	std::vector<FreshEvent> events;
 	FreshResult result = FreshResult::success("documents updated");
 	{
@@ -427,7 +428,7 @@ FreshResult FreshModel::update(
 				return cloneResult;
 			}
 			FreshMergePatch(candidate, patch);
-			candidate["updatedAt"] = _owner->now();
+			candidate["updatedAt"] = updateTime;
 
 			JsonDocument storedCandidate;
 			cloneResult = FreshCloneJson(
