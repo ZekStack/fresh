@@ -6,9 +6,10 @@
 #include <Print.h>
 #include <Stream.h>
 #include <functional>
+#include <initializer_list>
+#include <map>
 #include <memory>
 #include <string>
-#include <map>
 #include <vector>
 
 #if defined(ESP32)
@@ -223,7 +224,7 @@ class FreshModel {
 
 	explicit operator bool() const;
 
-	const std::string &name() const;
+	std::string name() const;
 	FreshModelType type() const;
 
 	FreshResult setValidator(FreshBoolValidator validator);
@@ -280,6 +281,11 @@ class FreshModel {
 	struct State;
 
 	FreshModel(Fresh *owner, std::shared_ptr<State> state);
+	FreshResult validateLocked(
+	    bool requireType = false,
+	    FreshModelType requiredType = FreshModelType::General,
+	    const char *unsupportedMessage = "unsupported operation"
+	) const;
 
 	Fresh *_owner = nullptr;
 	std::shared_ptr<State> _state;
@@ -358,8 +364,9 @@ class Fresh {
 	void emitEvent(FreshEvent event);
 	void emitSync(FreshResult result);
 
-	std::string modelPath(const std::string &name) const;
-	std::string modelFile(const std::string &name, const char *fileName) const;
+	FreshResult validateConfig(const FreshConfig &config) const;
+	std::string modelPath(const std::string &storageId) const;
+	std::string modelFile(const std::string &storageId, const char *fileName) const;
 	FreshResult ensureDir(const std::string &path);
 	FreshResult checkFreeSpace(size_t requiredBytes) const;
 	FreshResult checkPayloadSize(size_t payloadBytes, size_t limit, const char *label) const;
@@ -390,6 +397,7 @@ class Fresh {
 	bool _stopTask = false;
 	bool _manifestDirty = false;
 	bool _forceSyncRequested = false;
+	bool _syncTaskStarted = false;
 	uint32_t _manifestEpoch = 0;
 	uint64_t _nextPendingSequence = 1;
 	TaskHandle_t _syncTaskHandle = nullptr;

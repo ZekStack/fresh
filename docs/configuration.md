@@ -101,7 +101,9 @@ Fresh checks document, journal record, snapshot, and LittleFS free-space limits 
 
 `minFreeBytes` prevents Fresh from intentionally filling LittleFS to the end of the partition. A sync fails with `FreshStatus::StorageFull` when the bytes Fresh needs to write now plus this reserve exceed reported free space.
 
-The defaults are strict embedded defaults. Raise them only when the LittleFS partition and RAM budget can support larger payloads.
+The defaults are strict embedded defaults. Raise them only when the LittleFS partition and RAM budget can support larger payloads. Fresh rejects invalid configurations during `init()` before loading database state.
+
+Manifest, snapshot, and journal payloads have an absolute 1 MiB ceiling. `maxDocumentBytes`, `maxJournalRecordBytes`, and `maxSnapshotBytes` must be nonzero and no greater than this ceiling; the journal limit must exceed the document limit, and the snapshot limit must be at least the document limit. `backupBufferSize` must be between 1 byte and 1 MiB.
 
 ## Backup buffer
 

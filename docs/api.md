@@ -87,7 +87,7 @@ db.deinit({.sync = false});
 db.deinit({.sync = true, .timeoutMS = 5000});
 ```
 
-`sync` defaults to `true`. When `sync` is `false`, Fresh stops without a final checkpoint, so dirty RAM state that has not already synced may be lost. The destructor calls `deinit({.sync = true, .timeoutMS = 2000})` because destructors should not block indefinitely, but automatic destructor cleanup is best-effort only. If shutdown times out, the destructor cannot report the failure. Applications that need deterministic shutdown or guaranteed final persistence should call `FreshResult result = db.deinit();` manually and check the result before the object is destroyed.
+`sync` defaults to `true`. When `sync` is `false`, Fresh stops without a final checkpoint, so dirty RAM state that has not already synced may be lost. A bounded explicit `deinit()` may return `FreshStatus::Timeout`; the instance remains alive in its stopping state and a later call can finish waiting. The destructor uses an unbounded task-exit barrier and never releases worker-owned state while the sync task may still access the object. Applications that need to observe final-sync failures should call `FreshResult result = db.deinit();` manually and check the result before destruction.
 
 String helper methods:
 

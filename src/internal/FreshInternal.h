@@ -1,8 +1,8 @@
 #pragma once
 
 #include "../Fresh.h"
+#include "FreshBuffer.h"
 #include "FreshMutex.h"
-#include "FreshPsramAllocator.h"
 
 #include <deque>
 #include <map>
@@ -11,13 +11,15 @@
 #include <vector>
 
 constexpr uint32_t FreshJournalMagic = 0x4c4a5246; // FRJL
-constexpr uint16_t FreshJournalVersion = 2;
+constexpr uint16_t FreshJournalVersion = 3;
 constexpr size_t FreshJournalHeaderSize = 4 + 2 + 1 + 1 + 4 + 4;
 constexpr uint32_t FreshSlotMagic = 0x544c5346; // FSLT
 constexpr uint16_t FreshSlotVersion = 1;
-constexpr uint32_t FreshManifestVersion = 2;
-constexpr uint32_t FreshSnapshotVersion = 2;
+constexpr uint32_t FreshManifestVersion = 3;
+constexpr uint32_t FreshSnapshotVersion = 3;
 constexpr size_t FreshSlotHeaderSize = 4 + 2 + 8 + 4 + 4;
+constexpr size_t FreshMaxPersistedPayloadBytes = 1024 * 1024;
+constexpr size_t FreshMaxBackupBufferBytes = 1024 * 1024;
 constexpr const char *FreshManifestFile = "manifest";
 constexpr const char *FreshSnapshotFile = "snapshot";
 constexpr const char *FreshJournalFile = "journal.log";
@@ -48,7 +50,7 @@ struct FreshSlotReadResult {
 
 struct FreshModel::State {
 	std::string name;
-	std::string previousName;
+	std::string storageId;
 	FreshModelType type = FreshModelType::General;
 	std::map<std::string, JsonDocument> docs;
 	std::deque<JsonDocument> streamEntries;
@@ -66,7 +68,7 @@ struct FreshModel::State {
 };
 
 struct FreshBackupRuntimeState {
-	FreshByteVector buffer;
+	FreshBuffer buffer;
 	size_t head = 0;
 	size_t tail = 0;
 	size_t used = 0;

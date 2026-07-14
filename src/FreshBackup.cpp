@@ -449,6 +449,7 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 	}
 
 	size_t affectedCount = 0;
+	TaskHandle_t syncTaskHandle = nullptr;
 	{
 		FreshLock lock(*_mutex);
 		if (!_initialized) {
@@ -521,10 +522,11 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 		}
 		_manifestDirty = true;
 		_manifestEpoch++;
+		syncTaskHandle = _syncTaskHandle;
 	}
 
-	if (_syncTaskHandle != nullptr) {
-		xTaskNotifyGive(_syncTaskHandle);
+	if (syncTaskHandle != nullptr) {
+		xTaskNotifyGive(syncTaskHandle);
 	}
 	return FreshResult::success("backup imported", affectedCount);
 }
