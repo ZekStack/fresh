@@ -1,0 +1,104 @@
+)) {
+			return FreshResult::failure(FreshStatus::ModelNotFound, "model not found");
+		}
+		if (found->second->dropped) {
+			return FreshResult::failure(FreshStatus::InvalidModel, "model was dropped");
+		}
+		found->second->dropped = true;
+		found->second->dirty = true;
+		found->second->snapshotRequired = false;
+		found->second->pending.clear();
+		found->second->storageEpoch++;
+		_manifestDirty = true;
+		_manifestEpoch++;
+		result = FreshResult::success("model dropped", 1);
+		event = {
+		    .type = FreshEventType::ModelDropped,
+		    .modelName = modelName,
+		    .affectedCount = 1,
+		    .result = result
+		};
+	}
+	emitEvent(event);
+	return result;
+}
+
+FreshResult Fresh::dropModels(std::initializer_list<const char *> modelNames) {
+	size_t affected = 0;
+	for (const char *name : modelNames) {
+		FreshResult result = dropModel(name);
+		if (result) {
+			affected++;
+		}
+	}
+	return FreshResult::success("models dropped", affected);
+}
+
+FreshResult Fresh::dropAllModels() {
+	std::vector<std::string> names;
+	{
+		FreshLock lock(*_mutex);
+		if (!lock) {
+			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		}
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
+		for (const auto &entry : _models) {
+			if (!entry.second->dropped) {
+				names.push_back(entry.first);
+			}
+		}
+	}
+	size_t affected = 0;
+	for (const std::string &name : names) {
+		if (dropModel(name.c_str())) {
+			affected++;
+		}
+	}
+	return FreshResult::success("all models dropped", affected);
+}
+
+FreshResult Fresh::renameModel(const char *oldName, const char *newName) {
+	if (!FreshIsValidName(oldName) || !FreshIsValidName(newName)) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "invalid model name");
+	}
+	if (strcmp(oldName, newName) == 0) {
+		return FreshResult::success("model name unchanged");
+	}
+
+	FreshEvent event;
+	FreshResult result;
+	{
+		FreshLock lock(*_mutex);
+		if (!lock) {
+			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		}
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
+		auto found = _models.find(oldName);
+		if (found == _models.end()) {
+			return FreshResult::failure(FreshStatus::ModelNotFound, "model not found");
+		}
+		if (found->second->dropped) {
+			return FreshResult::failure(FreshStatus::InvalidModel, "model was dropped");
+		}
+		if (_models.find(newName) != _models.end()) {
+			return FreshResult::failure(FreshStatus::ModelExists, "target model already exists");
+		}
+
+		auto state = found->second;
+		_models.erase(found);
+		state->name = newName;
+		_models[state->name] = state;
+		_manifestDirty = true;
+		_manifestEpoch++;
+		result = FreshResult::success("model renamed", 1);
+		event = 
