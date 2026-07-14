@@ -31,30 +31,131 @@ Fresh::Fresh()
 }
 
 Fresh::~Fresh() {
-	deinit(FreshDeinitOptions{.sync = true, .timeoutMS = 2000});
+	deinit(FreshDeinitOptions{.sync = true, .timeoutMS = UINT32_MAX});
 	if (_syncTaskExited != nullptr) {
 		vSemaphoreDelete(_syncTaskExited);
 		_syncTaskExited = nullptr;
 	}
 }
 
+FreshResult Fresh::validateConfig(const FreshConfig &config) const {
+	if (_syncTaskExited == nullptr) {
+		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate sync task exit signal");
+	}
+	if (config.syncIntervalMS == 0) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "sync interval must be greater than zero");
+	}
+	if (config.syncTaskStackSize == 0) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "sync task stack size must be greater than zero");
+	}
+	if (config.syncTaskPriority >= configMAX_PRIORITIES) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "sync task priority is out of range");
+	}
+	if (config.syncTaskCore != tskNO_AFFINITY &&
+	    (config.syncTaskCore < 0 || config.syncTaskCore >= static_cast<BaseType_t>(portNUM_PROCESSORS))) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "sync task core is out of range");
+	}
+	if (config.compressionType != FreshCompressionType::MessagePack) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "unsupported compression type");
+	}
+	if (config.backupBufferSize == 0 || config.backupBufferSize > FreshMaxBackupBufferBytes) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "backup buffer size is out of range");
+	}
+	if (config.maxDocumentBytes == 0 || config.maxDocumentBytes > FreshMaxPersistedPayloadBytes) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "document size limit is out of range");
+	}
+	if (config.maxJournalRecordBytes == 0 ||
+	    config.maxJournalRecordBytes > FreshMaxPersistedPayloadBytes) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "journal record size limit is out of range");
+	}
+	if (config.maxSnapshotBytes == 0 || config.maxSnapshotBytes > FreshMaxPersistedPayloadBytes) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "snapshot size limit is out of range");
+	}
+	if (config.maxJournalRecordBytes <= config.maxDocumentBytes) {
+		return FreshResult::failure(
+		    FreshStatus::InvalidArgument,
+		    "journal record limit must exceed document limit"
+		);
+	}
+	if (config.maxSnapshotBytes < config.maxDocumentBytes) {
+		return FreshResult::failure(
+		    FreshStatus::InvalidArgument,
+		    "snapshot limit must be at least the document limit"
+		);
+	}
+	return FreshResult::success("configuration valid");
+}
+
 FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 	if (dbPath == nullptr || *dbPath == '\0') {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "db path is required");
 	}
+	FreshResult configResult = validateConfig(config);
+	if (!configResult) {
+		return configResult;
+	}
 
 	FreshLock lock(*_mutex);
-	if (_initialized) {
+	if (!lock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+	}
+	if (_initialized || _syncTaskStarted) {
 		return FreshResult::failure(FreshStatus::AlreadyInitialized, "database already initialized");
 	}
 
+	auto resetInitState = [this]() {
+		_models.clear();
+		_diagnostics = FreshDiagnostics();
+		_rootPath.clear();
+		_stopping = false;
+		_stopTask = false;
+		_manifestDirty = false;
+		_forceSyncRequested = false;
+		_manifestEpoch = 0;
+		_nextPendingSequence = 1;
+		_syncTaskHandle = nullptr;
+		_syncTaskStarted = false;
+		_backup->buffer.reset();
+		_backup->head = 0;
+		_backup->tail = 0;
+		_backup->used = 0;
+		_backup->requested = false;
+		_backup->running = false;
+		_backup->done = false;
+		_backup->cancelled = false;
+		_backup->state = FreshBackupState::NotRunning;
+		_backup->result = FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
+	};
+
 	_config = config;
 	_diagnostics = FreshDiagnostics();
+	_models.clear();
 	_stopping = false;
 	_stopTask = false;
-	if (_syncTaskExited != nullptr) {
-		xSemaphoreTake(_syncTaskExited, 0);
+	_manifestDirty = false;
+	_forceSyncRequested = false;
+	_manifestEpoch = 0;
+	_nextPendingSequence = 1;
+	xSemaphoreTake(_syncTaskExited, 0);
+
+	const size_t backupBytes = std::max<size_t>(config.backupBufferSize, 512);
+	if (!_backup->buffer.allocate(backupBytes)) {
+		resetInitState();
+		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate backup buffer");
 	}
+	_backup->head = 0;
+	_backup->tail = 0;
+	_backup->used = 0;
+	_backup->progress = 0;
+	_backup->total = 0;
+	_backup->lastProgressEvent = 0;
+	_backup->requested = false;
+	_backup->running = false;
+	_backup->done = false;
+	_backup->cancelled = false;
+	_backup->state = FreshBackupState::NotRunning;
+	_backup->result = FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
+
 	_rootPath = dbPath;
 	if (_rootPath.back() == '/' && _rootPath.size() > 1) {
 		_rootPath.pop_back();
@@ -62,23 +163,30 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 
 	if (!LittleFS.begin(false)) {
 		if (!config.eraseOnFileSystemFailure || !LittleFS.begin(true)) {
+			resetInitState();
 			return FreshResult::failure(FreshStatus::FileSystemError, "failed to mount LittleFS");
 		}
 	}
 
 	FreshResult dirResult = ensureDir(_rootPath);
 	if (!dirResult) {
+		resetInitState();
+		return dirResult;
+	}
+	dirResult = ensureDir(FreshJoinPath(_rootPath, "models"));
+	if (!dirResult) {
+		resetInitState();
 		return dirResult;
 	}
 
 	FreshResult manifestResult = readManifest();
 	if (!manifestResult) {
-		_models.clear();
+		resetInitState();
 		return manifestResult;
 	}
 
-	_backup->buffer.resize(std::max<size_t>(config.backupBufferSize, 512));
 	_initialized = true;
+	_syncTaskStarted = true;
 
 	BaseType_t taskResult = pdFAIL;
 	if (config.syncTaskCore == tskNO_AFFINITY) {
@@ -104,6 +212,7 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 
 	if (taskResult != pdPASS) {
 		_initialized = false;
+		resetInitState();
 		return FreshResult::failure(FreshStatus::InternalError, "failed to create sync task");
 	}
 
@@ -115,17 +224,19 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 
 FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 	TaskHandle_t handle = nullptr;
+	bool taskStarted = false;
 	FreshResult finalSyncResult = FreshResult::success("database deinitialized");
 	{
 		FreshLock lock(*_mutex);
 		if (!lock) {
 			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 		}
-		if (!_initialized) {
+		if (!_initialized && !_syncTaskStarted) {
 			return FreshResult::success("database not initialized");
 		}
 		_stopping = true;
 		handle = _syncTaskHandle;
+		taskStarted = _syncTaskStarted;
 	}
 
 	{
@@ -138,7 +249,7 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		}
 	}
 
-	if (options.sync) {
+	if (options.sync && _initialized) {
 		finalSyncResult = syncDirty(true);
 	}
 
@@ -146,30 +257,20 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		FreshLock lock(*_mutex);
 		_stopTask = true;
 		handle = _syncTaskHandle;
+		taskStarted = _syncTaskStarted;
 	}
 	if (handle != nullptr) {
 		xTaskNotifyGive(handle);
 	}
 
-	if (handle != nullptr && _syncTaskExited != nullptr) {
+	if (taskStarted) {
 		const TickType_t timeoutTicks =
 		    options.timeoutMS == UINT32_MAX ? portMAX_DELAY : pdMS_TO_TICKS(options.timeoutMS);
 		if (xSemaphoreTake(_syncTaskExited, timeoutTicks) != pdTRUE) {
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out");
 		}
-	} else if (handle != nullptr) {
-		const uint32_t startedMS = millis();
-		while (true) {
-			{
-				FreshLock lock(*_mutex);
-				if (_syncTaskHandle == nullptr) {
-					break;
-				}
-			}
-			if (options.timeoutMS != UINT32_MAX && millis() - startedMS >= options.timeoutMS) {
-				return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out");
-			}
-			vTaskDelay(pdMS_TO_TICKS(1));
+		if (handle != nullptr) {
+			vTaskDelete(handle);
 		}
 	}
 
@@ -192,10 +293,13 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		_stopping = false;
 		_stopTask = false;
 		_syncTaskHandle = nullptr;
+		_syncTaskStarted = false;
+		_rootPath.clear();
 	}
 
 	{
 		FreshLock backupLock(_backup->mutex);
+		_backup->buffer.reset();
 		_backup->head = 0;
 		_backup->tail = 0;
 		_backup->used = 0;
@@ -241,14 +345,9 @@ void Fresh::syncLoop() {
 			}
 		}
 	}
-	{
-		FreshLock lock(*_mutex);
-		_syncTaskHandle = nullptr;
-	}
-	if (_syncTaskExited != nullptr) {
-		xSemaphoreGive(_syncTaskExited);
-	}
-	vTaskDelete(nullptr);
+
+	xSemaphoreGive(_syncTaskExited);
+	vTaskSuspend(nullptr);
 }
 
 uint64_t Fresh::now() {
@@ -290,6 +389,7 @@ void Fresh::emitSync(FreshResult result) {
 }
 
 FreshStorageInfo Fresh::storageInfo() const {
+	FreshLock lock(*_mutex);
 	FreshStorageInfo info;
 	info.totalBytes = LittleFS.totalBytes();
 	info.usedBytes = LittleFS.usedBytes();
