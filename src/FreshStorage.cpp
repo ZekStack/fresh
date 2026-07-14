@@ -248,7 +248,10 @@ FreshResult writeDurableSlot(
 	JsonDocument verified;
 	uint64_t verifiedGeneration = 0;
 	FreshResult verifyResult = FreshReadSlotFile(targetPath, verified, verifiedGeneration, maxPayloadBytes);
-	if (!verifyResult || verifiedGeneration != nextGeneration) {
+	if (!verifyResult) {
+		return verifyResult;
+	}
+	if (verifiedGeneration != nextGeneration) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to verify durable slot");
 	}
 	return FreshResult::success("durable slot written");
