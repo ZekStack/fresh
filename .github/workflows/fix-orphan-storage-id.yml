@@ -1,0 +1,51 @@
+name: Fix orphan storage ID collisions
+
+on:
+  push:
+    branches:
+      - agent/v0.1.0-release-hardening
+    paths:
+      - '.github/workflows/fix-orphan-storage-id.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reject storage IDs already present on flash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          model = Path('src/FreshModel.cpp')
+          text = model.read_text()
+          if '#include <LittleFS.h>' not in text:
+              text = text.replace('#include "internal/FreshInternal.h"\n', '#include "internal/FreshInternal.h"\n\n#include <LittleFS.h>\n', 1)
+          old = '''\t\tstd::string storageId;\n\t\tbool duplicate = false;\n\t\tdo {\n\t\t\tstorageId = FreshMakeId();\n\t\t\tduplicate = false;\n\t\t\tfor (const auto &entry : _models) {\n\t\t\t\tif (entry.second->storageId == storageId) {\n\t\t\t\t\tduplicate = true;\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\t\t\t}\n\t\t} while (duplicate);'''
+          new = '''\t\tstd::string storageId;\n\t\tbool duplicate = false;\n\t\tdo {\n\t\t\tstorageId = FreshMakeId();\n\t\t\tduplicate = LittleFS.exists(modelPath(storageId).c_str());\n\t\t\tfor (const auto &entry : _models) {\n\t\t\t\tif (entry.second->storageId == storageId) {\n\t\t\t\t\tduplicate = true;\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\t\t\t}\n\t\t} while (duplicate);'''
+          if old not in text:
+              raise SystemExit('createModel storage ID loop not found')
+          model.write_text(text.replace(old, new, 1))
+
+          storage = Path('src/FreshStorage.cpp')
+          text = storage.read_text()
+          old = '''\t\tfor (const auto &entry : _models) {\n\t\t\tconst auto &state = entry.second;\n\t\t\tif (!state->dropped && state->storageId.empty()) {\n\t\t\t\tdo {\n\t\t\t\t\tstate->storageId = FreshMakeId();\n\t\t\t\t} while (!usedStorageIds.insert(state->storageId).second);\n\t\t\t\tstate->storageEpoch++;'''
+          new = '''\t\tfor (const auto &entry : _models) {\n\t\t\tconst auto &state = entry.second;\n\t\t\tif (!state->dropped && state->storageId.empty()) {\n\t\t\t\tdo {\n\t\t\t\t\tstate->storageId = FreshMakeId();\n\t\t\t\t} while (usedStorageIds.find(state->storageId) != usedStorageIds.end() ||\n\t\t\t\t         LittleFS.exists(modelPath(state->storageId).c_str()));\n\t\t\t\tusedStorageIds.insert(state->storageId);\n\t\t\t\tstate->storageEpoch++;'''
+          if old not in text:
+              raise SystemExit('sync storage ID loop not found')
+          storage.write_text(text.replace(old, new, 1))
+          PY
+
+          rm -f .github/workflows/fix-orphan-storage-id.yml
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Avoid orphan storage ID collisions'
+          git push
