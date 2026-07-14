@@ -65,7 +65,7 @@ When enabled, Fresh may erase LittleFS during initialization recovery. That can 
 
 `compressionType` currently supports only `FreshCompressionType::MessagePack`.
 
-Do not treat the current storage or backup format as a stable external compatibility contract while Fresh is early-stage `0.0.1`.
+Do not treat the current storage or backup format as a stable external compatibility contract while Fresh is early-stage `0.1.0`.
 
 ## Model defaults
 
@@ -90,6 +90,8 @@ Fresh stores changes as journal records and writes snapshots when compaction thr
 Lower thresholds compact more often and may reduce startup replay work. Higher thresholds compact less often and may reduce snapshot writes.
 
 `forceSync()` and `forceSyncAsync()` bypass these thresholds for dirty models captured by that sync, forcing a checkpoint snapshot after pending journal records are written. Clean models are not snapshotted just because a forced sync was requested.
+
+`flush()` does not bypass the thresholds. It blocks until captured pending operations are durable in their journals, while allowing normal threshold-based compaction when a threshold is already due.
 
 ## Storage limits
 

@@ -2,6 +2,8 @@
 #include "internal/FreshInternal.h"
 
 #include <LittleFS.h>
+#include <algorithm>
+#include <cstring>
 #include <utility>
 
 namespace {
@@ -24,6 +26,7 @@ struct FreshModelSyncBatch {
 	bool dropped = false;
 	bool writeSnapshot = false;
 	uint32_t storageEpoch = 0;
+	uint64_t checkpointSequence = 0;
 	std::vector<FreshJournalSyncRecord> records;
 	JsonDocument snapshot;
 	size_t snapshotPayloadBytes = 0;
@@ -216,7 +219,8 @@ FreshResult FreshWriteJournalRecord(const FreshModelSyncBatch &batch, const Fres
 	return FreshResult::success("journal record written");
 }
 
-FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch) {
+FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch, bool &snapshotWritten) {
+	snapshotWritten = false;
 	if (!LittleFS.exists(batch.path.c_str()) && !LittleFS.mkdir(batch.path.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create directory");
 	}
@@ -229,8 +233,11 @@ FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch) {
 	if (!writeResult) {
 		return writeResult;
 	}
+	snapshotWritten = true;
 
-	LittleFS.remove(batch.journalPath.c_str());
+	if (LittleFS.exists(batch.journalPath.c_str()) && !LittleFS.remove(batch.journalPath.c_str())) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "snapshot written but journal cleanup failed");
+	}
 	return FreshResult::success("snapshot written");
 }
 
@@ -275,12 +282,13 @@ FreshModelSyncResult FreshWriteModelBatch(const FreshModelSyncBatch &batch) {
 	}
 
 	if (batch.writeSnapshot) {
-		FreshResult snapshotResult = FreshWriteSnapshotBatch(batch);
+		bool snapshotWritten = false;
+		FreshResult snapshotResult = FreshWriteSnapshotBatch(batch, snapshotWritten);
+		result.snapshotWritten = snapshotWritten;
 		if (!snapshotResult) {
 			result.result = snapshotResult;
 			return result;
 		}
-		result.snapshotWritten = true;
 		result.result = snapshotResult;
 	}
 
@@ -344,14 +352,21 @@ FreshResult Fresh::readManifest() {
 	if (manifestSlot.missing) {
 		return FreshResult::success("manifest not found");
 	}
+	if ((manifestSlot.payload["version"] | 0U) != FreshManifestVersion ||
+	    !manifestSlot.payload["models"].is<JsonArrayConst>()) {
+		return FreshResult::failure(FreshStatus::CorruptData, "unsupported or corrupt manifest payload");
+	}
 
 	JsonArrayConst modelsArray = manifestSlot.payload["models"].as<JsonArrayConst>();
 	bool failed = false;
 	for (JsonObjectConst modelObject : modelsArray) {
 		const char *name = modelObject["name"] | "";
 		const char *type = modelObject["type"] | "general";
-		if (!FreshIsValidName(name)) {
-			continue;
+		if (!FreshIsValidName(name) || (strcmp(type, "general") != 0 && strcmp(type, "stream") != 0)) {
+			return FreshResult::failure(FreshStatus::CorruptData, "manifest contains invalid model metadata");
+		}
+		if (_models.find(name) != _models.end()) {
+			return FreshResult::failure(FreshStatus::CorruptData, "manifest contains duplicate model");
 		}
 		auto state = std::make_shared<FreshModel::State>();
 		state->name = name;
@@ -415,12 +430,25 @@ FreshResult Fresh::applyRecord(
 				return cloneResult;
 			}
 			state->streamEntries.push_back(std::move(copy));
+			while (record.maxEntries > 0 && state->streamEntries.size() > record.maxEntries) {
+				state->streamEntries.pop_front();
+			}
+			state->lastSequence = record.sequence;
+			return FreshResult::success();
 		}
-		return FreshResult::success();
+		return FreshResult::failure(FreshStatus::CorruptData, "invalid stream journal operation");
+	}
+	if (record.op != FreshJournalOp::Create && record.op != FreshJournalOp::Update &&
+	    record.op != FreshJournalOp::Delete) {
+		return FreshResult::failure(FreshStatus::CorruptData, "invalid document journal operation");
+	}
+	if (record.id.empty()) {
+		return FreshResult::failure(FreshStatus::CorruptData, "journal document id is missing");
 	}
 
 	if (record.op == FreshJournalOp::Delete) {
 		state->docs.erase(record.id);
+		state->lastSequence = record.sequence;
 		return FreshResult::success();
 	}
 
@@ -430,6 +458,7 @@ FreshResult Fresh::applyRecord(
 		return cloneResult;
 	}
 	state->docs[record.id] = std::move(copy);
+	state->lastSequence = record.sequence;
 	return FreshResult::success();
 }
 
@@ -442,9 +471,29 @@ FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state)
 	if (snapshotSlot.missing) {
 		return FreshLoadResult(FreshLoadStatus::LoadedOk, "snapshot not found");
 	}
+	const char *snapshotName = snapshotSlot.payload["name"] | "";
+	const char *snapshotType = snapshotSlot.payload["type"] | "";
+	const uint64_t checkpointSequence = snapshotSlot.payload["appliedThroughSequence"] | UINT64_MAX;
+	if ((snapshotSlot.payload["version"] | 0U) != FreshSnapshotVersion ||
+	    state->name != snapshotName || strcmp(snapshotType, FreshModelTypeToString(state->type)) != 0 ||
+	    !snapshotSlot.payload["appliedThroughSequence"].is<uint64_t>() || checkpointSequence == UINT64_MAX) {
+		state->degraded = true;
+		return FreshResult::failure(FreshStatus::CorruptData, "invalid snapshot payload");
+	}
+	if (state->type == FreshModelType::Stream && !snapshotSlot.payload["entries"].is<JsonArrayConst>()) {
+		state->degraded = true;
+		return FreshResult::failure(FreshStatus::CorruptData, "snapshot stream entries are missing");
+	}
+	if (state->type == FreshModelType::General && !snapshotSlot.payload["docs"].is<JsonArrayConst>()) {
+		state->degraded = true;
+		return FreshResult::failure(FreshStatus::CorruptData, "snapshot documents are missing");
+	}
 
 	state->docs.clear();
 	state->streamEntries.clear();
+	state->checkpointSequence = checkpointSequence;
+	state->lastSequence = state->checkpointSequence;
+	_nextPendingSequence = std::max(_nextPendingSequence, state->checkpointSequence + 1);
 	if (state->type == FreshModelType::Stream) {
 		for (JsonVariantConst entry : snapshotSlot.payload["entries"].as<JsonArrayConst>()) {
 			JsonDocument copy;
@@ -470,9 +519,11 @@ FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state)
 			return cloneResult;
 		}
 		const char *id = copy["_id"] | "";
-		if (*id != '\0') {
-			state->docs[id] = std::move(copy);
+		if (*id == '\0' || state->docs.find(id) != state->docs.end()) {
+			state->degraded = true;
+			return FreshResult::failure(FreshStatus::CorruptData, "snapshot contains invalid document id");
 		}
+		state->docs[id] = std::move(copy);
 	}
 	if (snapshotSlot.hadCorruptSlot) {
 		state->degraded = true;
@@ -494,6 +545,7 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 	}
 
 	bool journalRecovered = false;
+	bool journalCleanupNeeded = false;
 	while (file.available() > 0) {
 		uint32_t magic = 0;
 		uint16_t version = 0;
@@ -519,7 +571,12 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 			journalRecovered = true;
 			break;
 		}
-		if (magic != FreshJournalMagic || version != FreshJournalVersion || payloadSize > 1024 * 1024) {
+		if (version != FreshJournalVersion) {
+			state->degraded = true;
+			file.close();
+			return FreshResult::failure(FreshStatus::CorruptData, "unsupported journal version");
+		}
+		if (magic != FreshJournalMagic || payloadSize > 1024 * 1024) {
 			state->degraded = true;
 			journalRecovered = true;
 			break;
@@ -556,6 +613,27 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 			journalRecovered = true;
 			break;
 		}
+		const char *payloadOp = recordDoc["op"] | "";
+		record.sequence = recordDoc["sequence"] | 0ULL;
+		const uint64_t maxEntries = recordDoc["maxEntries"] | 0ULL;
+		if (strcmp(payloadOp, FreshJournalOpToString(record.op)) != 0 || record.sequence == 0 ||
+		    record.sequence == UINT64_MAX || maxEntries > SIZE_MAX ||
+		    (record.op != FreshJournalOp::Append && maxEntries != 0)) {
+			state->degraded = true;
+			journalRecovered = true;
+			break;
+		}
+		record.maxEntries = static_cast<size_t>(maxEntries);
+		_nextPendingSequence = std::max(_nextPendingSequence, record.sequence + 1);
+		if (record.sequence <= state->checkpointSequence) {
+			journalCleanupNeeded = true;
+			continue;
+		}
+		if (record.sequence <= state->lastSequence) {
+			state->degraded = true;
+			journalRecovered = true;
+			break;
+		}
 		record.id = recordDoc["id"] | "";
 		FreshResult cloneResult = FreshCloneJson(record.doc, recordDoc["doc"].as<JsonVariantConst>(), "journal document");
 		if (!cloneResult) {
@@ -573,6 +651,9 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 		state->bytesSinceSnapshot += payloadSize;
 	}
 	file.close();
+	if (journalRecovered || journalCleanupNeeded) {
+		state->snapshotRequired = true;
+	}
 	return FreshLoadResult(
 	    journalRecovered ? FreshLoadStatus::LoadedWithRecoveredJournal : FreshLoadStatus::LoadedOk,
 	    journalRecovered ? "journal recovered with corruption" : "journal loaded"
@@ -598,8 +679,8 @@ FreshResult Fresh::loadModel(const std::shared_ptr<FreshModel::State> &state) {
 		status = FreshLoadStatus::LoadedWithCorruptSnapshot;
 		message = "model loaded with corrupt snapshot";
 	} else if (journalFailed) {
-		status = FreshLoadStatus::LoadedWithCorruptJournal;
-		message = "model loaded with corrupt journal";
+		status = FreshLoadStatus::FailedToLoad;
+		message = "failed to load journal";
 	} else {
 		FreshLoadStatus snapshotStatus = FreshLoadStatusFromResult(snapshotResult);
 		FreshLoadStatus journalStatus = FreshLoadStatusFromResult(journalResult);
@@ -612,9 +693,8 @@ FreshResult Fresh::loadModel(const std::shared_ptr<FreshModel::State> &state) {
 		}
 	}
 
-	state->dirty = false;
+	state->dirty = state->snapshotRequired;
 	state->pending.clear();
-	state->snapshotRequired = false;
 	state->degraded = status != FreshLoadStatus::LoadedOk;
 	if (status == FreshLoadStatus::FailedToLoad) {
 		return FreshResult::failure(FreshStatus::CorruptData, message, static_cast<size_t>(status));
@@ -624,9 +704,13 @@ FreshResult Fresh::loadModel(const std::shared_ptr<FreshModel::State> &state) {
 
 JsonDocument Fresh::recordToJson(const FreshPendingRecord &record) {
 	JsonDocument doc;
+	doc["sequence"] = record.sequence;
 	doc["op"] = FreshJournalOpToString(record.op);
 	doc["id"] = record.id;
 	doc["doc"].set(record.doc.as<JsonVariantConst>());
+	if (record.op == FreshJournalOp::Append && record.maxEntries > 0) {
+		doc["maxEntries"] = record.maxEntries;
+	}
 	return doc;
 }
 
@@ -649,7 +733,7 @@ FreshResult Fresh::syncDirty(bool force) {
 		shouldWriteManifest = _manifestDirty;
 		manifestEpoch = _manifestEpoch;
 		if (shouldWriteManifest) {
-			manifest["version"] = 1;
+			manifest["version"] = FreshManifestVersion;
 			JsonArray modelsArray = manifest["models"].to<JsonArray>();
 			for (const auto &entry : _models) {
 				const auto &state = entry.second;
@@ -686,6 +770,7 @@ FreshResult Fresh::syncDirty(bool force) {
 			batch.type = state->type;
 			batch.dropped = state->dropped;
 			batch.storageEpoch = state->storageEpoch;
+			batch.checkpointSequence = state->lastSequence;
 
 			size_t pendingBytes = 0;
 			if (!batch.dropped) {
@@ -718,9 +803,10 @@ FreshResult Fresh::syncDirty(bool force) {
 			                       state->recordsSinceSnapshot + batch.records.size() >= _config.snapshotRecordThreshold ||
 			                       state->bytesSinceSnapshot + pendingBytes >= _config.snapshotBytesThreshold);
 			if (batch.writeSnapshot) {
-				batch.snapshot["version"] = 1;
+				batch.snapshot["version"] = FreshSnapshotVersion;
 				batch.snapshot["name"] = batch.name;
 				batch.snapshot["type"] = FreshModelTypeToString(batch.type);
+				batch.snapshot["appliedThroughSequence"] = batch.checkpointSequence;
 
 				if (batch.type == FreshModelType::Stream) {
 					JsonArray entries = batch.snapshot["entries"].to<JsonArray>();
@@ -791,6 +877,7 @@ FreshResult Fresh::syncDirty(bool force) {
 			if (syncResult.snapshotWritten) {
 				state->recordsSinceSnapshot = 0;
 				state->bytesSinceSnapshot = 0;
+				state->checkpointSequence = batch.checkpointSequence;
 			} else {
 				state->recordsSinceSnapshot += static_cast<uint32_t>(syncResult.recordsWritten);
 				state->bytesSinceSnapshot += syncResult.bytesWritten;
@@ -819,6 +906,9 @@ FreshResult Fresh::syncDirty(bool force) {
 				               !state->previousName.empty();
 			}
 		} else {
+			if (syncResult.snapshotWritten && state->storageEpoch == batch.storageEpoch) {
+				state->snapshotRequired = true;
+			}
 			state->dirty = true;
 		}
 
@@ -832,6 +922,19 @@ FreshResult Fresh::syncDirty(bool force) {
 	emitEvent({.type = FreshEventType::SyncFinished, .result = last});
 	emitSync(last);
 	return last;
+}
+
+FreshResult Fresh::flush() {
+	{
+		FreshLock lock(*_mutex);
+		if (!_initialized) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
+		if (_stopping) {
+			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		}
+	}
+	return syncDirty(false);
 }
 
 FreshResult Fresh::forceSyncAsync() {

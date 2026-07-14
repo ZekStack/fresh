@@ -124,7 +124,7 @@ SelfTest is compiled by CI through the examples build loop, but it is not execut
 Fresh SelfTest starting
 [PASS] create -> forceSync -> reload
 ...
-SelfTest complete: 13 passed, 0 failed
+SelfTest complete: 16 passed, 0 failed
 ```
 
 ## Compiling examples

@@ -108,6 +108,7 @@ void loop() {
 * Sync captures dirty RAM state under a short database lock, then performs LittleFS writes without holding the global database mutex.
 * `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts.
 * `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context.
+* `flush()` synchronously persists captured pending journal operations without forcing a checkpoint snapshot. Use it as a durability barrier before a controlled reboot.
 * `deinit()` waits for the sync task to exit before owned state is destroyed. By default it performs a final forced checkpoint; pass `{.sync = false}` to stop without final persistence.
 * The destructor uses a bounded final `deinit({.sync = true, .timeoutMS = 2000})`, but automatic destructor cleanup is best-effort only. If shutdown times out, the destructor cannot report the failure. Production code that needs deterministic shutdown or guaranteed final persistence should call `FreshResult result = db.deinit();` manually and check the result before the object is destroyed.
 * `diagnostics()` reports model load recovery after `init()`, including corrupt snapshots or recovered journals.
@@ -116,8 +117,9 @@ void loop() {
 * `backupStatus()` returns `FreshBackupStatus`: use `state` as the stable `FreshBackupState` lifecycle signal and `result` for detailed success/failure diagnostics.
 * Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
 * Fresh enforces configurable document, journal, snapshot, and LittleFS reserve limits. Oversized payloads return `FreshStatus::SizeLimitExceeded`; sync preflight space failures return `FreshStatus::StorageFull`.
-* Callbacks are notification hooks. Do not call `deinit()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
+* Callbacks are notification hooks. Do not call `deinit()`, `flush()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
 * The current storage and backup formats use ArduinoJson MessagePack. Manifest and snapshot files use two durable slot files with checksummed binary headers. Formats are not stable compatibility contracts yet, and Fresh does not migrate older single-file `manifest.msgpack` / `snapshot.msgpack` storage into the durable-slot format.
+* Fresh `0.1.0` uses manifest/snapshot payload v2 and journal v2 with replay checkpoints. It intentionally does not load `0.0.x` database files; erase the development database when upgrading.
 
 ## When not to use Fresh
 
@@ -128,6 +130,7 @@ Fresh is not intended for large datasets, high-frequency telemetry, SQL-like que
 | Operation | RAM updated | Flash updated before return |
 | --- | --- | --- |
 | `create()` / `update()` / `delete()` / `append()` | yes | no |
+| `flush()` | yes | yes, for the captured pending journal operations |
 | `forceSyncAsync()` | yes | no |
 | `forceSync()` | yes | yes, if successful |
 | `deinit({ .sync = true })` | yes | yes, if successful |
@@ -153,7 +156,7 @@ The repository includes topic-focused Arduino sketches in the `examples/` folder
 Fresh SelfTest starting
 [PASS] create -> forceSync -> reload
 ...
-SelfTest complete: 13 passed, 0 failed
+SelfTest complete: 16 passed, 0 failed
 ```
 
 Start with:
@@ -189,7 +192,7 @@ FreshResult removed = users.deleteById(id);
 
 FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
 FreshModel logs = logsResult.model;
-FreshResult appended = logs.append(logDoc);
+FreshResult appended = logs.append(logDoc, {.maxEntries = 50});
 
 FreshStreamRetrieveOptions options;
 options.reverse = true;
@@ -211,7 +214,7 @@ For the full API, see [`docs/api.md`](docs/api.md).
 | PSRAM | Used when available for internal allocations |
 | Dependencies | `bblanchon/ArduinoJson >= 7.0.0` |
 | Exceptions | Not used |
-| Status | Early-stage `0.0.1` |
+| Status | Early-stage `0.1.0` |
 
 ## Configuration
 
@@ -262,7 +265,7 @@ fresh/
 
 ## Status
 
-Fresh is currently early-stage software at `0.0.1`.
+Fresh is currently early-stage software at `0.1.0`.
 
 The public API, storage format, and backup format may still change before a stable release. Fresh does not currently migrate older single-file `manifest.msgpack` / `snapshot.msgpack` storage into the durable-slot format. Data written by early versions may require export/import, manual migration, or a storage reset after format changes. Test it on your target ESP32 board before using it in production.
 

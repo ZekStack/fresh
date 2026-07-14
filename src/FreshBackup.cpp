@@ -468,7 +468,7 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 			} else {
 				target = found->second;
 				std::map<std::string, JsonDocument> clonedDocs;
-				std::vector<JsonDocument> clonedStreamEntries;
+				std::deque<JsonDocument> clonedStreamEntries;
 				for (const auto &docEntry : incoming->docs) {
 					JsonDocument clone;
 					FreshResult cloneResult =
@@ -496,6 +496,8 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 				target->degraded = false;
 				target->recordsSinceSnapshot = 0;
 				target->bytesSinceSnapshot = 0;
+				target->checkpointSequence = 0;
+				target->lastSequence = 0;
 				target->dirty = true;
 				target->snapshotRequired = true;
 				target->storageEpoch++;

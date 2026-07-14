@@ -73,6 +73,7 @@ Common methods:
 | `dropModels({...})` | Drop selected models. |
 | `dropAllModels()` | Drop every model. |
 | `renameModel(oldName, newName)` | Rename a model. |
+| `flush()` | Block until captured pending operations are journaled, without forcing a checkpoint snapshot. |
 | `forceSyncAsync()` | Request a forced checkpoint for dirty state captured by the sync task. |
 | `forceSync()` | Run a blocking forced checkpoint for captured dirty state that touches flash in the caller context. |
 | `storageInfo()` | Return LittleFS total, used, and free bytes. |
@@ -173,6 +174,7 @@ Stream model methods:
 | Method | Purpose |
 | --- | --- |
 | `append(doc)` | Append one stream record. |
+| `append(doc, options)` | Append one record and optionally retain only the newest bounded number of entries. |
 | `retrieve()` | Return all stream records into memory. Prefer bounded options for append-style logs. |
 | `retrieve(options)` | Return records with offset, limit, and reverse options. |
 | `retrieve(predicate, options)` | Return filtered records with options. |
@@ -185,6 +187,8 @@ Stream model methods:
 | `offset` | Number of matching records to skip. |
 | `limit` | Maximum records to return. `0` means no explicit limit. |
 | `reverse` | Read newest records first when `true`. |
+
+`FreshStreamAppendOptions::maxEntries` is `0` for an unbounded append. A positive value applies retention atomically with the append and is stored in the journal record, so crash recovery produces the same bounded stream state.
 
 ## Validators
 
@@ -224,7 +228,7 @@ Callbacks use `std::function`, so lambdas and `std::bind` both work.
 
 `FreshEventType` values include model lifecycle events, document events, stream append, sync events, and backup events.
 
-Callbacks are notification hooks. Do not call `deinit()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
+Callbacks are notification hooks. Do not call `deinit()`, `flush()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
 
 ## Backup
 

@@ -18,7 +18,7 @@ void appendLog(const char *level, const char *message) {
 	entry["level"] = level;
 	entry["message"] = message;
 	entry["ms"] = millis();
-	printResult("append", logs.append(entry));
+	printResult("append", logs.append(entry, {.maxEntries = 50}));
 }
 
 void setup() {

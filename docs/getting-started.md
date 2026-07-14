@@ -108,7 +108,7 @@ Fresh is RAM-first. A successful write result means the operation was accepted i
 
 The sync task persists dirty state to LittleFS later. It captures a batch under a short database lock, then performs LittleFS writes without holding the global database mutex. If power is lost before the next sync, recent accepted changes can be lost.
 
-Use the configured `syncIntervalMS` for normal background persistence. `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts. `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context, so reserve it for advanced checkpoints. Writes accepted after a forced sync captures its batch remain pending for a later sync.
+Use the configured `syncIntervalMS` for normal background persistence. Call `flush()` when pending operations must be durable before continuing, such as immediately before a controlled reboot; it does not force a full snapshot. `forceSyncAsync()` requests a forced checkpoint through the sync task. `forceSync()` runs the same forced captured-state checkpoint synchronously, so reserve it for explicit compaction. Writes accepted after a sync captures its batch remain pending for a later sync.
 
 Call `deinit()` when a local or test database instance should shut down explicitly. It waits for the sync task to exit and performs a final forced checkpoint by default. Use `deinit({.sync = false})` only when stopping quickly is more important than persisting dirty RAM state that has not synced yet.
 

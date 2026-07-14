@@ -11,10 +11,12 @@
 #include <vector>
 
 constexpr uint32_t FreshJournalMagic = 0x4c4a5246; // FRJL
-constexpr uint16_t FreshJournalVersion = 1;
+constexpr uint16_t FreshJournalVersion = 2;
 constexpr size_t FreshJournalHeaderSize = 4 + 2 + 1 + 1 + 4 + 4;
 constexpr uint32_t FreshSlotMagic = 0x544c5346; // FSLT
 constexpr uint16_t FreshSlotVersion = 1;
+constexpr uint32_t FreshManifestVersion = 2;
+constexpr uint32_t FreshSnapshotVersion = 2;
 constexpr size_t FreshSlotHeaderSize = 4 + 2 + 8 + 4 + 4;
 constexpr const char *FreshManifestFile = "manifest";
 constexpr const char *FreshSnapshotFile = "snapshot";
@@ -32,6 +34,7 @@ struct FreshPendingRecord {
 	uint64_t sequence = 0;
 	std::string id;
 	JsonDocument doc;
+	size_t maxEntries = 0;
 };
 
 struct FreshSlotReadResult {
@@ -48,7 +51,7 @@ struct FreshModel::State {
 	std::string previousName;
 	FreshModelType type = FreshModelType::General;
 	std::map<std::string, JsonDocument> docs;
-	std::vector<JsonDocument> streamEntries;
+	std::deque<JsonDocument> streamEntries;
 	std::deque<FreshPendingRecord> pending;
 	FreshResultValidator validator;
 	bool dirty = false;
@@ -57,6 +60,8 @@ struct FreshModel::State {
 	bool snapshotRequired = false;
 	uint32_t recordsSinceSnapshot = 0;
 	size_t bytesSinceSnapshot = 0;
+	uint64_t checkpointSequence = 0;
+	uint64_t lastSequence = 0;
 	uint32_t storageEpoch = 0;
 };
 

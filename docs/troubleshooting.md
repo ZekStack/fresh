@@ -18,13 +18,15 @@ Common causes:
 * Existing data is corrupt.
 * The sync task cannot be created because of memory pressure.
 
+Fresh `0.1.0` intentionally does not migrate `0.0.x` storage. Erase the development database once when moving to the v2 journal/checkpoint format.
+
 If LittleFS mount recovery is acceptable for your product, set `eraseOnFileSystemFailure = true`. This can erase stored data, so keep it disabled unless that tradeoff is intentional.
 
 ## Data is missing after power loss
 
 Fresh is RAM-first. A successful public write means the change was accepted into memory. It may not have reached LittleFS yet.
 
-Reduce the loss window by lowering `syncIntervalMS`, or request a forced dirty-state checkpoint with `forceSyncAsync()` after important operations. Forced sync covers the dirty batch captured when sync starts; writes accepted after that remain pending for a later sync. Use `forceSync()` only when blocking and touching flash in the caller context is acceptable.
+Reduce the loss window by lowering `syncIntervalMS`. When a caller must not continue until captured operations are durable, call `flush()` and check its result. Use `forceSyncAsync()` or `forceSync()` only when an explicit checkpoint snapshot is also required. Any writes accepted after a sync captures its batch remain pending for a later sync.
 
 ## Flash usage does not change immediately
 

@@ -100,6 +100,28 @@ bool waitForFile(const char *path, uint32_t timeoutMS = 1000) {
 	return false;
 }
 
+bool readFileBytes(const char *path, std::vector<uint8_t> &bytes) {
+	File input = LittleFS.open(path, "r");
+	if (!input) {
+		return false;
+	}
+	bytes.resize(input.size());
+	const int read = input.read(bytes.data(), bytes.size());
+	input.close();
+	return read == static_cast<int>(bytes.size());
+}
+
+bool writeFileBytes(const char *path, const std::vector<uint8_t> &bytes) {
+	File output = LittleFS.open(path, "w");
+	if (!output) {
+		return false;
+	}
+	const size_t written = output.write(bytes.data(), bytes.size());
+	output.flush();
+	output.close();
+	return written == bytes.size();
+}
+
 bool hasDegradedLoad(const FreshDiagnostics &diagnostics, FreshLoadStatus status) {
 	for (const FreshModelLoadInfo &info : diagnostics.modelLoads) {
 		if (info.degraded && info.status == status) {
@@ -345,6 +367,115 @@ bool testStreamSnapshotReload() {
 	FreshResult entries = loaded.model("Log").retrieve();
 	const bool ok = assertResult(entries, "retrieve stream entries") &&
 	                assertTrue(entries.affectedCount == 3, "stream entry count mismatch");
+	loaded.deinit();
+	return ok;
+}
+
+bool testBoundedStreamFlushReload() {
+	resetTestPath(TestPath);
+
+	FreshConfig config;
+	config.snapshotRecordThreshold = 1000;
+	Fresh db;
+	if (!assertResult(db.init(TestPath, config), "init")) {
+		return false;
+	}
+	FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
+	if (!assertModelResult(logsResult, "create stream model")) {
+		return false;
+	}
+
+	FreshStreamAppendOptions options;
+	options.maxEntries = 3;
+	for (int i = 1; i <= 6; ++i) {
+		JsonDocument entry;
+		entry["value"] = i;
+		if (!assertResult(logsResult.model.append(entry, options), "append bounded stream entry")) {
+			return false;
+		}
+	}
+	if (!assertResult(db.flush(), "flush bounded stream")) {
+		return false;
+	}
+
+	const std::string modelPath = joinPath(TestPath, "Log");
+	const std::string journalPath = joinPath(modelPath.c_str(), "journal.log");
+	const bool flushShapeOk = assertTrue(LittleFS.exists(journalPath.c_str()), "flush did not write journal") &&
+	                          assertTrue(
+	                              !LittleFS.exists(joinPath(modelPath.c_str(), "snapshot.a.msgpack").c_str()) &&
+	                                  !LittleFS.exists(joinPath(modelPath.c_str(), "snapshot.b.msgpack").c_str()),
+	                              "flush unexpectedly forced a snapshot"
+	                          );
+	db.deinit(FreshDeinitOptions{.sync = false});
+	if (!flushShapeOk) {
+		return false;
+	}
+
+	Fresh loaded;
+	if (!assertResult(loaded.init(TestPath, config), "reload")) {
+		return false;
+	}
+	FreshResult entries = loaded.model("Log").retrieve();
+	JsonArrayConst array = entries.doc.as<JsonArrayConst>();
+	const bool ok = assertResult(entries, "retrieve bounded stream") &&
+	                assertTrue(entries.affectedCount == 3, "bounded stream entry count mismatch") &&
+	                assertTrue((array[0]["value"] | 0) == 4, "bounded stream oldest entry mismatch") &&
+	                assertTrue((array[1]["value"] | 0) == 5, "bounded stream middle entry mismatch") &&
+	                assertTrue((array[2]["value"] | 0) == 6, "bounded stream newest entry mismatch");
+	loaded.deinit();
+	return ok;
+}
+
+bool testCheckpointSkipsRetainedJournal() {
+	resetTestPath(TestPath);
+
+	FreshConfig config;
+	config.snapshotRecordThreshold = 1000;
+	Fresh db;
+	if (!assertResult(db.init(TestPath, config), "init")) {
+		return false;
+	}
+	FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
+	if (!assertModelResult(logsResult, "create stream model")) {
+		return false;
+	}
+
+	FreshStreamAppendOptions options;
+	options.maxEntries = 3;
+	for (int i = 1; i <= 3; ++i) {
+		JsonDocument entry;
+		entry["value"] = i;
+		if (!assertResult(logsResult.model.append(entry, options), "append checkpoint stream entry")) {
+			return false;
+		}
+	}
+	if (!assertResult(db.flush(), "flush journal before checkpoint")) {
+		return false;
+	}
+
+	const std::string journalPath = joinPath(joinPath(TestPath, "Log").c_str(), "journal.log");
+	std::vector<uint8_t> retainedJournal;
+	if (!assertTrue(readFileBytes(journalPath.c_str(), retainedJournal), "failed to save journal")) {
+		return false;
+	}
+	if (!assertResult(db.forceSync(), "force checkpoint")) {
+		return false;
+	}
+	if (!assertTrue(writeFileBytes(journalPath.c_str(), retainedJournal), "failed to restore retained journal")) {
+		return false;
+	}
+	db.deinit(FreshDeinitOptions{.sync = false});
+
+	Fresh loaded;
+	if (!assertResult(loaded.init(TestPath, config), "reload checkpoint with retained journal")) {
+		return false;
+	}
+	FreshResult entries = loaded.model("Log").retrieve();
+	JsonArrayConst array = entries.doc.as<JsonArrayConst>();
+	const bool ok = assertResult(entries, "retrieve checkpointed stream") &&
+	                assertTrue(entries.affectedCount == 3, "checkpoint replay duplicated stream entries") &&
+	                assertTrue((array[0]["value"] | 0) == 1, "checkpoint first entry mismatch") &&
+	                assertTrue((array[2]["value"] | 0) == 3, "checkpoint last entry mismatch");
 	loaded.deinit();
 	return ok;
 }
@@ -933,6 +1064,8 @@ void setup() {
 	runTest("update -> forceSync -> reload", testUpdateReload);
 	runTest("delete -> forceSync -> reload", testDeleteReload);
 	runTest("stream append -> snapshot threshold -> reload", testStreamSnapshotReload);
+	runTest("bounded stream -> durable flush -> reload", testBoundedStreamFlushReload);
+	runTest("checkpoint skips retained journal records", testCheckpointSkipsRetainedJournal);
 	runTest("corrupt final journal op -> recovered reload", testCorruptFinalJournalOp);
 	runTest("snapshot newer slot corrupt -> older slot recovery", testSnapshotNewerSlotRecovery);
 	runTest("size limits reject oversized writes", testSizeLimits);

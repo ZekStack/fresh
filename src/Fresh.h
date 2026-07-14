@@ -196,6 +196,12 @@ struct FreshStreamRetrieveOptions {
 	bool reverse = false;
 };
 
+struct FreshStreamAppendOptions {
+	// Zero keeps the stream unbounded. A positive value retains only the newest
+	// maxEntries entries as part of the same append operation.
+	size_t maxEntries = 0;
+};
+
 class Fresh;
 class FreshModel;
 class FreshBackupPrint;
@@ -225,6 +231,7 @@ class FreshModel {
 
 	FreshResult create(JsonDocument &doc);
 	FreshResult append(JsonDocument &doc);
+	FreshResult append(JsonDocument &doc, const FreshStreamAppendOptions &options);
 
 	FreshResult findById(const char *id) const;
 	FreshResult findById(const std::string &id) const;
@@ -309,7 +316,10 @@ class Fresh {
 	FreshResult dropAllModels();
 	FreshResult renameModel(const char *oldName, const char *newName);
 
-	// Advanced manual sync controls. The blocking variant touches flash synchronously.
+	// Persist captured pending operations without forcing a checkpoint snapshot.
+	FreshResult flush();
+
+	// Advanced manual checkpoint controls. The blocking variant touches flash synchronously.
 	FreshResult forceSyncAsync();
 	FreshResult forceSync();
 

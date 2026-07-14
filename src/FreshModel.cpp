@@ -126,6 +126,7 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 		}
 
 		record.sequence = _owner->_nextPendingSequence++;
+		_state->lastSequence = record.sequence;
 		_state->docs[id] = std::move(stored);
 		_state->pending.push_back(std::move(record));
 		_state->dirty = true;
@@ -145,6 +146,10 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 }
 
 FreshResult FreshModel::append(JsonDocument &doc) {
+	return append(doc, FreshStreamAppendOptions());
+}
+
+FreshResult FreshModel::append(JsonDocument &doc, const FreshStreamAppendOptions &options) {
 	if (!_owner || !_state || _state->dropped) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
@@ -175,6 +180,7 @@ FreshResult FreshModel::append(JsonDocument &doc) {
 
 		FreshPendingRecord record;
 		record.op = FreshJournalOp::Append;
+		record.maxEntries = options.maxEntries;
 		cloneResult = FreshCloneJson(record.doc, stored.as<JsonVariantConst>(), "journal stream entry");
 		if (!cloneResult) {
 			return cloneResult;
@@ -182,6 +188,10 @@ FreshResult FreshModel::append(JsonDocument &doc) {
 
 		record.sequence = _owner->_nextPendingSequence++;
 		_state->streamEntries.push_back(std::move(stored));
+		while (options.maxEntries > 0 && _state->streamEntries.size() > options.maxEntries) {
+			_state->streamEntries.pop_front();
+		}
+		_state->lastSequence = record.sequence;
 		_state->pending.push_back(std::move(record));
 		_state->dirty = true;
 
@@ -422,6 +432,7 @@ FreshResult FreshModel::update(
 			FreshPendingRecord record;
 			record.op = FreshJournalOp::Update;
 			record.sequence = _owner->_nextPendingSequence++;
+			_state->lastSequence = record.sequence;
 			record.id = candidate.id;
 			record.doc = std::move(candidate.journalDoc);
 			found->second = std::move(candidate.doc);
@@ -506,6 +517,7 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 			FreshPendingRecord record;
 			record.op = FreshJournalOp::Delete;
 			record.sequence = _owner->_nextPendingSequence++;
+			_state->lastSequence = record.sequence;
 			record.id = id;
 			_state->pending.push_back(record);
 			_state->dirty = true;
