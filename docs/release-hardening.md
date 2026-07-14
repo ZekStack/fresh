@@ -64,4 +64,4 @@ Reader and writer paths apply the same absolute ceiling and the configured journ
 - concurrent model name/type/validity reads while logical renames occur;
 - repeatable `deinit()` after successful shutdown.
 
-The sketch must be executed on physical ESP32, ESP32-S3, and ESP32-C3 boards before the final `v0.1.0` tag.
+The sketch must be executed on physical ESP32, ESP32-S3, and ESP32-C3 boards before the final `v0.1.0` tag. Record each board, Arduino-ESP32 core version, and complete serial result in issue #3 or the release notes before tagging.
