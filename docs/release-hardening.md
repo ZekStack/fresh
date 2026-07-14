@@ -40,6 +40,8 @@ The destructor performs an unbounded shutdown barrier. It does not destroy the e
 
 Fresh no longer supplies a null-returning allocator to standard containers. Fallible serialized-byte and backup-ring allocations use a move-only `FreshBuffer` with explicit allocation results. Allocation failure is reported as `FreshStatus::OutOfMemory`.
 
+Durable-slot verification preserves allocation failures instead of remapping them to filesystem errors. Sync batches are explicitly move-only so their buffers cannot be copied accidentally by standard containers.
+
 ## Persisted-size ceilings
 
 The absolute payload ceiling for manifest slots, snapshot slots, and journal records is 1 MiB. `FreshConfig` is rejected during `init()` when:
