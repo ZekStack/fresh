@@ -209,11 +209,13 @@ struct FreshModelListResult {
 	}
 };
 
-struct FreshStreamRetrieveOptions {
+struct FreshRecordRetrieveOptions {
 	size_t offset = 0;
 	size_t limit = 0;
 	bool reverse = false;
 };
+
+using FreshStreamRetrieveOptions = FreshRecordRetrieveOptions;
 
 struct FreshStreamAppendOptions {
 	// Zero keeps the stream unbounded. A positive value retains only the newest
@@ -255,11 +257,16 @@ class FreshModel {
 	FreshResult findById(const char *id) const;
 	FreshResult findById(const std::string &id) const;
 	FreshResult find(FreshPredicate predicate, bool stopAtFirst = false) const;
+	FreshResult listRecords(
+	    const FreshRecordRetrieveOptions &options = FreshRecordRetrieveOptions()
+	) const;
 
 	template <typename T> FreshResult findOne(const char *field, const T &value) const {
 		return find([field, value](const JsonDocument &doc) { return doc[field] == value; }, true);
 	}
 
+	FreshResult replaceById(const char *id, const JsonDocument &replacement);
+	FreshResult replaceById(const std::string &id, const JsonDocument &replacement);
 	FreshResult updateById(
 	    const char *id,
 	    const JsonDocument &patch,
