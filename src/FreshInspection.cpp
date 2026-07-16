@@ -33,7 +33,7 @@ FreshModelListResult Fresh::listModels() const {
 		info.recordCount = state->type == FreshModelType::Stream
 		                       ? state->streamEntries.size()
 		                       : state->docs.size();
-		result.models.push_back(std::move(info));
+		result.models.push_back(info);
 	}
 
 	result.result = true;
