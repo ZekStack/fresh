@@ -191,6 +191,24 @@ struct FreshDiagnostics {
 	size_t degradedModelCount = 0;
 };
 
+struct FreshModelInfo {
+	std::string name;
+	FreshModelType type = FreshModelType::General;
+	size_t recordCount = 0;
+};
+
+struct FreshModelListResult {
+	bool result = false;
+	FreshStatus status = FreshStatus::InternalError;
+	std::string message;
+	std::vector<FreshModelInfo> models;
+	size_t affectedCount = 0;
+
+	explicit operator bool() const {
+		return result;
+	}
+};
+
 struct FreshStreamRetrieveOptions {
 	size_t offset = 0;
 	size_t limit = 0;
@@ -315,6 +333,7 @@ class Fresh {
 	FreshResult deinit(const FreshDeinitOptions &options = FreshDeinitOptions());
 
 	FreshModel model(const char *modelName);
+	FreshModelListResult listModels() const;
 	FreshModelResult createModel(const char *modelName);
 	FreshModelResult createModel(const char *modelName, FreshModelType type);
 	FreshResult dropModel(const char *modelName);
