@@ -68,12 +68,14 @@ bool runTest() {
   );
   if (!checkResultArray(changed, RecordCount, "update changed")) return false;
 
+  JsonDocument allPatch;
+  allPatch["verified"] = true;
   FreshResult all = generalResult.model.update(
-      [](const JsonDocument &) { return false; },
-      patch,
+      [](const JsonDocument &doc) { return (doc["index"] | SIZE_MAX) == 0; },
+      allPatch,
       FreshReturn::AllDocs
   );
-  if (!checkResultArray(all, 0, "update no matches")) return false;
+  if (!checkResultArray(all, RecordCount, "update all")) return false;
 
   FreshRecordRetrieveOptions page;
   page.offset = 7;
