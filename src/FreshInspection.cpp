@@ -1,5 +1,6 @@
 #include "Fresh.h"
 #include "internal/FreshInternal.h"
+#include "internal/FreshMemory.h"
 
 #include <utility>
 
@@ -59,18 +60,23 @@ FreshResult FreshModel::listRecords(const FreshRecordRetrieveOptions &options) c
 		return valid;
 	}
 
-	FreshResult result = FreshResult::success("records listed");
-	JsonArray records = result.doc.to<JsonArray>();
+	JsonDocument resultDoc(&FreshJsonAllocator());
+	JsonArray records = resultDoc.to<JsonArray>();
 	size_t skipped = 0;
+	size_t affectedCount = 0;
+	bool allocationFailed = false;
 
 	auto appendRecord = [&](const JsonDocument &record) {
 		if (skipped < options.offset) {
 			skipped++;
 			return true;
 		}
-		records.add(record.as<JsonVariantConst>());
-		result.affectedCount++;
-		return options.limit == 0 || result.affectedCount < options.limit;
+		if (!records.add(record.as<JsonVariantConst>()) || resultDoc.overflowed()) {
+			allocationFailed = true;
+			return false;
+		}
+		affectedCount++;
+		return options.limit == 0 || affectedCount < options.limit;
 	};
 
 	if (_state->type == FreshModelType::Stream) {
@@ -93,9 +99,18 @@ FreshResult FreshModel::listRecords(const FreshRecordRetrieveOptions &options) c
 		}
 	}
 
-	if (result.affectedCount == 0) {
-		result.message = "no records found";
+	if (allocationFailed) {
+		return FreshResult::failure(
+		    FreshStatus::OutOfMemory,
+		    "failed to construct record list"
+		);
 	}
+	resultDoc.shrinkToFit();
+	FreshResult result = FreshResult::success(
+	    affectedCount == 0 ? "no records found" : "records listed",
+	    affectedCount
+	);
+	result.doc = std::move(resultDoc);
 	return result;
 }
 
