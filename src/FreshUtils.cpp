@@ -1,10 +1,9 @@
 #include "Fresh.h"
 #include "internal/FreshInternal.h"
+#include "internal/FreshMemory.h"
 
 #include <cctype>
-#include <cstdlib>
 #include <cstring>
-#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <utility>
 
@@ -154,53 +153,22 @@ std::string FreshMakeId() {
 
 FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) {
 	const char *name = label != nullptr ? label : "json";
-	const size_t payloadBytes = measureMsgPack(source);
-	if (payloadBytes == 0) {
+	if (measureMsgPack(source) == 0) {
 		target.clear();
 		std::string message = name;
 		message += " clone is empty";
 		return FreshResult::failure(FreshStatus::InternalError, message.c_str());
 	}
 
-	uint8_t *buffer = static_cast<uint8_t *>(heap_caps_malloc(payloadBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-	if (buffer == nullptr) {
-		buffer = static_cast<uint8_t *>(heap_caps_malloc(payloadBytes, MALLOC_CAP_8BIT));
-	}
-	bool allocatedWithMalloc = false;
-	if (buffer == nullptr) {
-		buffer = static_cast<uint8_t *>(malloc(payloadBytes));
-		allocatedWithMalloc = buffer != nullptr;
-	}
-	if (buffer == nullptr) {
+	JsonDocument decoded(&FreshJsonAllocator());
+	if (!decoded.set(source) || decoded.overflowed()) {
+		target.clear();
 		std::string message = "failed to allocate ";
 		message += name;
 		message += " clone";
 		return FreshResult::failure(FreshStatus::OutOfMemory, message.c_str());
 	}
-
-	const size_t written = serializeMsgPack(source, buffer, payloadBytes);
-	if (written != payloadBytes) {
-		allocatedWithMalloc ? free(buffer) : heap_caps_free(buffer);
-		target.clear();
-		std::string message = "failed to serialize ";
-		message += name;
-		message += " clone";
-		return FreshResult::failure(FreshStatus::InternalError, message.c_str());
-	}
-
-	JsonDocument decoded;
-	DeserializationError error = deserializeMsgPack(decoded, buffer, payloadBytes);
-	allocatedWithMalloc ? free(buffer) : heap_caps_free(buffer);
-	if (error) {
-		target.clear();
-		std::string message = "failed to deserialize ";
-		message += name;
-		message += " clone";
-		return FreshResult::failure(
-		    error == DeserializationError::NoMemory ? FreshStatus::OutOfMemory : FreshStatus::InternalError,
-		    message.c_str()
-		);
-	}
+	decoded.shrinkToFit();
 
 	target = std::move(decoded);
 	return FreshResult::success("json cloned");
