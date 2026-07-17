@@ -71,7 +71,9 @@ bool runTest() {
   JsonDocument allPatch;
   allPatch["verified"] = true;
   FreshResult all = generalResult.model.update(
-      [](const JsonDocument &doc) { return (doc["index"] | SIZE_MAX) == 0; },
+      [](const JsonDocument &doc) {
+        return doc["index"].is<size_t>() && doc["index"].as<size_t>() == 0;
+      },
       allPatch,
       FreshReturn::AllDocs
   );
