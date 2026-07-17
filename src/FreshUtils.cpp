@@ -153,20 +153,49 @@ std::string FreshMakeId() {
 
 FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) {
 	const char *name = label != nullptr ? label : "json";
-	if (measureMsgPack(source) == 0) {
+	const size_t payloadBytes = measureMsgPack(source);
+	if (payloadBytes == 0) {
 		target.clear();
 		std::string message = name;
 		message += " clone is empty";
 		return FreshResult::failure(FreshStatus::InternalError, message.c_str());
 	}
 
-	JsonDocument decoded(&FreshJsonAllocator());
-	if (!decoded.set(source) || decoded.overflowed()) {
+	FreshBuffer buffer;
+	if (!buffer.allocate(payloadBytes)) {
 		target.clear();
 		std::string message = "failed to allocate ";
 		message += name;
-		message += " clone";
+		message += " clone buffer";
 		return FreshResult::failure(FreshStatus::OutOfMemory, message.c_str());
+	}
+
+	const size_t written = serializeMsgPack(source, buffer.data(), buffer.size());
+	if (written != payloadBytes) {
+		target.clear();
+		std::string message = "failed to serialize ";
+		message += name;
+		message += " clone";
+		return FreshResult::failure(FreshStatus::InternalError, message.c_str());
+	}
+
+	JsonDocument decoded(&FreshJsonAllocator());
+	const DeserializationError error = deserializeMsgPack(
+	    decoded,
+	    buffer.data(),
+	    buffer.size()
+	);
+	if (error || decoded.overflowed()) {
+		target.clear();
+		std::string message = "failed to deserialize ";
+		message += name;
+		message += " clone";
+		return FreshResult::failure(
+		    error == DeserializationError::NoMemory || decoded.overflowed()
+		        ? FreshStatus::OutOfMemory
+		        : FreshStatus::InternalError,
+		    message.c_str()
+		);
 	}
 	decoded.shrinkToFit();
 
