@@ -1,5 +1,6 @@
 #include "Fresh.h"
 #include "internal/FreshInternal.h"
+#include "internal/FreshMemory.h"
 
 #include <LittleFS.h>
 
@@ -322,21 +323,30 @@ FreshResult FreshModel::find(FreshPredicate predicate, bool stopAtFirst) const {
 	if (!valid) {
 		return valid;
 	}
-	FreshResult result = FreshResult::success("documents found");
-	JsonArray array = result.doc.to<JsonArray>();
+	JsonDocument resultDoc(&FreshJsonAllocator());
+	JsonArray array = resultDoc.to<JsonArray>();
+	size_t affectedCount = 0;
 	for (const auto &entry : _state->docs) {
 		if (!predicate(entry.second)) {
 			continue;
 		}
-		array.add(entry.second.as<JsonVariantConst>());
-		result.affectedCount++;
+		if (!array.add(entry.second.as<JsonVariantConst>()) || resultDoc.overflowed()) {
+			return FreshResult::failure(
+			    FreshStatus::OutOfMemory,
+			    "failed to construct find result"
+			);
+		}
+		affectedCount++;
 		if (stopAtFirst) {
 			break;
 		}
 	}
-	if (result.affectedCount == 0) {
-		result.message = "no documents found";
-	}
+	resultDoc.shrinkToFit();
+	FreshResult result = FreshResult::success(
+	    affectedCount == 0 ? "no documents found" : "documents found",
+	    affectedCount
+	);
+	result.doc = std::move(resultDoc);
 	return result;
 }
 
@@ -490,23 +500,38 @@ FreshResult FreshModel::update(
 			);
 		}
 
+		JsonDocument resultDoc(&FreshJsonAllocator());
 		if (!candidates.empty() && returnMode == FreshReturn::ChangedDocs) {
-			JsonArray array = result.doc.to<JsonArray>();
+			JsonArray array = resultDoc.to<JsonArray>();
 			for (const FreshUpdateCandidate &candidate : candidates) {
-				array.add(candidate.doc.as<JsonVariantConst>());
+				if (!array.add(candidate.doc.as<JsonVariantConst>()) || resultDoc.overflowed()) {
+					return FreshResult::failure(
+					    FreshStatus::OutOfMemory,
+					    "failed to construct changed documents result"
+					);
+				}
 			}
 		} else if (!candidates.empty() && returnMode == FreshReturn::AllDocs) {
-			JsonArray array = result.doc.to<JsonArray>();
+			JsonArray array = resultDoc.to<JsonArray>();
 			for (const auto &entry : _state->docs) {
-				const JsonDocument  *document = &entry.second;
+				const JsonDocument *document = &entry.second;
 				for (const FreshUpdateCandidate &candidate : candidates) {
 					if (candidate.id == entry.first) {
 						document = &candidate.doc;
 						break;
 					}
 				}
-				array.add(document->as<JsonVariantConst>());
+				if (!array.add(document->as<JsonVariantConst>()) || resultDoc.overflowed()) {
+					return FreshResult::failure(
+					    FreshStatus::OutOfMemory,
+					    "failed to construct all documents result"
+					);
+				}
 			}
+		}
+		if (!candidates.empty() && returnMode != FreshReturn::None) {
+			resultDoc.shrinkToFit();
+			result.doc = std::move(resultDoc);
 		}
 
 		_owner->_nextPendingSequence = nextSequence;
@@ -674,9 +699,10 @@ FreshResult FreshModel::retrieve(
 		return valid;
 	}
 
-	FreshResult result = FreshResult::success("stream entries found");
-	JsonArray array = result.doc.to<JsonArray>();
+	JsonDocument resultDoc(&FreshJsonAllocator());
+	JsonArray array = resultDoc.to<JsonArray>();
 	size_t skipped = 0;
+	size_t affectedCount = 0;
 	const size_t total = _state->streamEntries.size();
 	for (size_t i = 0; i < total; ++i) {
 		const size_t index = options.reverse ? total - 1 - i : i;
@@ -688,15 +714,23 @@ FreshResult FreshModel::retrieve(
 			skipped++;
 			continue;
 		}
-		array.add(entry.as<JsonVariantConst>());
-		result.affectedCount++;
-		if (options.limit > 0 && result.affectedCount >= options.limit) {
+		if (!array.add(entry.as<JsonVariantConst>()) || resultDoc.overflowed()) {
+			return FreshResult::failure(
+			    FreshStatus::OutOfMemory,
+			    "failed to construct stream result"
+			);
+		}
+		affectedCount++;
+		if (options.limit > 0 && affectedCount >= options.limit) {
 			break;
 		}
 	}
-	if (result.affectedCount == 0) {
-		result.message = "no stream entries found";
-	}
+	resultDoc.shrinkToFit();
+	FreshResult result = FreshResult::success(
+	    affectedCount == 0 ? "no stream entries found" : "stream entries found",
+	    affectedCount
+	);
+	result.doc = std::move(resultDoc);
 	return result;
 }
 
