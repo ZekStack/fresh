@@ -1,7 +1,10 @@
 #include "Fresh.h"
 #include "internal/FreshInternal.h"
+#include "internal/FreshMemory.h"
 
 #include <cstring>
+#include <limits>
+#include <set>
 #include <utility>
 
 class FreshBackupPrint : public Print {
@@ -16,9 +19,7 @@ class FreshBackupPrint : public Print {
 	size_t write(const uint8_t *buffer, size_t size) override {
 		size_t written = 0;
 		for (size_t i = 0; i < size; ++i) {
-			if (write(buffer[i]) != 1) {
-				break;
-			}
+			if (write(buffer[i]) != 1) break;
 			written++;
 		}
 		return written;
@@ -35,12 +36,7 @@ bool Fresh::backupWriteByte(uint8_t byte) {
 		FreshBackupInfo info;
 		{
 			FreshLock lock(_backup->mutex);
-			if (_backup->cancelled) {
-				return false;
-			}
-			if (_backup->buffer.empty()) {
-				return false;
-			}
+			if (_backup->cancelled || _backup->buffer.empty()) return false;
 			if (_backup->used < _backup->buffer.size()) {
 				_backup->buffer[_backup->tail] = byte;
 				_backup->tail = (_backup->tail + 1) % _backup->buffer.size();
@@ -58,12 +54,8 @@ bool Fresh::backupWriteByte(uint8_t byte) {
 				wrote = true;
 			}
 		}
-		if (shouldEmitProgress) {
-			callBackupProgress(info);
-		}
-		if (wrote) {
-			return true;
-		}
+		if (shouldEmitProgress) callBackupProgress(info);
+		if (wrote) return true;
 		vTaskDelay(pdMS_TO_TICKS(1));
 	}
 }
@@ -71,9 +63,7 @@ bool Fresh::backupWriteByte(uint8_t byte) {
 void Fresh::runBackupIfRequested() {
 	{
 		FreshLock lock(_backup->mutex);
-		if (!_backup->requested || _backup->running) {
-			return;
-		}
+		if (!_backup->requested || _backup->running) return;
 		_backup->requested = false;
 		_backup->running = true;
 		_backup->done = false;
@@ -91,54 +81,151 @@ void Fresh::runBackupIfRequested() {
 	FreshBackupInfo startInfo;
 	startInfo.estimatedSize = estimateBackupSize();
 	callBackupStart(startInfo);
-	emitEvent(
-	    {.type = FreshEventType::BackupStarted, .result = FreshResult::success("backup started")}
-	);
+	emitEvent({.type = FreshEventType::BackupStarted, .result = FreshResult::success("backup started")});
 
+	FreshResult constructionResult = FreshResult::success();
+	JsonDocument archive(&FreshJsonAllocator());
 	const uint64_t generatedAt = now();
-	JsonDocument archive;
 	{
 		FreshLock lock(*_mutex);
-		archive["version"] = 1;
-		archive["generatedAt"] = generatedAt;
-		JsonArray modelsArray = archive["models"].to<JsonArray>();
-		for (const auto &entry : _models) {
-			const auto &state = entry.second;
-			if (state->dropped) {
-				continue;
+		if (!lock || !_initialized || _stopping || _lifecycle != Lifecycle::Running) {
+			constructionResult = FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		} else {
+			size_t modelCount = 0;
+			for (const auto &entry : _models) {
+				if (!entry.second->dropped) modelCount++;
 			}
-			JsonObject modelObject = modelsArray.add<JsonObject>();
-			modelObject["name"] = state->name;
-			modelObject["type"] = FreshModelTypeToString(state->type);
-			if (state->type == FreshModelType::Stream) {
-				JsonArray entries = modelObject["entries"].to<JsonArray>();
-				for (const JsonDocument &doc : state->streamEntries) {
-					entries.add(doc.as<JsonVariantConst>());
-				}
-			} else {
-				JsonArray docs = modelObject["docs"].to<JsonArray>();
-				for (const auto &docEntry : state->docs) {
-					docs.add(docEntry.second.as<JsonVariantConst>());
+			constructionResult = FreshJsonSet(
+			    archive["version"],
+			    FreshBackupVersion,
+			    archive,
+			    "backup version"
+			);
+			if (constructionResult) {
+				constructionResult = FreshJsonSet(
+				    archive["generatedAt"],
+				    generatedAt,
+				    archive,
+				    "backup generation time"
+				);
+			}
+			if (constructionResult) {
+				constructionResult = FreshJsonSet(
+				    archive["modelCount"],
+				    modelCount,
+				    archive,
+				    "backup model count"
+				);
+			}
+			JsonArray modelsArray;
+			if (constructionResult) {
+				constructionResult = FreshJsonCreateArray(
+				    archive["models"],
+				    archive,
+				    modelsArray,
+				    "backup models"
+				);
+			}
+			for (const auto &entry : _models) {
+				if (!constructionResult) break;
+				const auto &state = entry.second;
+				if (state->dropped) continue;
+				const size_t recordCount = state->type == FreshModelType::Stream
+				                               ? state->streamEntries.size()
+				                               : state->docs.size();
+				JsonObject modelObject;
+				constructionResult = FreshJsonAddObject(
+				    modelsArray,
+				    archive,
+				    modelObject,
+				    "backup model"
+				);
+				if (!constructionResult) break;
+				constructionResult = FreshJsonSet(
+				    modelObject["name"],
+				    state->name,
+				    archive,
+				    "backup model name"
+				);
+				if (!constructionResult) break;
+				constructionResult = FreshJsonSet(
+				    modelObject["type"],
+				    FreshModelTypeToString(state->type),
+				    archive,
+				    "backup model type"
+				);
+				if (!constructionResult) break;
+				constructionResult = FreshJsonSet(
+				    modelObject["recordCount"],
+				    recordCount,
+				    archive,
+				    "backup record count"
+				);
+				if (!constructionResult) break;
+
+				const char *arrayName = state->type == FreshModelType::Stream ? "entries" : "docs";
+				JsonArray records;
+				constructionResult = FreshJsonCreateArray(
+				    modelObject[arrayName],
+				    archive,
+				    records,
+				    "backup records"
+				);
+				if (!constructionResult) break;
+				if (state->type == FreshModelType::Stream) {
+					for (const JsonDocument &doc : state->streamEntries) {
+						constructionResult = FreshJsonAdd(
+						    records,
+						    doc.as<JsonVariantConst>(),
+						    archive,
+						    "backup stream entry"
+						);
+						if (!constructionResult) break;
+					}
+				} else {
+					for (const auto &docEntry : state->docs) {
+						constructionResult = FreshJsonAdd(
+						    records,
+						    docEntry.second.as<JsonVariantConst>(),
+						    archive,
+						    "backup document"
+						);
+						if (!constructionResult) break;
+					}
 				}
 			}
 		}
 	}
-
-	FreshBackupPrint print(*this);
-	size_t total = measureMsgPack(archive);
-	{
-		FreshLock lock(_backup->mutex);
-		_backup->total = total;
+	if (constructionResult) {
+		constructionResult = FreshValidateJsonDocument(archive, "backup archive");
 	}
-	size_t written = serializeMsgPack(archive, print);
-	FreshResult result =
-	    written == total && !isBackupCancelled()
-	        ? FreshResult::success("backup finished", written)
-	        : FreshResult::failure(
-	              isBackupCancelled() ? FreshStatus::Cancelled : FreshStatus::InternalError,
-	              isBackupCancelled() ? "backup cancelled" : "backup serialization failed",
-	              written
-	          );
+
+	size_t total = 0;
+	size_t written = 0;
+	FreshResult result;
+	if (!constructionResult) {
+		result = constructionResult;
+	} else {
+		total = measureMsgPack(archive);
+		if (total == 0) {
+			result = FreshResult::failure(FreshStatus::InternalError, "backup archive is empty");
+		} else {
+			{
+				FreshLock lock(_backup->mutex);
+				_backup->total = total;
+			}
+			FreshBackupPrint print(*this);
+			written = serializeMsgPack(archive, print);
+			const bool cancelled = isBackupCancelled();
+			result = written == total && !cancelled
+			             ? FreshResult::success("backup finished", written)
+			             : FreshResult::failure(
+			                   cancelled ? FreshStatus::Cancelled : FreshStatus::InternalError,
+			                   cancelled ? "backup cancelled" : "backup serialization failed",
+			                   written
+			               );
+		}
+	}
 
 	{
 		FreshLock lock(_backup->mutex);
@@ -155,7 +242,6 @@ void Fresh::runBackupIfRequested() {
 	endInfo.total = total;
 	endInfo.size = written;
 	endInfo.result = result;
-
 	if (result) {
 		callBackupEnd(endInfo);
 		emitEvent({.type = FreshEventType::BackupFinished, .result = result});
@@ -163,7 +249,10 @@ void Fresh::runBackupIfRequested() {
 		callBackupError({.error = FreshBackupError::Cancelled, .result = result});
 		emitEvent({.type = FreshEventType::BackupCancelled, .result = result});
 	} else {
-		callBackupError({.error = FreshBackupError::SerializationFailed, .result = result});
+		const FreshBackupError error = result.status == FreshStatus::OutOfMemory
+		                                   ? FreshBackupError::OutOfMemory
+		                                   : FreshBackupError::SerializationFailed;
+		callBackupError({.error = error, .result = result});
 		emitEvent({.type = FreshEventType::BackupError, .result = result});
 	}
 }
@@ -175,18 +264,15 @@ bool Fresh::isBackupCancelled() {
 
 size_t Fresh::estimateBackupSize() {
 	FreshLock lock(*_mutex);
-	size_t total = 64;
+	size_t total = 96;
 	for (const auto &entry : _models) {
 		const auto &state = entry.second;
-		total += state->name.size() + 32;
+		if (state->dropped) continue;
+		total += state->name.size() + 48;
 		if (state->type == FreshModelType::Stream) {
-			for (const JsonDocument &doc : state->streamEntries) {
-				total += measureMsgPack(doc);
-			}
+			for (const JsonDocument &doc : state->streamEntries) total += measureMsgPack(doc);
 		} else {
-			for (const auto &docEntry : state->docs) {
-				total += measureMsgPack(docEntry.second);
-			}
+			for (const auto &docEntry : state->docs) total += measureMsgPack(docEntry.second);
 		}
 	}
 	return total;
@@ -198,9 +284,7 @@ void Fresh::callBackupStart(FreshBackupInfo info) {
 		FreshLock lock(*_mutex);
 		callback = _onBackupStart;
 	}
-	if (callback) {
-		callback(info);
-	}
+	if (callback) callback(info);
 }
 
 void Fresh::callBackupProgress(FreshBackupInfo info) {
@@ -209,9 +293,7 @@ void Fresh::callBackupProgress(FreshBackupInfo info) {
 		FreshLock lock(*_mutex);
 		callback = _onBackupProgress;
 	}
-	if (callback) {
-		callback(info);
-	}
+	if (callback) callback(info);
 }
 
 void Fresh::callBackupEnd(FreshBackupInfo info) {
@@ -220,9 +302,7 @@ void Fresh::callBackupEnd(FreshBackupInfo info) {
 		FreshLock lock(*_mutex);
 		callback = _onBackupEnd;
 	}
-	if (callback) {
-		callback(info);
-	}
+	if (callback) callback(info);
 }
 
 void Fresh::callBackupError(FreshBackupInfo info) {
@@ -231,17 +311,13 @@ void Fresh::callBackupError(FreshBackupInfo info) {
 		FreshLock lock(*_mutex);
 		callback = _onBackupError;
 	}
-	if (callback) {
-		callback(info);
-	}
+	if (callback) callback(info);
 }
 
 FreshResult Fresh::startBackup() {
 	FreshLock dbLock(*_mutex);
-	if (!_initialized) {
-		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
-	}
-	if (_stopping) {
+	if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	if (_stopping || _lifecycle != Lifecycle::Running) {
 		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
 	}
 	{
@@ -255,16 +331,12 @@ FreshResult Fresh::startBackup() {
 		_backup->state = FreshBackupState::Queued;
 		_backup->result = FreshResult::success("backup queued");
 	}
-	if (_syncTaskHandle != nullptr) {
-		xTaskNotifyGive(_syncTaskHandle);
-	}
+	if (_syncTaskHandle != nullptr) xTaskNotifyGive(_syncTaskHandle);
 	return FreshResult::success("backup queued");
 }
 
 size_t Fresh::readBackup(uint8_t *buffer, size_t length, uint32_t timeoutMS) {
-	if (buffer == nullptr || length == 0) {
-		return 0;
-	}
+	if (buffer == nullptr || length == 0) return 0;
 
 	const uint32_t start = millis();
 	size_t read = 0;
@@ -276,13 +348,9 @@ size_t Fresh::readBackup(uint8_t *buffer, size_t length, uint32_t timeoutMS) {
 				_backup->head = (_backup->head + 1) % _backup->buffer.size();
 				_backup->used--;
 			}
-			if (read > 0 || _backup->done || (!_backup->running && !_backup->requested)) {
-				return read;
-			}
+			if (read > 0 || _backup->done || (!_backup->running && !_backup->requested)) return read;
 		}
-		if (timeoutMS == 0 || millis() - start >= timeoutMS) {
-			return read;
-		}
+		if (timeoutMS == 0 || millis() - start >= timeoutMS) return read;
 		vTaskDelay(pdMS_TO_TICKS(1));
 	}
 	return read;
@@ -306,28 +374,21 @@ FreshResult Fresh::cancelBackup() {
 }
 
 FreshResult Fresh::backupImport(Stream &input) {
-	bool backupActive = false;
 	{
 		FreshLock backupLock(_backup->mutex);
-		backupActive = _backup->running || _backup->requested;
-	}
-	if (backupActive) {
-		return FreshResult::failure(FreshStatus::Busy, "backup already running");
-	}
-	{
-		FreshLock dbLock(*_mutex);
-		if (!_initialized) {
-			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
-		}
-		if (_stopping) {
-			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		if (_backup->running || _backup->requested) {
+			return FreshResult::failure(FreshStatus::Busy, "backup already running");
 		}
 	}
-
-	JsonDocument archive;
+	JsonDocument archive(&FreshJsonAllocator());
 	DeserializationError error = deserializeMsgPack(archive, input);
-	if (error) {
-		return FreshResult::failure(FreshStatus::CorruptData, "failed to read backup");
+	if (error || archive.overflowed()) {
+		return FreshResult::failure(
+		    error == DeserializationError::NoMemory || archive.overflowed()
+		        ? FreshStatus::OutOfMemory
+		        : FreshStatus::CorruptData,
+		    "failed to read backup"
+		);
 	}
 	return importBackupArchive(archive);
 }
@@ -336,52 +397,58 @@ FreshResult Fresh::backupImport(const uint8_t *data, size_t length) {
 	if (data == nullptr || length == 0) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "backup buffer is required");
 	}
-
-	bool backupActive = false;
 	{
 		FreshLock backupLock(_backup->mutex);
-		backupActive = _backup->running || _backup->requested;
-	}
-	if (backupActive) {
-		return FreshResult::failure(FreshStatus::Busy, "backup already running");
-	}
-	{
-		FreshLock dbLock(*_mutex);
-		if (!_initialized) {
-			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
-		}
-		if (_stopping) {
-			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+		if (_backup->running || _backup->requested) {
+			return FreshResult::failure(FreshStatus::Busy, "backup already running");
 		}
 	}
-
-	JsonDocument archive;
+	JsonDocument archive(&FreshJsonAllocator());
 	DeserializationError error = deserializeMsgPack(archive, data, length);
-	if (error) {
-		return FreshResult::failure(FreshStatus::CorruptData, "failed to read backup");
+	if (error || archive.overflowed()) {
+		return FreshResult::failure(
+		    error == DeserializationError::NoMemory || archive.overflowed()
+		        ? FreshStatus::OutOfMemory
+		        : FreshStatus::CorruptData,
+		    "failed to read backup"
+		);
 	}
 	return importBackupArchive(archive);
 }
 
 FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
-	{
-		FreshLock dbLock(*_mutex);
-		if (!_initialized) {
-			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
-		}
-		if (_stopping) {
-			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
-		}
+	// Hold the documented lock order for the complete prepare/commit transaction.
+	// Preparation performs no live mutation, but blocking concurrent operations
+	// here guarantees the captured registry cannot change before the swap.
+	FreshLock importSyncLock(*_syncMutex);
+	if (!importSyncLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock sync");
 	}
-	if ((archive["version"] | 0) != 1) {
-		return FreshResult::failure(FreshStatus::CorruptData, "unsupported backup version");
+	FreshLock importDbLock(*_mutex);
+	if (!importDbLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 	}
-	if (!archive["models"].is<JsonArrayConst>()) {
-		return FreshResult::failure(FreshStatus::CorruptData, "backup models are missing");
+	if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	if (_stopping || _lifecycle != Lifecycle::Running) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
 	}
 
+	if ((archive["version"] | 0U) != FreshBackupVersion ||
+	    !archive["modelCount"].is<uint64_t>() ||
+	    !archive["models"].is<JsonArrayConst>()) {
+		return FreshResult::failure(FreshStatus::CorruptData, "unsupported or corrupt backup");
+	}
+	const uint64_t declaredModelCount = archive["modelCount"].as<uint64_t>();
+	const JsonArrayConst modelArray = archive["models"].as<JsonArrayConst>();
+	if (declaredModelCount > SIZE_MAX ||
+	    static_cast<size_t>(declaredModelCount) != modelArray.size()) {
+		return FreshResult::failure(FreshStatus::CorruptData, "backup model count mismatch");
+	}
+
+	const uint64_t capturedDatabaseRevision = _databaseRevision;
+	const std::map<std::string, std::shared_ptr<FreshModel::State>> oldModels = _models;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> importedModels;
-	for (JsonObjectConst modelObject : archive["models"].as<JsonArrayConst>()) {
+	for (JsonObjectConst modelObject : modelArray) {
 		const char *name = modelObject["name"] | "";
 		const char *typeName = modelObject["type"] | "";
 		if (!FreshIsValidName(name)) {
@@ -390,143 +457,134 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 		if (strcmp(typeName, "general") != 0 && strcmp(typeName, "stream") != 0) {
 			return FreshResult::failure(FreshStatus::CorruptData, "backup contains invalid model type");
 		}
+		if (!modelObject["recordCount"].is<uint64_t>()) {
+			return FreshResult::failure(FreshStatus::CorruptData, "backup record count is missing");
+		}
 
 		const std::string modelName = name;
 		if (importedModels.find(modelName) != importedModels.end()) {
 			return FreshResult::failure(FreshStatus::CorruptData, "backup contains duplicate model");
 		}
+		const FreshModelType type = FreshModelTypeFromString(typeName);
+		const char *arrayName = type == FreshModelType::Stream ? "entries" : "docs";
+		if (!modelObject[arrayName].is<JsonArrayConst>()) {
+			return FreshResult::failure(FreshStatus::CorruptData, "backup records are missing");
+		}
+		const uint64_t declaredRecordCount = modelObject["recordCount"].as<uint64_t>();
+		const JsonArrayConst records = modelObject[arrayName].as<JsonArrayConst>();
+		if (declaredRecordCount > SIZE_MAX ||
+		    static_cast<size_t>(declaredRecordCount) != records.size()) {
+			return FreshResult::failure(FreshStatus::CorruptData, "backup record count mismatch");
+		}
 
 		auto state = std::make_shared<FreshModel::State>();
+		if (!state) {
+			return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate imported model");
+		}
 		state->name = modelName;
-		state->type = FreshModelTypeFromString(typeName);
+		state->type = type;
 		state->dirty = true;
 		state->snapshotRequired = true;
-
-		if (state->type == FreshModelType::Stream) {
-			if (!modelObject["entries"].is<JsonArrayConst>()) {
-				return FreshResult::failure(FreshStatus::CorruptData, "stream backup entries are missing");
+		auto old = oldModels.find(modelName);
+		if (old != oldModels.end()) {
+			state->storageId = old->second->storageId;
+			if (old->second->storageEpoch == UINT32_MAX) {
+				return FreshResult::failure(FreshStatus::InternalError, "storage epoch overflow");
 			}
-			for (JsonVariantConst entry : modelObject["entries"].as<JsonArrayConst>()) {
+			state->storageEpoch = old->second->storageEpoch + 1;
+			state->validator = old->second->validator;
+		}
+
+		if (type == FreshModelType::Stream) {
+			for (JsonVariantConst entry : records) {
 				JsonDocument copy;
 				FreshResult cloneResult = FreshCloneJson(copy, entry, "backup stream entry");
-				if (!cloneResult) {
-					return cloneResult;
-				}
-				FreshResult sizeResult =
-				    checkPayloadSize(measureMsgPack(copy), _config.maxDocumentBytes, "stream entry");
-				if (!sizeResult) {
-					return sizeResult;
-				}
+				if (!cloneResult) return cloneResult;
+				FreshResult sizeResult = checkPayloadSize(
+				    measureMsgPack(copy),
+				    _config.maxDocumentBytes,
+				    "stream entry"
+				);
+				if (!sizeResult) return sizeResult;
 				state->streamEntries.push_back(std::move(copy));
 			}
 		} else {
-			if (!modelObject["docs"].is<JsonArrayConst>()) {
-				return FreshResult::failure(FreshStatus::CorruptData, "document backup docs are missing");
-			}
-			for (JsonVariantConst entry : modelObject["docs"].as<JsonArrayConst>()) {
+			for (JsonVariantConst entry : records) {
 				JsonDocument copy;
 				FreshResult cloneResult = FreshCloneJson(copy, entry, "backup document");
-				if (!cloneResult) {
-					return cloneResult;
-				}
-				FreshResult sizeResult =
-				    checkPayloadSize(measureMsgPack(copy), _config.maxDocumentBytes, "document");
-				if (!sizeResult) {
-					return sizeResult;
-				}
+				if (!cloneResult) return cloneResult;
+				FreshResult sizeResult = checkPayloadSize(
+				    measureMsgPack(copy),
+				    _config.maxDocumentBytes,
+				    "document"
+				);
+				if (!sizeResult) return sizeResult;
 				const char *id = copy["_id"] | "";
-				if (*id == '\0') {
-					return FreshResult::failure(FreshStatus::CorruptData, "backup document is missing id");
-				}
-				if (state->docs.find(id) != state->docs.end()) {
-					return FreshResult::failure(FreshStatus::CorruptData, "backup contains duplicate document id");
+				if (*id == '\0' || state->docs.find(id) != state->docs.end()) {
+					return FreshResult::failure(FreshStatus::CorruptData, "backup contains invalid document id");
 				}
 				state->docs[id] = std::move(copy);
 			}
 		}
-
 		importedModels[modelName] = state;
 	}
 
-	size_t affectedCount = 0;
-	TaskHandle_t syncTaskHandle = nullptr;
-	{
-		FreshLock lock(*_mutex);
-		if (!_initialized) {
-			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	std::map<std::string, std::shared_ptr<FreshModel::State>> finalModels = importedModels;
+	for (const auto &entry : oldModels) {
+		if (importedModels.find(entry.first) == importedModels.end()) {
+			finalModels[entry.first] = entry.second;
 		}
-		if (_stopping) {
-			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
-		}
-		for (const auto &entry : importedModels) {
-			const std::string &name = entry.first;
-			const auto &incoming = entry.second;
-			auto found = _models.find(name);
-			std::shared_ptr<FreshModel::State> target;
-			if (found == _models.end()) {
-				target = incoming;
-				_models[name] = target;
-			} else {
-				target = found->second;
-				std::map<std::string, JsonDocument> clonedDocs;
-				std::deque<JsonDocument> clonedStreamEntries;
-				for (const auto &docEntry : incoming->docs) {
-					JsonDocument clone;
-					FreshResult cloneResult =
-					    FreshCloneJson(clone, docEntry.second.as<JsonVariantConst>(), "backup document");
-					if (!cloneResult) {
-						return cloneResult;
-					}
-					clonedDocs[docEntry.first] = std::move(clone);
-				}
-				for (const JsonDocument &streamEntry : incoming->streamEntries) {
-					JsonDocument clone;
-					FreshResult cloneResult =
-					    FreshCloneJson(clone, streamEntry.as<JsonVariantConst>(), "backup stream entry");
-					if (!cloneResult) {
-						return cloneResult;
-					}
-					clonedStreamEntries.push_back(std::move(clone));
-				}
-				target->name = incoming->name;
-				target->type = incoming->type;
-				target->docs = std::move(clonedDocs);
-				target->streamEntries = std::move(clonedStreamEntries);
-				target->pending.clear();
-				target->dropped = false;
-				target->degraded = false;
-				target->recordsSinceSnapshot = 0;
-				target->bytesSinceSnapshot = 0;
-				target->checkpointSequence = 0;
-				target->lastSequence = 0;
-				target->dirty = true;
-				target->snapshotRequired = true;
-				target->storageEpoch++;
-			}
-			affectedCount++;
-		}
-
-		for (auto &entry : _models) {
-			if (importedModels.find(entry.first) != importedModels.end()) {
-				continue;
-			}
-			const auto &state = entry.second;
-			if (!state->dropped) {
-				state->dropped = true;
-				state->dirty = true;
-				state->snapshotRequired = false;
-				state->pending.clear();
-				state->storageEpoch++;
-				affectedCount++;
-			}
-		}
-		_manifestDirty = true;
-		_manifestEpoch++;
-		syncTaskHandle = _syncTaskHandle;
 	}
 
-	if (syncTaskHandle != nullptr) {
-		xTaskNotifyGive(syncTaskHandle);
+	uint64_t nextDatabaseRevision = 0;
+	FreshResult revisionResult = FreshNextRevision(
+	    capturedDatabaseRevision,
+	    nextDatabaseRevision,
+	    "database revision"
+	);
+	if (!revisionResult) return revisionResult;
+	if (_manifestEpoch == UINT32_MAX) {
+		return FreshResult::failure(FreshStatus::InternalError, "manifest epoch overflow");
 	}
+	for (const auto &entry : oldModels) {
+		const auto &state = entry.second;
+		if (state->revision == UINT64_MAX) {
+			return FreshResult::failure(FreshStatus::InternalError, "model revision overflow");
+		}
+		if (importedModels.find(entry.first) == importedModels.end() &&
+		    state->storageEpoch == UINT32_MAX) {
+			return FreshResult::failure(FreshStatus::InternalError, "storage epoch overflow");
+		}
+	}
+
+	// No fallible work remains after this point.
+	for (auto &entry : oldModels) {
+		auto &state = entry.second;
+		state->revision++;
+		state->dropped = true;
+		state->dirty = true;
+		state->snapshotRequired = false;
+		state->pending.clear();
+		if (importedModels.find(entry.first) == importedModels.end()) {
+			state->storageEpoch++;
+		}
+	}
+	for (auto &entry : importedModels) {
+		entry.second->revision = 1;
+		entry.second->dropped = false;
+		entry.second->dirty = true;
+		entry.second->snapshotRequired = true;
+	}
+
+	const size_t affectedCount = finalModels.size();
+	_models.swap(finalModels);
+	_manifestDirty = true;
+	_manifestEpoch++;
+	_databaseRevision = nextDatabaseRevision;
+	TaskHandle_t syncTaskHandle = _syncTaskHandle;
+
+	// Release both recursive locks before waking the sync task.
+	(void)syncTaskHandle;
+	if (syncTaskHandle != nullptr) xTaskNotifyGive(syncTaskHandle);
 	return FreshResult::success("backup imported", affectedCount);
 }

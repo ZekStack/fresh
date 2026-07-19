@@ -35,7 +35,8 @@ class FreshMutex {
 
 class FreshLock {
   public:
-	explicit FreshLock(FreshMutex &mutex) : _mutex(mutex), _locked(mutex.lock()) {
+	explicit FreshLock(FreshMutex &mutex, TickType_t timeout = portMAX_DELAY)
+	    : _mutex(mutex), _locked(mutex.lock(timeout)) {
 	}
 
 	~FreshLock() {
@@ -55,4 +56,3 @@ class FreshLock {
 	FreshMutex &_mutex;
 	bool _locked = false;
 };
-

@@ -99,6 +99,8 @@ struct FreshConfig {
 
 struct FreshDeinitOptions {
 	bool sync = true;
+	// Total deadline for the complete explicit shutdown operation. UINT32_MAX
+	// keeps destructor-style unbounded lifetime-barrier behavior.
 	uint32_t timeoutMS = 2000;
 };
 
@@ -348,10 +350,7 @@ class Fresh {
 	FreshResult dropAllModels();
 	FreshResult renameModel(const char *oldName, const char *newName);
 
-	// Persist captured pending operations without forcing a checkpoint snapshot.
 	FreshResult flush();
-
-	// Advanced manual checkpoint controls. The blocking variant touches flash synchronously.
 	FreshResult forceSyncAsync();
 	FreshResult forceSync();
 
@@ -379,9 +378,23 @@ class Fresh {
 	const char *loadStatusToString(FreshLoadStatus status) const;
 	const char *statusToString(FreshStatus status) const;
 
+	// Internal checked staging boundary shared by the model implementation.
+	// These are not application-level APIs and may change before v0.1.0.
+	FreshResult checkPayloadSize(size_t payloadBytes, size_t limit, const char *label) const;
+	FreshResult recordToJson(const FreshPendingRecord &record, JsonDocument &out);
+
   private:
 	friend class FreshModel;
 	friend class FreshBackupPrint;
+
+	enum class Lifecycle : uint8_t {
+		Uninitialized,
+		Running,
+		FinalSync,
+		StopRequested,
+		WaitingForTaskExit,
+		Stopped,
+	};
 
 	static void syncTaskThunk(void *arg);
 
@@ -395,14 +408,12 @@ class Fresh {
 	std::string modelFile(const std::string &storageId, const char *fileName) const;
 	FreshResult ensureDir(const std::string &path);
 	FreshResult checkFreeSpace(size_t requiredBytes) const;
-	FreshResult checkPayloadSize(size_t payloadBytes, size_t limit, const char *label) const;
 	FreshResult readManifest();
 	FreshResult writeManifest(const JsonDocument &manifest);
 	FreshResult applyRecord(const std::shared_ptr<FreshModel::State> &state, const FreshPendingRecord &record);
 	FreshResult loadSnapshot(const std::shared_ptr<FreshModel::State> &state);
 	FreshResult loadJournal(const std::shared_ptr<FreshModel::State> &state);
 	FreshResult loadModel(const std::shared_ptr<FreshModel::State> &state);
-	JsonDocument recordToJson(const FreshPendingRecord &record);
 	FreshResult syncDirty(bool force);
 
 	bool backupWriteByte(uint8_t byte);
@@ -418,6 +429,7 @@ class Fresh {
 	FreshConfig _config;
 	FreshDiagnostics _diagnostics;
 	std::string _rootPath;
+	Lifecycle _lifecycle = Lifecycle::Uninitialized;
 	bool _initialized = false;
 	bool _stopping = false;
 	bool _stopTask = false;
@@ -426,6 +438,7 @@ class Fresh {
 	bool _syncTaskStarted = false;
 	uint32_t _manifestEpoch = 0;
 	uint64_t _nextPendingSequence = 1;
+	uint64_t _databaseRevision = 1;
 	TaskHandle_t _syncTaskHandle = nullptr;
 	SemaphoreHandle_t _syncTaskExited = nullptr;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> _models;

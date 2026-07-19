@@ -98,9 +98,46 @@ jobs:
             fi
           done
 
+  build-hardening-testing:
+    runs-on: ubuntu-latest
+    needs: source-audit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Cache PIOArduino
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: ${{ runner.os }}-pioarduino-hardening-${{ env.PIOARDUINO_VERSION }}-${{ env.PIOARDUINO_PLATFORM_VERSION }}-${{ hashFiles('**/library.json') }}
+          restore-keys: |
+            ${{ runner.os }}-pioarduino-hardening-${{ env.PIOARDUINO_VERSION }}-${{ env.PIOARDUINO_PLATFORM_VERSION }}-
+
+      - name: Install PIOArduino Core
+        run: python -m pip install --upgrade "pioarduino==${PIOARDUINO_VERSION}"
+
+      - name: Install PIOArduino ESP32 Platform
+        run: pio pkg install -g -p "${PIOARDUINO_PLATFORM_URL}"
+
+      - name: Build hardening regression with fault injection
+        run: |
+          pio ci examples/HardeningRegressionTest \
+            --board esp32dev \
+            --lib="." \
+            --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
+            --project-option "build_unflags=-std=gnu++11" \
+            --project-option "build_flags=-std=gnu++20 -DFRESH_TESTING"
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [source-audit, arduino-lint, build-examples, arduino-cli]
+    needs: [source-audit, arduino-lint, build-examples, build-hardening-testing, arduino-cli]
     runs-on: ubuntu-latest
     permissions:
       contents: write

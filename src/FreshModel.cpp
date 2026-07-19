@@ -4,7 +4,34 @@
 
 #include <LittleFS.h>
 
+#include <limits>
 #include <utility>
+
+namespace {
+
+struct FreshDocumentSnapshot {
+	std::string id;
+	JsonDocument doc;
+};
+
+FreshResult FreshBuildJournalRecord(
+    Fresh &owner,
+    FreshPendingRecord &record,
+    size_t maxJournalRecordBytes
+) {
+	JsonDocument recordDoc(&FreshJsonAllocator());
+	FreshResult result = owner.recordToJson(record, recordDoc);
+	if (!result) {
+		return result;
+	}
+	return owner.checkPayloadSize(
+	    measureMsgPack(recordDoc),
+	    maxJournalRecordBytes,
+	    "journal record"
+	);
+}
+
+} // namespace
 
 FreshModel::FreshModel(Fresh *owner, std::shared_ptr<State> state) : _owner(owner), _state(state) {
 }
@@ -17,10 +44,11 @@ FreshResult FreshModel::validateLocked(
 	if (_owner == nullptr || _state == nullptr) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
-	if (!_owner->_initialized) {
+	if (!_owner->_initialized || _owner->_lifecycle == Fresh::Lifecycle::Uninitialized ||
+	    _owner->_lifecycle == Fresh::Lifecycle::Stopped) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 	}
-	if (_owner->_stopping) {
+	if (_owner->_stopping || _owner->_lifecycle != Fresh::Lifecycle::Running) {
 		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
 	}
 	if (_state->dropped) {
@@ -63,24 +91,13 @@ FreshModelType FreshModel::type() const {
 }
 
 FreshResult FreshModel::setValidator(FreshBoolValidator validator) {
-	if (_owner == nullptr || _state == nullptr) {
-		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
-	}
-	FreshLock lock(*_owner->_mutex);
-	if (!lock) {
-		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-	}
-	FreshResult valid = validateLocked();
-	if (!valid) {
-		return valid;
-	}
-	_state->validator = [validator](const JsonDocument &doc) {
+	FreshResultValidator wrapped = [validator](const JsonDocument &doc) {
 		if (!validator || validator(doc)) {
 			return FreshValidationResult{.result = true, .message = "ok"};
 		}
 		return FreshValidationResult{.result = false, .message = "validation failed"};
 	};
-	return FreshResult::success("validator set");
+	return setValidator(std::move(wrapped));
 }
 
 FreshResult FreshModel::setValidator(FreshResultValidator validator) {
@@ -95,7 +112,13 @@ FreshResult FreshModel::setValidator(FreshResultValidator validator) {
 	if (!valid) {
 		return valid;
 	}
-	_state->validator = validator;
+	uint64_t nextRevision = 0;
+	FreshResult revisionResult = FreshNextRevision(_state->revision, nextRevision, "model revision");
+	if (!revisionResult) {
+		return revisionResult;
+	}
+	_state->validator = std::move(validator);
+	_state->revision = nextRevision;
 	return FreshResult::success("validator set");
 }
 
@@ -103,10 +126,15 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 	if (_owner == nullptr || _state == nullptr) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
+	if (!doc.is<JsonObjectConst>()) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "document must be an object");
+	}
 
 	const uint64_t time = _owner->now();
-	FreshEvent event;
-	FreshResult result;
+	std::string id;
+	uint64_t capturedRevision = 0;
+	uint64_t capturedSequence = 0;
+	FreshResultValidator validator;
 	{
 		FreshLock lock(*_owner->_mutex);
 		if (!lock) {
@@ -117,67 +145,91 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 		    FreshModelType::General,
 		    "create is only valid for general models"
 		);
-		if (!valid) {
-			return valid;
-		}
+		if (!valid) return valid;
 
-		std::string id = doc["_id"] | "";
+		id = doc["_id"] | "";
 		if (id.empty() || _state->docs.find(id) != _state->docs.end()) {
 			do {
 				id = FreshMakeId();
 			} while (_state->docs.find(id) != _state->docs.end());
-			doc["_id"] = id;
 		}
+		if (_owner->_nextPendingSequence == UINT64_MAX) {
+			return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
+		}
+		capturedRevision = _state->revision;
+		capturedSequence = _owner->_nextPendingSequence;
+		validator = _state->validator;
+	}
 
-		doc["createdAt"] = time;
-		doc["updatedAt"] = time;
+	JsonDocument candidate(&FreshJsonAllocator());
+	FreshResult result = FreshCloneJson(candidate, doc.as<JsonVariantConst>(), "document");
+	if (!result) return result;
+	result = FreshJsonSet(candidate["_id"], id, candidate, "document id");
+	if (!result) return result;
+	result = FreshJsonSet(candidate["createdAt"], time, candidate, "document createdAt");
+	if (!result) return result;
+	result = FreshJsonSet(candidate["updatedAt"], time, candidate, "document updatedAt");
+	if (!result) return result;
+	result = _owner->checkPayloadSize(
+	    measureMsgPack(candidate),
+	    _owner->_config.maxDocumentBytes,
+	    "document"
+	);
+	if (!result) return result;
+	if (validator) {
+		FreshValidationResult validation = validator(candidate);
+		if (!validation) {
+			return FreshResult::failure(FreshStatus::ValidationFailed, validation.message.c_str());
+		}
+	}
 
-		JsonDocument stored;
-		FreshResult cloneResult = FreshCloneJson(stored, doc.as<JsonVariantConst>(), "document");
-		if (!cloneResult) {
-			return cloneResult;
-		}
-		FreshResult sizeResult =
-		    _owner->checkPayloadSize(measureMsgPack(stored), _owner->_config.maxDocumentBytes, "document");
-		if (!sizeResult) {
-			return sizeResult;
-		}
-		if (_state->validator) {
-			FreshValidationResult validation = _state->validator(stored);
-			if (!validation) {
-				return FreshResult::failure(FreshStatus::ValidationFailed, validation.message.c_str());
-			}
-		}
+	JsonDocument stored;
+	result = FreshCloneJson(stored, candidate.as<JsonVariantConst>(), "stored document");
+	if (!result) return result;
+	JsonDocument resultDoc;
+	result = FreshCloneJson(resultDoc, candidate.as<JsonVariantConst>(), "result document");
+	if (!result) return result;
+	JsonDocument callerDoc;
+	result = FreshCloneJson(callerDoc, candidate.as<JsonVariantConst>(), "caller document");
+	if (!result) return result;
 
-		FreshPendingRecord record;
-		record.op = FreshJournalOp::Create;
-		record.sequence = _owner->_nextPendingSequence;
-		record.id = id;
-		cloneResult = FreshCloneJson(record.doc, stored.as<JsonVariantConst>(), "journal document");
-		if (!cloneResult) {
-			return cloneResult;
+	FreshPendingRecord record;
+	record.op = FreshJournalOp::Create;
+	record.sequence = capturedSequence;
+	record.id = id;
+	result = FreshCloneJson(record.doc, candidate.as<JsonVariantConst>(), "journal document");
+	if (!result) return result;
+	result = FreshBuildJournalRecord(*_owner, record, _owner->_config.maxJournalRecordBytes);
+	if (!result) return result;
+
+	FreshEvent event;
+	{
+		FreshLock lock(*_owner->_mutex);
+		if (!lock) {
+			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 		}
-		JsonDocument recordDoc = _owner->recordToJson(record);
-		sizeResult = _owner->checkPayloadSize(
-		    measureMsgPack(recordDoc),
-		    _owner->_config.maxJournalRecordBytes,
-		    "journal record"
+		FreshResult valid = validateLocked(
+		    true,
+		    FreshModelType::General,
+		    "create is only valid for general models"
 		);
-		if (!sizeResult) {
-			return sizeResult;
+		if (!valid) return valid;
+		if (_state->revision != capturedRevision ||
+		    _owner->_nextPendingSequence != capturedSequence ||
+		    _state->docs.find(id) != _state->docs.end()) {
+			return FreshResult::failure(FreshStatus::Busy, "model changed while validator was running");
 		}
-
-		JsonDocument resultDoc;
-		cloneResult = FreshCloneJson(resultDoc, stored.as<JsonVariantConst>(), "result document");
-		if (!cloneResult) {
-			return cloneResult;
-		}
+		uint64_t nextRevision = 0;
+		result = FreshNextRevision(_state->revision, nextRevision, "model revision");
+		if (!result) return result;
 
 		_owner->_nextPendingSequence++;
 		_state->lastSequence = record.sequence;
 		_state->docs[id] = std::move(stored);
 		_state->pending.push_back(std::move(record));
 		_state->dirty = true;
+		_state->revision = nextRevision;
+		doc = std::move(callerDoc);
 
 		result = FreshResult::success("document created", 1);
 		result.doc = std::move(resultDoc);
@@ -202,53 +254,62 @@ FreshResult FreshModel::append(JsonDocument &doc, const FreshStreamAppendOptions
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
 
-	FreshEvent event;
-	FreshResult result;
+	uint64_t capturedRevision = 0;
+	uint64_t capturedSequence = 0;
 	{
 		FreshLock lock(*_owner->_mutex);
-		if (!lock) {
-			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		}
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 		FreshResult valid = validateLocked(
 		    true,
 		    FreshModelType::Stream,
 		    "append is only valid for stream models"
 		);
-		if (!valid) {
-			return valid;
+		if (!valid) return valid;
+		if (_owner->_nextPendingSequence == UINT64_MAX) {
+			return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
 		}
+		capturedRevision = _state->revision;
+		capturedSequence = _owner->_nextPendingSequence;
+	}
 
-		JsonDocument stored;
-		FreshResult cloneResult = FreshCloneJson(stored, doc.as<JsonVariantConst>(), "stream entry");
-		if (!cloneResult) {
-			return cloneResult;
-		}
-		FreshResult sizeResult = _owner->checkPayloadSize(
-		    measureMsgPack(stored),
-		    _owner->_config.maxDocumentBytes,
-		    "stream entry"
-		);
-		if (!sizeResult) {
-			return sizeResult;
-		}
+	JsonDocument stored;
+	FreshResult result = FreshCloneJson(stored, doc.as<JsonVariantConst>(), "stream entry");
+	if (!result) return result;
+	result = _owner->checkPayloadSize(
+	    measureMsgPack(stored),
+	    _owner->_config.maxDocumentBytes,
+	    "stream entry"
+	);
+	if (!result) return result;
+	JsonDocument callerDoc;
+	result = FreshCloneJson(callerDoc, stored.as<JsonVariantConst>(), "caller stream entry");
+	if (!result) return result;
 
-		FreshPendingRecord record;
-		record.op = FreshJournalOp::Append;
-		record.sequence = _owner->_nextPendingSequence;
-		record.maxEntries = options.maxEntries;
-		cloneResult = FreshCloneJson(record.doc, stored.as<JsonVariantConst>(), "journal stream entry");
-		if (!cloneResult) {
-			return cloneResult;
-		}
-		JsonDocument recordDoc = _owner->recordToJson(record);
-		sizeResult = _owner->checkPayloadSize(
-		    measureMsgPack(recordDoc),
-		    _owner->_config.maxJournalRecordBytes,
-		    "journal record"
+	FreshPendingRecord record;
+	record.op = FreshJournalOp::Append;
+	record.sequence = capturedSequence;
+	record.maxEntries = options.maxEntries;
+	result = FreshCloneJson(record.doc, stored.as<JsonVariantConst>(), "journal stream entry");
+	if (!result) return result;
+	result = FreshBuildJournalRecord(*_owner, record, _owner->_config.maxJournalRecordBytes);
+	if (!result) return result;
+
+	FreshEvent event;
+	{
+		FreshLock lock(*_owner->_mutex);
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		FreshResult valid = validateLocked(
+		    true,
+		    FreshModelType::Stream,
+		    "append is only valid for stream models"
 		);
-		if (!sizeResult) {
-			return sizeResult;
+		if (!valid) return valid;
+		if (_state->revision != capturedRevision || _owner->_nextPendingSequence != capturedSequence) {
+			return FreshResult::failure(FreshStatus::Busy, "model changed while append was being prepared");
 		}
+		uint64_t nextRevision = 0;
+		result = FreshNextRevision(_state->revision, nextRevision, "model revision");
+		if (!result) return result;
 
 		_owner->_nextPendingSequence++;
 		_state->streamEntries.push_back(std::move(stored));
@@ -258,6 +319,8 @@ FreshResult FreshModel::append(JsonDocument &doc, const FreshStreamAppendOptions
 		_state->lastSequence = record.sequence;
 		_state->pending.push_back(std::move(record));
 		_state->dirty = true;
+		_state->revision = nextRevision;
+		doc = std::move(callerDoc);
 
 		result = FreshResult::success("stream entry appended", 1);
 		event = {
@@ -283,17 +346,13 @@ FreshResult FreshModel::findById(const std::string &id) const {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
 	FreshLock lock(*_owner->_mutex);
-	if (!lock) {
-		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-	}
+	if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 	FreshResult valid = validateLocked(
 	    true,
 	    FreshModelType::General,
 	    "findById is only valid for general models"
 	);
-	if (!valid) {
-		return valid;
-	}
+	if (!valid) return valid;
 	auto found = _state->docs.find(id);
 	if (found == _state->docs.end()) {
 		return FreshResult::failure(FreshStatus::DocumentNotFound, "document not found");
@@ -311,35 +370,47 @@ FreshResult FreshModel::find(FreshPredicate predicate, bool stopAtFirst) const {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "predicate is required");
 	}
 
-	FreshLock lock(*_owner->_mutex);
-	if (!lock) {
-		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+	std::vector<FreshDocumentSnapshot> snapshot;
+	{
+		FreshLock lock(*_owner->_mutex);
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		FreshResult valid = validateLocked(
+		    true,
+		    FreshModelType::General,
+		    "find is only valid for general models"
+		);
+		if (!valid) return valid;
+		snapshot.reserve(_state->docs.size());
+		for (const auto &entry : _state->docs) {
+			FreshDocumentSnapshot item;
+			item.id = entry.first;
+			FreshResult cloneResult = FreshCloneJson(
+			    item.doc,
+			    entry.second.as<JsonVariantConst>(),
+			    "predicate snapshot"
+			);
+			if (!cloneResult) return cloneResult;
+			snapshot.push_back(std::move(item));
+		}
 	}
-	FreshResult valid = validateLocked(
-	    true,
-	    FreshModelType::General,
-	    "find is only valid for general models"
-	);
-	if (!valid) {
-		return valid;
-	}
+
 	JsonDocument resultDoc(&FreshJsonAllocator());
 	JsonArray array = resultDoc.to<JsonArray>();
+	if (array.isNull() || resultDoc.overflowed()) {
+		return FreshJsonAllocationFailure("find result");
+	}
 	size_t affectedCount = 0;
-	for (const auto &entry : _state->docs) {
-		if (!predicate(entry.second)) {
-			continue;
-		}
-		if (!array.add(entry.second.as<JsonVariantConst>()) || resultDoc.overflowed()) {
-			return FreshResult::failure(
-			    FreshStatus::OutOfMemory,
-			    "failed to construct find result"
-			);
-		}
+	for (const FreshDocumentSnapshot &entry : snapshot) {
+		if (!predicate(entry.doc)) continue;
+		FreshResult addResult = FreshJsonAdd(
+		    array,
+		    entry.doc.as<JsonVariantConst>(),
+		    resultDoc,
+		    "find result"
+		);
+		if (!addResult) return addResult;
 		affectedCount++;
-		if (stopAtFirst) {
-			break;
-		}
+		if (stopAtFirst) break;
 	}
 	resultDoc.shrinkToFit();
 	FreshResult result = FreshResult::success(
@@ -382,9 +453,7 @@ FreshResult FreshModel::updateOne(
 	}
 	return update(
 	    [predicate, updated = false](const JsonDocument &doc) mutable {
-		    if (updated || !predicate(doc)) {
-			    return false;
-		    }
+		    if (updated || !predicate(doc)) return false;
 		    updated = true;
 		    return true;
 	    },
@@ -404,147 +473,169 @@ FreshResult FreshModel::update(
 	if (!predicate) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "predicate is required");
 	}
+	if (!patch.is<JsonObjectConst>()) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "patch must be an object");
+	}
 
 	const uint64_t updateTime = _owner->now();
-	std::vector<FreshEvent> events;
-	FreshResult result = FreshResult::success("documents updated");
+	uint64_t capturedRevision = 0;
+	uint64_t capturedSequence = 0;
+	FreshResultValidator validator;
+	std::vector<FreshDocumentSnapshot> snapshot;
 	{
-		struct FreshUpdateCandidate {
-			std::string id;
-			JsonDocument doc;
-			FreshPendingRecord record;
-		};
-		std::vector<FreshUpdateCandidate> candidates;
 		FreshLock lock(*_owner->_mutex);
-		if (!lock) {
-			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		}
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 		FreshResult valid = validateLocked(
 		    true,
 		    FreshModelType::General,
 		    "update is only valid for general models"
 		);
-		if (!valid) {
-			return valid;
-		}
-
-		uint64_t nextSequence = _owner->_nextPendingSequence;
+		if (!valid) return valid;
+		capturedRevision = _state->revision;
+		capturedSequence = _owner->_nextPendingSequence;
+		validator = _state->validator;
+		snapshot.reserve(_state->docs.size());
 		for (const auto &entry : _state->docs) {
-			if (!predicate(entry.second)) {
-				continue;
-			}
-			JsonDocument candidate;
-			FreshResult cloneResult =
-			    FreshCloneJson(candidate, entry.second.as<JsonVariantConst>(), "existing document");
-			if (!cloneResult) {
-				return cloneResult;
-			}
-			FreshMergePatch(candidate, patch);
-			candidate["updatedAt"] = updateTime;
+			FreshDocumentSnapshot item;
+			item.id = entry.first;
+			FreshResult cloneResult = FreshCloneJson(
+			    item.doc,
+			    entry.second.as<JsonVariantConst>(),
+			    "update snapshot"
+			);
+			if (!cloneResult) return cloneResult;
+			snapshot.push_back(std::move(item));
+		}
+	}
 
-			JsonDocument storedCandidate;
-			cloneResult = FreshCloneJson(
-			    storedCandidate,
-			    candidate.as<JsonVariantConst>(),
-			    "updated document"
-			);
-			if (!cloneResult) {
-				return cloneResult;
-			}
-			FreshResult sizeResult = _owner->checkPayloadSize(
-			    measureMsgPack(storedCandidate),
-			    _owner->_config.maxDocumentBytes,
-			    "document"
-			);
-			if (!sizeResult) {
-				return sizeResult;
-			}
-			if (_state->validator) {
-				FreshValidationResult validation = _state->validator(storedCandidate);
-				if (!validation) {
-					return FreshResult::failure(
-					    FreshStatus::ValidationFailed,
-					    validation.message.c_str(),
-					    result.affectedCount
-					);
-				}
-			}
-
-			FreshPendingRecord record;
-			record.op = FreshJournalOp::Update;
-			record.sequence = nextSequence++;
-			record.id = entry.first;
-			cloneResult = FreshCloneJson(
-			    record.doc,
-			    storedCandidate.as<JsonVariantConst>(),
-			    "journal document"
-			);
-			if (!cloneResult) {
-				return cloneResult;
-			}
-			JsonDocument recordDoc = _owner->recordToJson(record);
-			sizeResult = _owner->checkPayloadSize(
-			    measureMsgPack(recordDoc),
-			    _owner->_config.maxJournalRecordBytes,
-			    "journal record"
-			);
-			if (!sizeResult) {
-				return sizeResult;
-			}
-			candidates.push_back(
-			    FreshUpdateCandidate{
-			        .id = entry.first,
-			        .doc = std::move(storedCandidate),
-			        .record = std::move(record)
-			    }
-			);
+	struct FreshUpdateCandidate {
+		std::string id;
+		JsonDocument doc;
+		FreshPendingRecord record;
+	};
+	std::vector<FreshUpdateCandidate> candidates;
+	for (const FreshDocumentSnapshot &entry : snapshot) {
+		if (!predicate(entry.doc)) continue;
+		if (capturedSequence == UINT64_MAX ||
+		    candidates.size() > UINT64_MAX - capturedSequence) {
+			return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
 		}
 
-		JsonDocument resultDoc(&FreshJsonAllocator());
-		if (!candidates.empty() && returnMode == FreshReturn::ChangedDocs) {
-			JsonArray array = resultDoc.to<JsonArray>();
-			for (const FreshUpdateCandidate &candidate : candidates) {
-				if (!array.add(candidate.doc.as<JsonVariantConst>()) || resultDoc.overflowed()) {
-					return FreshResult::failure(
-					    FreshStatus::OutOfMemory,
-					    "failed to construct changed documents result"
-					);
-				}
+		FreshUpdateCandidate candidate;
+		candidate.id = entry.id;
+		FreshResult result = FreshCloneJson(
+		    candidate.doc,
+		    entry.doc.as<JsonVariantConst>(),
+		    "existing document"
+		);
+		if (!result) return result;
+		result = FreshMergePatch(candidate.doc, patch);
+		if (!result) return result;
+		result = FreshJsonSet(candidate.doc["updatedAt"], updateTime, candidate.doc, "updatedAt");
+		if (!result) return result;
+		result = _owner->checkPayloadSize(
+		    measureMsgPack(candidate.doc),
+		    _owner->_config.maxDocumentBytes,
+		    "document"
+		);
+		if (!result) return result;
+		if (validator) {
+			FreshValidationResult validation = validator(candidate.doc);
+			if (!validation) {
+				return FreshResult::failure(
+				    FreshStatus::ValidationFailed,
+				    validation.message.c_str()
+				);
 			}
-		} else if (!candidates.empty() && returnMode == FreshReturn::AllDocs) {
-			JsonArray array = resultDoc.to<JsonArray>();
-			for (const auto &entry : _state->docs) {
-				const JsonDocument *document = &entry.second;
+		}
+		candidate.record.op = FreshJournalOp::Update;
+		candidate.record.sequence = capturedSequence + candidates.size();
+		candidate.record.id = entry.id;
+		result = FreshCloneJson(
+		    candidate.record.doc,
+		    candidate.doc.as<JsonVariantConst>(),
+		    "journal document"
+		);
+		if (!result) return result;
+		result = FreshBuildJournalRecord(
+		    *_owner,
+		    candidate.record,
+		    _owner->_config.maxJournalRecordBytes
+		);
+		if (!result) return result;
+		candidates.push_back(std::move(candidate));
+	}
+
+	JsonDocument resultDoc(&FreshJsonAllocator());
+	if (!candidates.empty() && returnMode != FreshReturn::None) {
+		JsonArray array = resultDoc.to<JsonArray>();
+		if (array.isNull() || resultDoc.overflowed()) {
+			return FreshJsonAllocationFailure("update result");
+		}
+		if (returnMode == FreshReturn::ChangedDocs) {
+			for (const FreshUpdateCandidate &candidate : candidates) {
+				FreshResult addResult = FreshJsonAdd(
+				    array,
+				    candidate.doc.as<JsonVariantConst>(),
+				    resultDoc,
+				    "changed documents result"
+				);
+				if (!addResult) return addResult;
+			}
+		} else {
+			for (const FreshDocumentSnapshot &entry : snapshot) {
+				const JsonDocument *selected = &entry.doc;
 				for (const FreshUpdateCandidate &candidate : candidates) {
-					if (candidate.id == entry.first) {
-						document = &candidate.doc;
+					if (candidate.id == entry.id) {
+						selected = &candidate.doc;
 						break;
 					}
 				}
-				if (!array.add(document->as<JsonVariantConst>()) || resultDoc.overflowed()) {
-					return FreshResult::failure(
-					    FreshStatus::OutOfMemory,
-					    "failed to construct all documents result"
-					);
-				}
+				FreshResult addResult = FreshJsonAdd(
+				    array,
+				    selected->as<JsonVariantConst>(),
+				    resultDoc,
+				    "all documents result"
+				);
+				if (!addResult) return addResult;
 			}
 		}
-		if (!candidates.empty() && returnMode != FreshReturn::None) {
-			resultDoc.shrinkToFit();
-			result.doc = std::move(resultDoc);
+		resultDoc.shrinkToFit();
+	}
+
+	std::vector<FreshEvent> events;
+	FreshResult result = FreshResult::success(
+	    candidates.empty() ? "no documents updated" : "documents updated",
+	    candidates.size()
+	);
+	{
+		FreshLock lock(*_owner->_mutex);
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		FreshResult valid = validateLocked(
+		    true,
+		    FreshModelType::General,
+		    "update is only valid for general models"
+		);
+		if (!valid) return valid;
+		if (_state->revision != capturedRevision || _owner->_nextPendingSequence != capturedSequence) {
+			return FreshResult::failure(FreshStatus::Busy, "model changed while predicate was running");
+		}
+		uint64_t nextRevision = _state->revision;
+		if (!candidates.empty()) {
+			FreshResult revisionResult = FreshNextRevision(_state->revision, nextRevision, "model revision");
+			if (!revisionResult) return revisionResult;
 		}
 
-		_owner->_nextPendingSequence = nextSequence;
+		_owner->_nextPendingSequence = capturedSequence + candidates.size();
 		for (FreshUpdateCandidate &candidate : candidates) {
 			auto found = _state->docs.find(candidate.id);
 			if (found == _state->docs.end()) {
-				continue;
+				return FreshResult::failure(FreshStatus::Busy, "model changed while update was committing");
 			}
 			_state->lastSequence = candidate.record.sequence;
 			found->second = std::move(candidate.doc);
 			_state->pending.push_back(std::move(candidate.record));
 			_state->dirty = true;
-			result.affectedCount++;
 			events.push_back({
 			    .type = FreshEventType::DocumentUpdated,
 			    .modelName = _state->name,
@@ -553,13 +644,12 @@ FreshResult FreshModel::update(
 			    .result = FreshResult::success("document updated", 1)
 			});
 		}
-		if (result.affectedCount == 0) {
-			result.message = "no documents updated";
+		_state->revision = nextRevision;
+		if (!candidates.empty() && returnMode != FreshReturn::None) {
+			result.doc = std::move(resultDoc);
 		}
 	}
-	for (const FreshEvent &event : events) {
-		_owner->emitEvent(event);
-	}
+	for (const FreshEvent &event : events) _owner->emitEvent(event);
 	return result;
 }
 
@@ -585,9 +675,7 @@ FreshResult FreshModel::deleteOne(FreshPredicate predicate) {
 	}
 	return deleteMany(
 	    [predicate, deleted = false](const JsonDocument &doc) mutable {
-		    if (deleted || !predicate(doc)) {
-			    return false;
-		    }
+		    if (deleted || !predicate(doc)) return false;
 		    deleted = true;
 		    return true;
 	    }
@@ -602,57 +690,85 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "predicate is required");
 	}
 
-	std::vector<FreshEvent> events;
-	FreshResult result = FreshResult::success("documents deleted");
+	uint64_t capturedRevision = 0;
+	uint64_t capturedSequence = 0;
+	std::vector<FreshDocumentSnapshot> snapshot;
 	{
 		FreshLock lock(*_owner->_mutex);
-		if (!lock) {
-			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		}
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 		FreshResult valid = validateLocked(
 		    true,
 		    FreshModelType::General,
 		    "delete is only valid for general models"
 		);
-		if (!valid) {
-			return valid;
-		}
-
-		std::vector<std::string> ids;
+		if (!valid) return valid;
+		capturedRevision = _state->revision;
+		capturedSequence = _owner->_nextPendingSequence;
+		snapshot.reserve(_state->docs.size());
 		for (const auto &entry : _state->docs) {
-			if (predicate(entry.second)) {
-				ids.push_back(entry.first);
-			}
-		}
-
-		std::vector<FreshPendingRecord> records;
-		records.reserve(ids.size());
-		uint64_t nextSequence = _owner->_nextPendingSequence;
-		for (const std::string &id : ids) {
-			FreshPendingRecord record;
-			record.op = FreshJournalOp::Delete;
-			record.sequence = nextSequence++;
-			record.id = id;
-			JsonDocument recordDoc = _owner->recordToJson(record);
-			FreshResult sizeResult = _owner->checkPayloadSize(
-			    measureMsgPack(recordDoc),
-			    _owner->_config.maxJournalRecordBytes,
-			    "journal record"
+			FreshDocumentSnapshot item;
+			item.id = entry.first;
+			FreshResult cloneResult = FreshCloneJson(
+			    item.doc,
+			    entry.second.as<JsonVariantConst>(),
+			    "delete snapshot"
 			);
-			if (!sizeResult) {
-				return sizeResult;
-			}
-			records.push_back(std::move(record));
+			if (!cloneResult) return cloneResult;
+			snapshot.push_back(std::move(item));
+		}
+	}
+
+	std::vector<FreshPendingRecord> records;
+	for (const FreshDocumentSnapshot &entry : snapshot) {
+		if (!predicate(entry.doc)) continue;
+		if (capturedSequence == UINT64_MAX || records.size() > UINT64_MAX - capturedSequence) {
+			return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
+		}
+		FreshPendingRecord record;
+		record.op = FreshJournalOp::Delete;
+		record.sequence = capturedSequence + records.size();
+		record.id = entry.id;
+		FreshResult recordResult = FreshBuildJournalRecord(
+		    *_owner,
+		    record,
+		    _owner->_config.maxJournalRecordBytes
+		);
+		if (!recordResult) return recordResult;
+		records.push_back(std::move(record));
+	}
+
+	std::vector<FreshEvent> events;
+	FreshResult result = FreshResult::success(
+	    records.empty() ? "no documents deleted" : "documents deleted",
+	    records.size()
+	);
+	{
+		FreshLock lock(*_owner->_mutex);
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		FreshResult valid = validateLocked(
+		    true,
+		    FreshModelType::General,
+		    "delete is only valid for general models"
+		);
+		if (!valid) return valid;
+		if (_state->revision != capturedRevision || _owner->_nextPendingSequence != capturedSequence) {
+			return FreshResult::failure(FreshStatus::Busy, "model changed while predicate was running");
+		}
+		uint64_t nextRevision = _state->revision;
+		if (!records.empty()) {
+			FreshResult revisionResult = FreshNextRevision(_state->revision, nextRevision, "model revision");
+			if (!revisionResult) return revisionResult;
 		}
 
-		_owner->_nextPendingSequence = nextSequence;
+		_owner->_nextPendingSequence = capturedSequence + records.size();
 		for (FreshPendingRecord &record : records) {
-			_state->docs.erase(record.id);
+			if (_state->docs.erase(record.id) != 1) {
+				return FreshResult::failure(FreshStatus::Busy, "model changed while delete was committing");
+			}
 			_state->lastSequence = record.sequence;
 			const std::string id = record.id;
 			_state->pending.push_back(std::move(record));
 			_state->dirty = true;
-			result.affectedCount++;
 			events.push_back({
 			    .type = FreshEventType::DocumentDeleted,
 			    .modelName = _state->name,
@@ -661,13 +777,9 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 			    .result = FreshResult::success("document deleted", 1)
 			});
 		}
-		if (result.affectedCount == 0) {
-			result.message = "no documents deleted";
-		}
+		_state->revision = nextRevision;
 	}
-	for (const FreshEvent &event : events) {
-		_owner->emitEvent(event);
-	}
+	for (const FreshEvent &event : events) _owner->emitEvent(event);
 	return result;
 }
 
@@ -686,44 +798,51 @@ FreshResult FreshModel::retrieve(
 	if (_owner == nullptr || _state == nullptr) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
-	FreshLock lock(*_owner->_mutex);
-	if (!lock) {
-		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-	}
-	FreshResult valid = validateLocked(
-	    true,
-	    FreshModelType::Stream,
-	    "retrieve is only valid for stream models"
-	);
-	if (!valid) {
-		return valid;
+
+	std::vector<JsonDocument> snapshot;
+	{
+		FreshLock lock(*_owner->_mutex);
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		FreshResult valid = validateLocked(
+		    true,
+		    FreshModelType::Stream,
+		    "retrieve is only valid for stream models"
+		);
+		if (!valid) return valid;
+		snapshot.reserve(_state->streamEntries.size());
+		for (const JsonDocument &entry : _state->streamEntries) {
+			JsonDocument copy;
+			FreshResult cloneResult = FreshCloneJson(copy, entry.as<JsonVariantConst>(), "stream snapshot");
+			if (!cloneResult) return cloneResult;
+			snapshot.push_back(std::move(copy));
+		}
 	}
 
 	JsonDocument resultDoc(&FreshJsonAllocator());
 	JsonArray array = resultDoc.to<JsonArray>();
+	if (array.isNull() || resultDoc.overflowed()) {
+		return FreshJsonAllocationFailure("stream result");
+	}
 	size_t skipped = 0;
 	size_t affectedCount = 0;
-	const size_t total = _state->streamEntries.size();
+	const size_t total = snapshot.size();
 	for (size_t i = 0; i < total; ++i) {
 		const size_t index = options.reverse ? total - 1 - i : i;
-		const JsonDocument &entry = _state->streamEntries[index];
-		if (predicate && !predicate(entry)) {
-			continue;
-		}
+		const JsonDocument &entry = snapshot[index];
+		if (predicate && !predicate(entry)) continue;
 		if (skipped < options.offset) {
 			skipped++;
 			continue;
 		}
-		if (!array.add(entry.as<JsonVariantConst>()) || resultDoc.overflowed()) {
-			return FreshResult::failure(
-			    FreshStatus::OutOfMemory,
-			    "failed to construct stream result"
-			);
-		}
+		FreshResult addResult = FreshJsonAdd(
+		    array,
+		    entry.as<JsonVariantConst>(),
+		    resultDoc,
+		    "stream result"
+		);
+		if (!addResult) return addResult;
 		affectedCount++;
-		if (options.limit > 0 && affectedCount >= options.limit) {
-			break;
-		}
+		if (options.limit > 0 && affectedCount >= options.limit) break;
 	}
 	resultDoc.shrinkToFit();
 	FreshResult result = FreshResult::success(
@@ -738,23 +857,35 @@ FreshResult FreshModel::streamTo(Print &out) const {
 	if (_owner == nullptr || _state == nullptr) {
 		return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
 	}
-	FreshLock lock(*_owner->_mutex);
-	if (!lock) {
-		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+	std::vector<JsonDocument> snapshot;
+	{
+		FreshLock lock(*_owner->_mutex);
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		FreshResult valid = validateLocked(
+		    true,
+		    FreshModelType::Stream,
+		    "streamTo is only valid for stream models"
+		);
+		if (!valid) return valid;
+		snapshot.reserve(_state->streamEntries.size());
+		for (const JsonDocument &entry : _state->streamEntries) {
+			JsonDocument copy;
+			FreshResult cloneResult = FreshCloneJson(copy, entry.as<JsonVariantConst>(), "stream export snapshot");
+			if (!cloneResult) return cloneResult;
+			snapshot.push_back(std::move(copy));
+		}
 	}
-	FreshResult valid = validateLocked(
-	    true,
-	    FreshModelType::Stream,
-	    "streamTo is only valid for stream models"
-	);
-	if (!valid) {
-		return valid;
+
+	size_t bytes = 0;
+	for (const JsonDocument &entry : snapshot) {
+		const size_t expected = measureMsgPack(entry);
+		const size_t written = serializeMsgPack(entry, out);
+		if (written != expected) {
+			return FreshResult::failure(FreshStatus::FileSystemError, "stream export was truncated", bytes);
+		}
+		bytes += written;
 	}
-	size_t count = 0;
-	for (const JsonDocument &entry : _state->streamEntries) {
-		count += serializeMsgPack(entry, out);
-	}
-	return FreshResult::success("stream exported", count);
+	return FreshResult::success("stream exported", bytes);
 }
 
 FreshModelResult Fresh::createModel(const char *modelName) {
@@ -762,18 +893,10 @@ FreshModelResult Fresh::createModel(const char *modelName) {
 	{
 		FreshLock lock(*_mutex);
 		if (!lock) {
-			return {
-			    .result = false,
-			    .status = FreshStatus::InternalError,
-			    .message = "failed to lock database"
-			};
+			return {.result = false, .status = FreshStatus::InternalError, .message = "failed to lock database"};
 		}
 		if (!_initialized) {
-			return {
-			    .result = false,
-			    .status = FreshStatus::NotInitialized,
-			    .message = "database not initialized"
-			};
+			return {.result = false, .status = FreshStatus::NotInitialized, .message = "database not initialized"};
 		}
 		type = _config.defaultModelType;
 	}
@@ -781,27 +904,17 @@ FreshModelResult Fresh::createModel(const char *modelName) {
 }
 
 FreshModel Fresh::model(const char *modelName) {
-	if (!FreshIsValidName(modelName)) {
-		return FreshModel();
-	}
+	if (!FreshIsValidName(modelName)) return FreshModel();
 	FreshLock lock(*_mutex);
-	if (!lock || !_initialized || _stopping) {
-		return FreshModel();
-	}
+	if (!lock || !_initialized || _stopping || _lifecycle != Lifecycle::Running) return FreshModel();
 	auto found = _models.find(modelName);
-	if (found == _models.end() || found->second->dropped) {
-		return FreshModel();
-	}
+	if (found == _models.end() || found->second->dropped) return FreshModel();
 	return FreshModel(this, found->second);
 }
 
 FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) {
 	if (!FreshIsValidName(modelName)) {
-		return {
-		    .result = false,
-		    .status = FreshStatus::InvalidArgument,
-		    .message = "invalid model name"
-		};
+		return {.result = false, .status = FreshStatus::InvalidArgument, .message = "invalid model name"};
 	}
 
 	FreshEvent event;
@@ -809,41 +922,21 @@ FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) 
 	{
 		FreshLock lock(*_mutex);
 		if (!lock) {
-			return {
-			    .result = false,
-			    .status = FreshStatus::InternalError,
-			    .message = "failed to lock database"
-			};
+			return {.result = false, .status = FreshStatus::InternalError, .message = "failed to lock database"};
 		}
 		if (!_initialized) {
-			return {
-			    .result = false,
-			    .status = FreshStatus::NotInitialized,
-			    .message = "database not initialized"
-			};
+			return {.result = false, .status = FreshStatus::NotInitialized, .message = "database not initialized"};
 		}
-		if (_stopping) {
-			return {
-			    .result = false,
-			    .status = FreshStatus::Busy,
-			    .message = "database is stopping"
-			};
+		if (_stopping || _lifecycle != Lifecycle::Running) {
+			return {.result = false, .status = FreshStatus::Busy, .message = "database is stopping"};
 		}
 		auto existing = _models.find(modelName);
 		if (existing != _models.end()) {
 			if (existing->second->dropped) {
-				return {
-				    .result = false,
-				    .status = FreshStatus::InvalidModel,
-				    .message = "model was dropped"
-				};
+				return {.result = false, .status = FreshStatus::InvalidModel, .message = "model was dropped"};
 			}
 			if (existing->second->type != type) {
-				return {
-				    .result = false,
-				    .status = FreshStatus::ModelExists,
-				    .message = "model already exists with different type"
-				};
+				return {.result = false, .status = FreshStatus::ModelExists, .message = "model already exists with different type"};
 			}
 			return {
 			    .result = true,
@@ -852,6 +945,11 @@ FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) 
 			    .model = FreshModel(this, existing->second),
 			    .affectedCount = 1
 			};
+		}
+		uint64_t nextDatabaseRevision = 0;
+		FreshResult revisionResult = FreshNextRevision(_databaseRevision, nextDatabaseRevision, "database revision");
+		if (!revisionResult) {
+			return {.result = false, .status = revisionResult.status, .message = revisionResult.message};
 		}
 
 		std::string storageId;
@@ -868,6 +966,9 @@ FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) 
 		} while (duplicate);
 
 		state = std::make_shared<FreshModel::State>();
+		if (!state) {
+			return {.result = false, .status = FreshStatus::OutOfMemory, .message = "failed to allocate model state"};
+		}
 		state->name = modelName;
 		state->storageId = storageId;
 		state->type = type;
@@ -875,6 +976,7 @@ FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) 
 		_models[state->name] = state;
 		_manifestDirty = true;
 		_manifestEpoch++;
+		_databaseRevision = nextDatabaseRevision;
 		event = {
 		    .type = FreshEventType::ModelCreated,
 		    .modelName = state->name,
@@ -900,29 +1002,30 @@ FreshResult Fresh::dropModel(const char *modelName) {
 	FreshResult result;
 	{
 		FreshLock lock(*_mutex);
-		if (!lock) {
-			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		}
-		if (!_initialized) {
-			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
-		}
-		if (_stopping) {
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		if (_stopping || _lifecycle != Lifecycle::Running) {
 			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
 		}
 		auto found = _models.find(modelName);
-		if (found == _models.end()) {
-			return FreshResult::failure(FreshStatus::ModelNotFound, "model not found");
-		}
-		if (found->second->dropped) {
-			return FreshResult::failure(FreshStatus::InvalidModel, "model was dropped");
-		}
+		if (found == _models.end()) return FreshResult::failure(FreshStatus::ModelNotFound, "model not found");
+		if (found->second->dropped) return FreshResult::failure(FreshStatus::InvalidModel, "model was dropped");
+
+		uint64_t nextStateRevision = 0;
+		uint64_t nextDatabaseRevision = 0;
+		result = FreshNextRevision(found->second->revision, nextStateRevision, "model revision");
+		if (!result) return result;
+		result = FreshNextRevision(_databaseRevision, nextDatabaseRevision, "database revision");
+		if (!result) return result;
 		found->second->dropped = true;
 		found->second->dirty = true;
 		found->second->snapshotRequired = false;
 		found->second->pending.clear();
 		found->second->storageEpoch++;
+		found->second->revision = nextStateRevision;
 		_manifestDirty = true;
 		_manifestEpoch++;
+		_databaseRevision = nextDatabaseRevision;
 		result = FreshResult::success("model dropped", 1);
 		event = {
 		    .type = FreshEventType::ModelDropped,
@@ -939,9 +1042,8 @@ FreshResult Fresh::dropModels(std::initializer_list<const char *> modelNames) {
 	size_t affected = 0;
 	for (const char *name : modelNames) {
 		FreshResult result = dropModel(name);
-		if (result) {
-			affected++;
-		}
+		if (!result) return FreshResult::failure(result.status, result.message.c_str(), affected);
+		affected++;
 	}
 	return FreshResult::success("models dropped", affected);
 }
@@ -950,26 +1052,20 @@ FreshResult Fresh::dropAllModels() {
 	std::vector<std::string> names;
 	{
 		FreshLock lock(*_mutex);
-		if (!lock) {
-			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		}
-		if (!_initialized) {
-			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
-		}
-		if (_stopping) {
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		if (_stopping || _lifecycle != Lifecycle::Running) {
 			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
 		}
 		for (const auto &entry : _models) {
-			if (!entry.second->dropped) {
-				names.push_back(entry.first);
-			}
+			if (!entry.second->dropped) names.push_back(entry.first);
 		}
 	}
 	size_t affected = 0;
 	for (const std::string &name : names) {
-		if (dropModel(name.c_str())) {
-			affected++;
-		}
+		FreshResult result = dropModel(name.c_str());
+		if (!result) return FreshResult::failure(result.status, result.message.c_str(), affected);
+		affected++;
 	}
 	return FreshResult::success("all models dropped", affected);
 }
@@ -978,40 +1074,38 @@ FreshResult Fresh::renameModel(const char *oldName, const char *newName) {
 	if (!FreshIsValidName(oldName) || !FreshIsValidName(newName)) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "invalid model name");
 	}
-	if (strcmp(oldName, newName) == 0) {
-		return FreshResult::success("model name unchanged");
-	}
+	if (strcmp(oldName, newName) == 0) return FreshResult::success("model name unchanged");
 
 	FreshEvent event;
 	FreshResult result;
 	{
 		FreshLock lock(*_mutex);
-		if (!lock) {
-			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		}
-		if (!_initialized) {
-			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
-		}
-		if (_stopping) {
+		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		if (_stopping || _lifecycle != Lifecycle::Running) {
 			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
 		}
 		auto found = _models.find(oldName);
-		if (found == _models.end()) {
-			return FreshResult::failure(FreshStatus::ModelNotFound, "model not found");
-		}
-		if (found->second->dropped) {
-			return FreshResult::failure(FreshStatus::InvalidModel, "model was dropped");
-		}
+		if (found == _models.end()) return FreshResult::failure(FreshStatus::ModelNotFound, "model not found");
+		if (found->second->dropped) return FreshResult::failure(FreshStatus::InvalidModel, "model was dropped");
 		if (_models.find(newName) != _models.end()) {
 			return FreshResult::failure(FreshStatus::ModelExists, "target model already exists");
 		}
+		uint64_t nextStateRevision = 0;
+		uint64_t nextDatabaseRevision = 0;
+		result = FreshNextRevision(found->second->revision, nextStateRevision, "model revision");
+		if (!result) return result;
+		result = FreshNextRevision(_databaseRevision, nextDatabaseRevision, "database revision");
+		if (!result) return result;
 
 		auto state = found->second;
 		_models.erase(found);
 		state->name = newName;
+		state->revision = nextStateRevision;
 		_models[state->name] = state;
 		_manifestDirty = true;
 		_manifestEpoch++;
+		_databaseRevision = nextDatabaseRevision;
 		result = FreshResult::success("model renamed", 1);
 		event = {
 		    .type = FreshEventType::ModelRenamed,
