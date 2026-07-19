@@ -1,6 +1,17 @@
 # v0.1.0 release hardening
 
-Fresh `v0.1.0` uses storage format version 3. The format is intentionally incompatible with pre-release v2 data.
+Fresh `v0.1.0` uses manifest and snapshot payload version 4, journal format version 3, and backup archive version 2. These formats are intentionally incompatible with unsafe pre-release persisted data.
+
+## Completeness metadata
+
+Every durable structure is constructed with checked ArduinoJson operations and rejected if its document overflowed.
+
+- manifests declare `modelCount`, which must exactly match the `models` array;
+- snapshots declare `recordCount`, which must exactly match `docs` or `entries`;
+- backup archives declare `modelCount` and a `recordCount` for every model;
+- journal records are measured only after every field and payload insertion succeeds.
+
+A newly written snapshot is read back and semantically validated for version, storage ID, type, applied sequence, and exact record count before Fresh removes its journal. An allocation failure can therefore leave the previous durable state and journal in place, but cannot commit a successful partial snapshot.
 
 ## Immutable model storage IDs
 
@@ -20,27 +31,37 @@ The sync commit order is:
 
 A reset at any persistence boundary therefore exposes either the old committed manifest or the new committed manifest. A manifest never points at storage that Fresh has not attempted to make durable first. Cleanup failures may leave unreferenced storage, but cannot remove data still referenced by the committed manifest. Storage ID generation also rejects IDs whose directories already exist, so an orphan left before manifest commit cannot be reused by a later model.
 
-## Synchronization policy
+## Synchronization and user-code policy
 
 `Fresh::_mutex` protects database lifetime state, the model registry, every mutable `FreshModel::State` field, callbacks, configuration observed by public operations, and the sync task handle.
 
-`Fresh::_syncMutex` serializes filesystem sync operations. Code may acquire `_syncMutex` and later acquire `_mutex` while reconciling a captured batch. Public mutation code must not acquire `_syncMutex` while holding `_mutex`.
+`Fresh::_syncMutex` serializes filesystem sync and backup-import commits. Code acquires `_syncMutex` before `_mutex` when both are required. Public mutation code never acquires `_syncMutex` while holding `_mutex`.
 
-`FreshBackupRuntimeState::mutex` protects the backup ring and backup lifecycle fields. Avoid holding the database mutex while invoking user callbacks.
+Predicates and validators are synchronous, bounded user functions, but Fresh does not invoke them while holding the database mutex. Fresh instead clones a point-in-time snapshot, releases the mutex, evaluates user code once, and revalidates the model revision before committing. A conflicting reentrant or concurrent change is preserved and the outer operation returns `FreshStatus::Busy`; Fresh does not retry predicates or validators because they may have side effects.
 
-`FreshModel::name()` returns a value copy. Model validity, name, type, dropped state, and document operations are all checked while holding the database mutex.
+Event, time, and backup callbacks are also copied under the database mutex and invoked after releasing it.
+
+`FreshModel::name()` returns a value copy. Read APIs return a consistent cloned snapshot and do not hold the database mutex while evaluating predicates or serializing to a potentially blocking `Print` target.
+
+## Transactional mutations and import
+
+Patch updates reject null, scalar, and array patches. The complete merged document, validation result, document-size check, journal record, and requested return value are prepared before live state changes. `_id` and `createdAt` remain Fresh-owned metadata; `updatedAt` is assigned by Fresh.
+
+Backup import uses prepare/commit semantics. The complete replacement registry is decoded, counted, cloned, size-checked, and assigned storage identities before commit. The commit is serialized against sync, revalidates the captured database state, invalidates old model handles, and swaps the registry using prepared containers. Any failure before the swap leaves the live database unchanged.
 
 ## Shutdown lifetime
 
-A bounded explicit `deinit()` may return `FreshStatus::Timeout`. The object then remains alive in its stopping state, and a later `deinit()` call can finish the shutdown.
+`FreshDeinitOptions::timeoutMS` is the total explicit shutdown deadline, covering database and backup locks, waiting for sync ownership, final sync, stop notification, task exit, and cleanup checks.
 
-The destructor performs an unbounded shutdown barrier. It does not destroy the exit semaphore, mutexes, backup state, callbacks, or models until the sync task has signaled that it made its final access to the `Fresh` object.
+If final sync fails before stop is committed, `deinit()` restores the `Running` lifecycle and preserves models, pending records, callbacks, configuration, and task ownership so the caller can correct the filesystem condition and retry.
+
+Once stop is requested, a bounded `deinit()` may return `FreshStatus::Timeout`. The object remains alive in a stopping state, public database operations return `Busy`, and a later `deinit()` continues waiting without repeating final sync. The destructor performs an unbounded lifetime barrier.
 
 ## Allocation failures
 
-Fresh no longer supplies a null-returning allocator to standard containers. Fallible serialized-byte and backup-ring allocations use a move-only `FreshBuffer` with explicit allocation results. Allocation failure is reported as `FreshStatus::OutOfMemory`.
+Large and persisted ArduinoJson documents use the process-lifetime PSRAM-first allocator. Fallible serialized-byte and backup-ring allocations use a move-only `FreshBuffer` with explicit allocation results. Allocation failure is reported as `FreshStatus::OutOfMemory`.
 
-Durable-slot verification preserves allocation failures instead of remapping them to filesystem errors. Sync batches are explicitly move-only so their buffers cannot be copied accidentally by standard containers.
+When `FRESH_TESTING` is enabled, deterministic allocation failure can be configured by allocation number, category, minimum size, and one-shot behavior. Production builds contain no fault-injection bookkeeping.
 
 ## Persisted-size ceilings
 
@@ -52,16 +73,17 @@ The absolute payload ceiling for manifest slots, snapshot slots, and journal rec
 - `backupBufferSize` is zero or above 1 MiB;
 - sync task interval, stack, priority, or core settings are invalid.
 
-Reader and writer paths apply the same absolute ceiling and the configured journal/snapshot limits. All persisted 32-bit length conversions are checked first.
+Reader and writer paths apply the same absolute ceiling and configured journal/snapshot limits. All persisted 32-bit length conversions are checked first.
 
 ## Validation
 
-`examples/ReleaseHardeningTest` exercises:
+`examples/ReleaseHardeningTest` continues to exercise storage identity, rename durability, limits, concurrent handle reads, and repeated shutdown.
 
-- checkpoint, repeated rename, post-rename update, journal-only flush, restart, and document verification;
-- stable storage identity across rename;
-- rejection of invalid size configurations;
-- concurrent model name/type/validity reads while logical renames occur;
-- repeatable `deinit()` after successful shutdown.
+`examples/HardeningRegressionTest` adds:
 
-The sketch must be executed on physical ESP32, ESP32-S3, and ESP32-C3 boards before the final `v0.1.0` tag. Record each board, Arduino-ESP32 core version, and complete serial result in issue #3 or the release notes before tagging.
+- rejection and atomicity of non-object patches;
+- reentrant predicate conflict detection;
+- preservation of RAM state after a failed final sync;
+- deterministic allocation-failure rollback and retry when built with `FRESH_TESTING`.
+
+The sketches must be executed on physical ESP32, ESP32-S3, ESP32-C3, and ESP32-P4 boards before the final `v0.1.0` tag. Record each board, Arduino-ESP32 core version, filesystem partition size, PSRAM availability, and complete serial output in issue #9 or the release notes before tagging.
