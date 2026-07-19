@@ -14,6 +14,7 @@ constexpr const char *TestPath = "/fresh_release_hardening";
 constexpr size_t SlotHeaderSize = 4 + 2 + 8 + 4 + 4;
 constexpr uint32_t SlotMagic = 0x544c5346;
 constexpr uint16_t SlotVersion = 1;
+constexpr uint32_t ManifestVersion = 4;
 
 int passed = 0;
 int failed = 0;
@@ -146,11 +147,16 @@ bool currentStorageId(const char *logicalName, std::string &storageId) {
 			foundSlot = true;
 		}
 	}
-	if (!foundSlot || (selected["version"] | 0U) != 3 ||
+	if (!foundSlot || (selected["version"] | 0U) != ManifestVersion ||
+	    !selected["modelCount"].is<uint64_t>() ||
 	    !selected["models"].is<JsonArrayConst>()) {
 		return false;
 	}
-	for (JsonObjectConst model : selected["models"].as<JsonArrayConst>()) {
+	const JsonArrayConst models = selected["models"].as<JsonArrayConst>();
+	if (selected["modelCount"].as<uint64_t>() != models.size()) {
+		return false;
+	}
+	for (JsonObjectConst model : models) {
 		if (strcmp(model["name"] | "", logicalName) == 0) {
 			storageId = model["storageId"] | "";
 			return !storageId.empty();
