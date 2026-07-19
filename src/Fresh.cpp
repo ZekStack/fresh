@@ -268,6 +268,11 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 			_lifecycle = Lifecycle::FinalSync;
 			_stopping = true;
 			performFinalSync = options.sync;
+		} else if (_lifecycle == Lifecycle::FinalSync) {
+			// A previous bounded call timed out before stop was committed. Preserve
+			// the pending final-sync decision so the retry cannot discard dirty RAM.
+			_stopping = true;
+			performFinalSync = options.sync;
 		}
 		handle = _syncTaskHandle;
 		taskStarted = _syncTaskStarted;
@@ -279,11 +284,8 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		    FreshRemainingTicks(startedAt, options.timeoutMS, expired)
 		);
 		if (expired || !backupLock) {
-			FreshLock lock(*_mutex);
-			if (_lifecycle == Lifecycle::FinalSync) {
-				_lifecycle = Lifecycle::Running;
-				_stopping = false;
-			}
+			// FinalSync intentionally remains pending. A later deinit() retries
+			// cancellation and final sync instead of proceeding directly to stop.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out cancelling backup");
 		}
 		_backup->requested = false;
@@ -300,9 +302,7 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		    FreshRemainingTicks(startedAt, options.timeoutMS, expired)
 		);
 		if (expired || !syncLock) {
-			FreshLock lock(*_mutex);
-			_lifecycle = Lifecycle::Running;
-			_stopping = false;
+			// Keep FinalSync pending; the next bounded call retries safely.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out waiting for sync");
 		}
 		FreshResult finalSyncResult = syncDirty(true);
@@ -324,6 +324,8 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 	{
 		FreshLock lock(*_mutex, FreshRemainingTicks(startedAt, options.timeoutMS, expired));
 		if (expired || !lock) {
+			// Stop has not been committed. FinalSync remains pending and is safe
+			// to repeat on the next call.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out requesting stop");
 		}
 		if (_lifecycle == Lifecycle::FinalSync || _lifecycle == Lifecycle::Running) {
@@ -343,13 +345,15 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out waiting for task exit");
 		}
 		if (handle != nullptr) vTaskDelete(handle);
+		// The exit signal has now been consumed. Cleanup is a short in-memory
+		// lifetime barrier and must complete in this call so a retry never waits
+		// for a semaphore that cannot be signalled again.
 	}
 
 	{
-		FreshLock lock(*_mutex, FreshRemainingTicks(startedAt, options.timeoutMS, expired));
-		if (expired || !lock) {
-			_lifecycle = Lifecycle::WaitingForTaskExit;
-			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out during cleanup");
+		FreshLock lock(*_mutex);
+		if (!lock) {
+			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database during cleanup");
 		}
 		_models.clear();
 		_diagnostics = FreshDiagnostics();
