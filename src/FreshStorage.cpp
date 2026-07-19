@@ -1,5 +1,6 @@
 #include "Fresh.h"
 #include "internal/FreshInternal.h"
+#include "internal/FreshMemory.h"
 
 #include <LittleFS.h>
 #include <algorithm>
@@ -23,7 +24,8 @@ struct FreshJournalSyncRecord {
 };
 
 struct FreshModelSyncBatch {
-	FreshModelSyncBatch() = default;
+	FreshModelSyncBatch() : snapshot(&FreshJsonAllocator()) {
+	}
 	FreshModelSyncBatch(const FreshModelSyncBatch &) = delete;
 	FreshModelSyncBatch &operator=(const FreshModelSyncBatch &) = delete;
 	FreshModelSyncBatch(FreshModelSyncBatch &&) noexcept = default;
@@ -40,6 +42,7 @@ struct FreshModelSyncBatch {
 	uint32_t storageEpoch = 0;
 	uint64_t checkpointSequence = 0;
 	size_t maxSnapshotBytes = FreshMaxPersistedPayloadBytes;
+	size_t snapshotRecordCount = 0;
 	std::vector<FreshJournalSyncRecord> records;
 	JsonDocument snapshot;
 	size_t snapshotPayloadBytes = 0;
@@ -69,8 +72,13 @@ bool FreshAddRequiredBytes(size_t &total, size_t value) {
 	return true;
 }
 
-FreshResult FreshAllocateBuffer(FreshBuffer &buffer, size_t size, const char *label) {
-	if (!buffer.allocate(size)) {
+FreshResult FreshAllocateBuffer(
+    FreshBuffer &buffer,
+    size_t size,
+    const char *label,
+    FreshAllocationCategory category = FreshAllocationCategory::General
+) {
+	if (!buffer.allocate(size, category)) {
 		std::string message = "failed to allocate ";
 		message += label != nullptr ? label : "buffer";
 		return FreshResult::failure(FreshStatus::OutOfMemory, message.c_str());
@@ -79,6 +87,10 @@ FreshResult FreshAllocateBuffer(FreshBuffer &buffer, size_t size, const char *la
 }
 
 FreshResult FreshSerializePayload(const JsonDocument &payload, FreshBuffer &bytes, const char *label) {
+	FreshResult valid = FreshValidateJsonDocument(payload, "persisted payload");
+	if (!valid) {
+		return valid;
+	}
 	const size_t payloadBytes = measureMsgPack(payload);
 	if (payloadBytes == 0) {
 		return FreshResult::failure(FreshStatus::FileSystemError, label);
@@ -86,7 +98,12 @@ FreshResult FreshSerializePayload(const JsonDocument &payload, FreshBuffer &byte
 	if (payloadBytes > FreshMaxPersistedPayloadBytes || payloadBytes > UINT32_MAX) {
 		return FreshResult::failure(FreshStatus::SizeLimitExceeded, "persisted payload is too large");
 	}
-	FreshResult allocation = FreshAllocateBuffer(bytes, payloadBytes, "persisted payload");
+	FreshResult allocation = FreshAllocateBuffer(
+	    bytes,
+	    payloadBytes,
+	    "persisted payload",
+	    FreshAllocationCategory::DurableSlotPayload
+	);
 	if (!allocation) {
 		return allocation;
 	}
@@ -125,7 +142,12 @@ FreshResult FreshReadSlotFile(
 	}
 
 	FreshBuffer bytes;
-	FreshResult allocation = FreshAllocateBuffer(bytes, payloadSize, "durable slot payload");
+	FreshResult allocation = FreshAllocateBuffer(
+	    bytes,
+	    payloadSize,
+	    "durable slot payload",
+	    FreshAllocationCategory::DurableSlotPayload
+	);
 	if (!allocation) {
 		file.close();
 		return allocation;
@@ -139,11 +161,13 @@ FreshResult FreshReadSlotFile(
 		return FreshResult::failure(FreshStatus::CorruptData, "durable slot checksum mismatch");
 	}
 
-	JsonDocument decoded;
+	JsonDocument decoded(&FreshJsonAllocator());
 	DeserializationError error = deserializeMsgPack(decoded, bytes.data(), bytes.size());
-	if (error) {
+	if (error || decoded.overflowed()) {
 		return FreshResult::failure(
-		    error == DeserializationError::NoMemory ? FreshStatus::OutOfMemory : FreshStatus::CorruptData,
+		    error == DeserializationError::NoMemory || decoded.overflowed()
+		        ? FreshStatus::OutOfMemory
+		        : FreshStatus::CorruptData,
 		    "failed to decode durable slot"
 		);
 	}
@@ -173,7 +197,7 @@ FreshSlotReadResult readDurableSlot(
 		if (!LittleFS.exists(path.c_str())) {
 			continue;
 		}
-		JsonDocument candidate;
+		JsonDocument candidate(&FreshJsonAllocator());
 		uint64_t candidateGeneration = 0;
 		FreshResult readResult = FreshReadSlotFile(path, candidate, candidateGeneration, maxPayloadBytes);
 		if (!readResult) {
@@ -211,7 +235,9 @@ FreshResult writeDurableSlot(
     const char *fileBaseName,
     const JsonDocument &payload,
     uint64_t currentGeneration,
-    size_t maxPayloadBytes
+    size_t maxPayloadBytes,
+    JsonDocument *verifiedPayload = nullptr,
+    uint64_t *committedGeneration = nullptr
 ) {
 	FreshBuffer bytes;
 	FreshResult serializeResult = FreshSerializePayload(payload, bytes, "failed to serialize durable slot");
@@ -245,7 +271,7 @@ FreshResult writeDurableSlot(
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write durable slot");
 	}
 
-	JsonDocument verified;
+	JsonDocument verified(&FreshJsonAllocator());
 	uint64_t verifiedGeneration = 0;
 	FreshResult verifyResult = FreshReadSlotFile(targetPath, verified, verifiedGeneration, maxPayloadBytes);
 	if (!verifyResult) {
@@ -254,7 +280,57 @@ FreshResult writeDurableSlot(
 	if (verifiedGeneration != nextGeneration) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to verify durable slot");
 	}
+	if (verifiedPayload != nullptr) {
+		*verifiedPayload = std::move(verified);
+	}
+	if (committedGeneration != nullptr) {
+		*committedGeneration = nextGeneration;
+	}
 	return FreshResult::success("durable slot written");
+}
+
+FreshResult FreshValidateManifestPayload(const JsonDocument &payload) {
+	if ((payload["version"] | 0U) != FreshManifestVersion ||
+	    !payload["modelCount"].is<uint64_t>() ||
+	    !payload["models"].is<JsonArrayConst>()) {
+		return FreshResult::failure(FreshStatus::CorruptData, "unsupported or corrupt manifest payload");
+	}
+	const uint64_t declaredCount = payload["modelCount"].as<uint64_t>();
+	const size_t actualCount = payload["models"].as<JsonArrayConst>().size();
+	if (declaredCount > SIZE_MAX || static_cast<size_t>(declaredCount) != actualCount) {
+		return FreshResult::failure(FreshStatus::CorruptData, "manifest model count mismatch");
+	}
+	return FreshResult::success();
+}
+
+FreshResult FreshValidateSnapshotPayload(
+    const JsonDocument &payload,
+    const std::string &storageId,
+    FreshModelType type,
+    uint64_t checkpointSequence,
+    size_t expectedRecordCount
+) {
+	const char *snapshotStorageId = payload["storageId"] | "";
+	const char *snapshotType = payload["type"] | "";
+	if ((payload["version"] | 0U) != FreshSnapshotVersion ||
+	    storageId != snapshotStorageId ||
+	    strcmp(snapshotType, FreshModelTypeToString(type)) != 0 ||
+	    !payload["appliedThroughSequence"].is<uint64_t>() ||
+	    payload["appliedThroughSequence"].as<uint64_t>() != checkpointSequence ||
+	    !payload["recordCount"].is<uint64_t>()) {
+		return FreshResult::failure(FreshStatus::CorruptData, "invalid snapshot payload");
+	}
+	const char *arrayName = type == FreshModelType::Stream ? "entries" : "docs";
+	if (!payload[arrayName].is<JsonArrayConst>()) {
+		return FreshResult::failure(FreshStatus::CorruptData, "snapshot records are missing");
+	}
+	const uint64_t declaredCount = payload["recordCount"].as<uint64_t>();
+	const size_t actualCount = payload[arrayName].as<JsonArrayConst>().size();
+	if (declaredCount > SIZE_MAX || static_cast<size_t>(declaredCount) != actualCount ||
+	    actualCount != expectedRecordCount) {
+		return FreshResult::failure(FreshStatus::CorruptData, "snapshot record count mismatch");
+	}
+	return FreshResult::success();
 }
 
 FreshResult FreshWriteJournalRecord(const FreshModelSyncBatch &batch, const FreshJournalSyncRecord &record) {
@@ -297,15 +373,27 @@ FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch, bool &snap
 	if (!slot.result) {
 		return slot.result;
 	}
+	JsonDocument verified(&FreshJsonAllocator());
 	FreshResult writeResult = writeDurableSlot(
 	    batch.path,
 	    FreshSnapshotFile,
 	    batch.snapshot,
 	    slot.generation,
-	    batch.maxSnapshotBytes
+	    batch.maxSnapshotBytes,
+	    &verified
 	);
 	if (!writeResult) {
 		return writeResult;
+	}
+	FreshResult semanticResult = FreshValidateSnapshotPayload(
+	    verified,
+	    batch.storageId,
+	    batch.type,
+	    batch.checkpointSequence,
+	    batch.snapshotRecordCount
+	);
+	if (!semanticResult) {
+		return semanticResult;
 	}
 	snapshotWritten = true;
 
@@ -412,11 +500,15 @@ FreshResult Fresh::checkFreeSpace(size_t requiredBytes) const {
 }
 
 FreshResult Fresh::checkPayloadSize(size_t payloadBytes, size_t limit, const char *label) const {
-	if (payloadBytes > FreshMaxPersistedPayloadBytes || payloadBytes > UINT32_MAX ||
+	if (payloadBytes == 0 || payloadBytes > FreshMaxPersistedPayloadBytes || payloadBytes > UINT32_MAX ||
 	    (limit > 0 && payloadBytes > limit)) {
 		std::string message = label != nullptr ? label : "payload";
-		message += " size limit exceeded";
-		return FreshResult::failure(FreshStatus::SizeLimitExceeded, message.c_str(), payloadBytes);
+		message += payloadBytes == 0 ? " is empty" : " size limit exceeded";
+		return FreshResult::failure(
+		    payloadBytes == 0 ? FreshStatus::InternalError : FreshStatus::SizeLimitExceeded,
+		    message.c_str(),
+		    payloadBytes
+		);
 	}
 	return FreshResult::success();
 }
@@ -433,9 +525,9 @@ FreshResult Fresh::readManifest() {
 	if (manifestSlot.missing) {
 		return FreshResult::success("manifest not found");
 	}
-	if ((manifestSlot.payload["version"] | 0U) != FreshManifestVersion ||
-	    !manifestSlot.payload["models"].is<JsonArrayConst>()) {
-		return FreshResult::failure(FreshStatus::CorruptData, "unsupported or corrupt manifest payload");
+	FreshResult manifestValid = FreshValidateManifestPayload(manifestSlot.payload);
+	if (!manifestValid) {
+		return manifestValid;
 	}
 
 	JsonArrayConst modelsArray = manifestSlot.payload["models"].as<JsonArrayConst>();
@@ -488,6 +580,10 @@ FreshResult Fresh::readManifest() {
 }
 
 FreshResult Fresh::writeManifest(const JsonDocument &manifest) {
+	FreshResult valid = FreshValidateManifestPayload(manifest);
+	if (!valid) {
+		return valid;
+	}
 	FreshResult dirResult = ensureDir(_rootPath);
 	if (!dirResult) {
 		return dirResult;
@@ -506,15 +602,21 @@ FreshResult Fresh::writeManifest(const JsonDocument &manifest) {
 	if (!slot.result) {
 		return slot.result;
 	}
+	JsonDocument verified(&FreshJsonAllocator());
 	FreshResult writeResult = writeDurableSlot(
 	    _rootPath,
 	    FreshManifestFile,
 	    manifest,
 	    slot.generation,
-	    FreshMaxPersistedPayloadBytes
+	    FreshMaxPersistedPayloadBytes,
+	    &verified
 	);
 	if (!writeResult) {
 		return writeResult;
+	}
+	valid = FreshValidateManifestPayload(verified);
+	if (!valid) {
+		return valid;
 	}
 	return FreshResult::success("manifest written");
 }
@@ -576,34 +678,31 @@ FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state)
 	if (snapshotSlot.missing) {
 		return FreshLoadResult(FreshLoadStatus::LoadedOk, "snapshot not found");
 	}
-	const char *snapshotStorageId = snapshotSlot.payload["storageId"] | "";
-	const char *snapshotType = snapshotSlot.payload["type"] | "";
-	const uint64_t checkpointSequence = snapshotSlot.payload["appliedThroughSequence"] | UINT64_MAX;
-	if ((snapshotSlot.payload["version"] | 0U) != FreshSnapshotVersion ||
-	    state->storageId != snapshotStorageId ||
-	    strcmp(snapshotType, FreshModelTypeToString(state->type)) != 0 ||
-	    !snapshotSlot.payload["appliedThroughSequence"].is<uint64_t>() ||
-	    checkpointSequence == UINT64_MAX) {
+	if (!snapshotSlot.payload["appliedThroughSequence"].is<uint64_t>() ||
+	    !snapshotSlot.payload["recordCount"].is<uint64_t>()) {
 		state->degraded = true;
 		return FreshResult::failure(FreshStatus::CorruptData, "invalid snapshot payload");
 	}
-	if (state->type == FreshModelType::Stream && !snapshotSlot.payload["entries"].is<JsonArrayConst>()) {
+	const uint64_t checkpointSequence = snapshotSlot.payload["appliedThroughSequence"].as<uint64_t>();
+	const uint64_t declaredRecordCount = snapshotSlot.payload["recordCount"].as<uint64_t>();
+	if (checkpointSequence == UINT64_MAX || declaredRecordCount > SIZE_MAX) {
 		state->degraded = true;
-		return FreshResult::failure(FreshStatus::CorruptData, "snapshot stream entries are missing");
+		return FreshResult::failure(FreshStatus::CorruptData, "invalid snapshot counters");
 	}
-	if (state->type == FreshModelType::General && !snapshotSlot.payload["docs"].is<JsonArrayConst>()) {
+	FreshResult semanticResult = FreshValidateSnapshotPayload(
+	    snapshotSlot.payload,
+	    state->storageId,
+	    state->type,
+	    checkpointSequence,
+	    static_cast<size_t>(declaredRecordCount)
+	);
+	if (!semanticResult) {
 		state->degraded = true;
-		return FreshResult::failure(FreshStatus::CorruptData, "snapshot documents are missing");
+		return semanticResult;
 	}
 
-	state->docs.clear();
-	state->streamEntries.clear();
-	state->checkpointSequence = checkpointSequence;
-	state->lastSequence = state->checkpointSequence;
-	if (state->checkpointSequence == UINT64_MAX) {
-		return FreshResult::failure(FreshStatus::CorruptData, "snapshot sequence overflow");
-	}
-	_nextPendingSequence = std::max(_nextPendingSequence, state->checkpointSequence + 1);
+	std::map<std::string, JsonDocument> loadedDocs;
+	std::deque<JsonDocument> loadedStreamEntries;
 	if (state->type == FreshModelType::Stream) {
 		for (JsonVariantConst entry : snapshotSlot.payload["entries"].as<JsonArrayConst>()) {
 			JsonDocument copy;
@@ -612,29 +711,30 @@ FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state)
 				state->degraded = true;
 				return cloneResult;
 			}
-			state->streamEntries.push_back(std::move(copy));
+			loadedStreamEntries.push_back(std::move(copy));
 		}
-		if (snapshotSlot.hadCorruptSlot) {
-			state->degraded = true;
-			return FreshLoadResult(FreshLoadStatus::LoadedWithCorruptSnapshot, "snapshot loaded with recovery");
+	} else {
+		for (JsonVariantConst entry : snapshotSlot.payload["docs"].as<JsonArrayConst>()) {
+			JsonDocument copy;
+			FreshResult cloneResult = FreshCloneJson(copy, entry, "snapshot document");
+			if (!cloneResult) {
+				state->degraded = true;
+				return cloneResult;
+			}
+			const char *id = copy["_id"] | "";
+			if (*id == '\0' || loadedDocs.find(id) != loadedDocs.end()) {
+				state->degraded = true;
+				return FreshResult::failure(FreshStatus::CorruptData, "snapshot contains invalid document id");
+			}
+			loadedDocs[id] = std::move(copy);
 		}
-		return FreshLoadResult(FreshLoadStatus::LoadedOk, "snapshot loaded");
 	}
 
-	for (JsonVariantConst entry : snapshotSlot.payload["docs"].as<JsonArrayConst>()) {
-		JsonDocument copy;
-		FreshResult cloneResult = FreshCloneJson(copy, entry, "snapshot document");
-		if (!cloneResult) {
-			state->degraded = true;
-			return cloneResult;
-		}
-		const char *id = copy["_id"] | "";
-		if (*id == '\0' || state->docs.find(id) != state->docs.end()) {
-			state->degraded = true;
-			return FreshResult::failure(FreshStatus::CorruptData, "snapshot contains invalid document id");
-		}
-		state->docs[id] = std::move(copy);
-	}
+	state->docs = std::move(loadedDocs);
+	state->streamEntries = std::move(loadedStreamEntries);
+	state->checkpointSequence = checkpointSequence;
+	state->lastSequence = checkpointSequence;
+	_nextPendingSequence = std::max(_nextPendingSequence, checkpointSequence + 1);
 	if (snapshotSlot.hadCorruptSlot) {
 		state->degraded = true;
 		return FreshLoadResult(FreshLoadStatus::LoadedWithCorruptSnapshot, "snapshot loaded with recovery");
@@ -700,7 +800,12 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 		}
 
 		FreshBuffer payload;
-		FreshResult allocation = FreshAllocateBuffer(payload, payloadSize, "journal payload");
+		FreshResult allocation = FreshAllocateBuffer(
+		    payload,
+		    payloadSize,
+		    "journal payload",
+		    FreshAllocationCategory::JournalPayload
+		);
 		if (!allocation) {
 			file.close();
 			return allocation;
@@ -716,10 +821,10 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 			break;
 		}
 
-		JsonDocument recordDoc;
+		JsonDocument recordDoc(&FreshJsonAllocator());
 		DeserializationError error = deserializeMsgPack(recordDoc, payload.data(), payload.size());
-		if (error) {
-			if (error == DeserializationError::NoMemory) {
+		if (error || recordDoc.overflowed()) {
+			if (error == DeserializationError::NoMemory || recordDoc.overflowed()) {
 				file.close();
 				return FreshResult::failure(FreshStatus::OutOfMemory, "failed to decode journal record");
 			}
@@ -756,15 +861,17 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 			break;
 		}
 		record.id = recordDoc["id"] | "";
-		FreshResult cloneResult = FreshCloneJson(
-		    record.doc,
-		    recordDoc["doc"].as<JsonVariantConst>(),
-		    "journal document"
-		);
-		if (!cloneResult) {
-			state->degraded = true;
-			file.close();
-			return cloneResult;
+		if (record.op != FreshJournalOp::Delete) {
+			FreshResult cloneResult = FreshCloneJson(
+			    record.doc,
+			    recordDoc["doc"].as<JsonVariantConst>(),
+			    "journal document"
+			);
+			if (!cloneResult) {
+				state->degraded = true;
+				file.close();
+				return cloneResult;
+			}
 		}
 		FreshResult applyResult = applyRecord(state, record);
 		if (!applyResult) {
@@ -831,16 +938,33 @@ FreshResult Fresh::loadModel(const std::shared_ptr<FreshModel::State> &state) {
 	return FreshLoadResult(status, message);
 }
 
-JsonDocument Fresh::recordToJson(const FreshPendingRecord &record) {
-	JsonDocument doc;
-	doc["sequence"] = record.sequence;
-	doc["op"] = FreshJournalOpToString(record.op);
-	doc["id"] = record.id;
-	doc["doc"].set(record.doc.as<JsonVariantConst>());
-	if (record.op == FreshJournalOp::Append && record.maxEntries > 0) {
-		doc["maxEntries"] = record.maxEntries;
+FreshResult Fresh::recordToJson(const FreshPendingRecord &record, JsonDocument &out) {
+	JsonDocument doc(&FreshJsonAllocator());
+	FreshResult result = FreshJsonSet(doc["sequence"], record.sequence, doc, "journal sequence");
+	if (!result) return result;
+	result = FreshJsonSet(doc["op"], FreshJournalOpToString(record.op), doc, "journal operation");
+	if (!result) return result;
+	result = FreshJsonSet(doc["id"], record.id, doc, "journal id");
+	if (!result) return result;
+	if (record.op == FreshJournalOp::Delete) {
+		result = FreshJsonSet(doc["doc"], nullptr, doc, "journal document");
+	} else {
+		result = FreshJsonSet(
+		    doc["doc"],
+		    record.doc.as<JsonVariantConst>(),
+		    doc,
+		    "journal document"
+		);
 	}
-	return doc;
+	if (!result) return result;
+	if (record.op == FreshJournalOp::Append && record.maxEntries > 0) {
+		result = FreshJsonSet(doc["maxEntries"], record.maxEntries, doc, "journal retention");
+		if (!result) return result;
+	}
+	result = FreshValidateJsonDocument(doc, "journal record");
+	if (!result) return result;
+	out = std::move(doc);
+	return FreshResult::success("journal record constructed");
 }
 
 FreshResult Fresh::syncDirty(bool force) {
@@ -849,7 +973,7 @@ FreshResult Fresh::syncDirty(bool force) {
 		return FreshResult::failure(FreshStatus::InternalError, "failed to lock sync");
 	}
 
-	JsonDocument manifest;
+	JsonDocument manifest(&FreshJsonAllocator());
 	bool shouldWriteManifest = false;
 	uint32_t manifestEpoch = 0;
 	size_t requiredBytes = 0;
@@ -886,18 +1010,49 @@ FreshResult Fresh::syncDirty(bool force) {
 		shouldWriteManifest = _manifestDirty;
 		manifestEpoch = _manifestEpoch;
 		if (shouldWriteManifest) {
-			manifest["version"] = FreshManifestVersion;
-			JsonArray modelsArray = manifest["models"].to<JsonArray>();
+			size_t modelCount = 0;
+			for (const auto &entry : _models) {
+				if (!entry.second->dropped) modelCount++;
+			}
+			FreshResult jsonResult = FreshJsonSet(
+			    manifest["version"],
+			    FreshManifestVersion,
+			    manifest,
+			    "manifest version"
+			);
+			if (!jsonResult) return jsonResult;
+			jsonResult = FreshJsonSet(manifest["modelCount"], modelCount, manifest, "manifest count");
+			if (!jsonResult) return jsonResult;
+			JsonArray modelsArray;
+			jsonResult = FreshJsonCreateArray(manifest["models"], manifest, modelsArray, "manifest models");
+			if (!jsonResult) return jsonResult;
 			for (const auto &entry : _models) {
 				const auto &state = entry.second;
 				if (state->dropped) {
 					continue;
 				}
-				JsonObject modelObject = modelsArray.add<JsonObject>();
-				modelObject["name"] = state->name;
-				modelObject["storageId"] = state->storageId;
-				modelObject["type"] = FreshModelTypeToString(state->type);
+				JsonObject modelObject;
+				jsonResult = FreshJsonAddObject(modelsArray, manifest, modelObject, "manifest model");
+				if (!jsonResult) return jsonResult;
+				jsonResult = FreshJsonSet(modelObject["name"], state->name, manifest, "manifest model name");
+				if (!jsonResult) return jsonResult;
+				jsonResult = FreshJsonSet(
+				    modelObject["storageId"],
+				    state->storageId,
+				    manifest,
+				    "manifest storage id"
+				);
+				if (!jsonResult) return jsonResult;
+				jsonResult = FreshJsonSet(
+				    modelObject["type"],
+				    FreshModelTypeToString(state->type),
+				    manifest,
+				    "manifest model type"
+				);
+				if (!jsonResult) return jsonResult;
 			}
+			jsonResult = FreshValidateManifestPayload(manifest);
+			if (!jsonResult) return jsonResult;
 			const size_t manifestPayloadBytes = measureMsgPack(manifest);
 			FreshResult manifestSize = checkPayloadSize(
 			    manifestPayloadBytes,
@@ -938,7 +1093,11 @@ FreshResult Fresh::syncDirty(bool force) {
 
 			size_t pendingBytes = 0;
 			for (const FreshPendingRecord &pending : state->pending) {
-				JsonDocument recordDoc = recordToJson(pending);
+				JsonDocument recordDoc(&FreshJsonAllocator());
+				FreshResult recordResult = recordToJson(pending, recordDoc);
+				if (!recordResult) {
+					return recordResult;
+				}
 				const size_t recordBytes = measureMsgPack(recordDoc);
 				FreshResult sizeResult = checkPayloadSize(
 				    recordBytes,
@@ -951,7 +1110,12 @@ FreshResult Fresh::syncDirty(bool force) {
 				FreshJournalSyncRecord record;
 				record.sequence = pending.sequence;
 				record.op = pending.op;
-				FreshResult allocation = FreshAllocateBuffer(record.payload, recordBytes, "journal record");
+				FreshResult allocation = FreshAllocateBuffer(
+				    record.payload,
+				    recordBytes,
+				    "journal record",
+				    FreshAllocationCategory::JournalPayload
+				);
 				if (!allocation) {
 					return allocation;
 				}
@@ -984,22 +1148,83 @@ FreshResult Fresh::syncDirty(bool force) {
 			        _config.snapshotBytesThreshold
 			    );
 			if (batch.writeSnapshot) {
-				batch.snapshot["version"] = FreshSnapshotVersion;
-				batch.snapshot["storageId"] = batch.storageId;
-				batch.snapshot["type"] = FreshModelTypeToString(batch.type);
-				batch.snapshot["appliedThroughSequence"] = batch.checkpointSequence;
+				batch.snapshotRecordCount = state->type == FreshModelType::Stream
+				                                ? state->streamEntries.size()
+				                                : state->docs.size();
+				FreshResult jsonResult = FreshJsonSet(
+				    batch.snapshot["version"],
+				    FreshSnapshotVersion,
+				    batch.snapshot,
+				    "snapshot version"
+				);
+				if (!jsonResult) return jsonResult;
+				jsonResult = FreshJsonSet(
+				    batch.snapshot["storageId"],
+				    batch.storageId,
+				    batch.snapshot,
+				    "snapshot storage id"
+				);
+				if (!jsonResult) return jsonResult;
+				jsonResult = FreshJsonSet(
+				    batch.snapshot["type"],
+				    FreshModelTypeToString(batch.type),
+				    batch.snapshot,
+				    "snapshot type"
+				);
+				if (!jsonResult) return jsonResult;
+				jsonResult = FreshJsonSet(
+				    batch.snapshot["appliedThroughSequence"],
+				    batch.checkpointSequence,
+				    batch.snapshot,
+				    "snapshot sequence"
+				);
+				if (!jsonResult) return jsonResult;
+				jsonResult = FreshJsonSet(
+				    batch.snapshot["recordCount"],
+				    batch.snapshotRecordCount,
+				    batch.snapshot,
+				    "snapshot count"
+				);
+				if (!jsonResult) return jsonResult;
 
+				JsonArray records;
+				const char *arrayName = batch.type == FreshModelType::Stream ? "entries" : "docs";
+				jsonResult = FreshJsonCreateArray(
+				    batch.snapshot[arrayName],
+				    batch.snapshot,
+				    records,
+				    "snapshot records"
+				);
+				if (!jsonResult) return jsonResult;
 				if (batch.type == FreshModelType::Stream) {
-					JsonArray entries = batch.snapshot["entries"].to<JsonArray>();
 					for (const JsonDocument &streamEntry : state->streamEntries) {
-						entries.add(streamEntry.as<JsonVariantConst>());
+						jsonResult = FreshJsonAdd(
+						    records,
+						    streamEntry.as<JsonVariantConst>(),
+						    batch.snapshot,
+						    "snapshot stream entry"
+						);
+						if (!jsonResult) return jsonResult;
 					}
 				} else {
-					JsonArray docs = batch.snapshot["docs"].to<JsonArray>();
 					for (const auto &docEntry : state->docs) {
-						docs.add(docEntry.second.as<JsonVariantConst>());
+						jsonResult = FreshJsonAdd(
+						    records,
+						    docEntry.second.as<JsonVariantConst>(),
+						    batch.snapshot,
+						    "snapshot document"
+						);
+						if (!jsonResult) return jsonResult;
 					}
 				}
+				jsonResult = FreshValidateSnapshotPayload(
+				    batch.snapshot,
+				    batch.storageId,
+				    batch.type,
+				    batch.checkpointSequence,
+				    batch.snapshotRecordCount
+				);
+				if (!jsonResult) return jsonResult;
 				batch.snapshotPayloadBytes = measureMsgPack(batch.snapshot);
 				FreshResult snapshotSizeResult = checkPayloadSize(
 				    batch.snapshotPayloadBytes,
