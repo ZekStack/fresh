@@ -10,8 +10,11 @@ class FreshBuffer {
   public:
 	FreshBuffer() = default;
 
-	explicit FreshBuffer(size_t size) {
-		allocate(size);
+	explicit FreshBuffer(
+	    size_t size,
+	    FreshAllocationCategory category = FreshAllocationCategory::General
+	) {
+		allocate(size, category);
 	}
 
 	~FreshBuffer() {
@@ -33,13 +36,16 @@ class FreshBuffer {
 		return *this;
 	}
 
-	bool allocate(size_t size) {
+	bool allocate(
+	    size_t size,
+	    FreshAllocationCategory category = FreshAllocationCategory::General
+	) {
 		reset();
 		if (size == 0) {
 			return true;
 		}
 
-		_data = static_cast<uint8_t *>(FreshAllocate(size));
+		_data = static_cast<uint8_t *>(FreshAllocate(size, category));
 		if (_data == nullptr) {
 			return false;
 		}
