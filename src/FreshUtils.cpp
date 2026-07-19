@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstring>
 #include <esp_system.h>
+#include <limits>
 #include <utility>
 
 uint32_t FreshChecksum(const uint8_t *data, size_t length) {
@@ -84,7 +85,7 @@ bool FreshIsValidName(const char *name) {
 	}
 	for (const char *cursor = name; *cursor != '\0'; ++cursor) {
 		const char c = *cursor;
-		if (!(isalnum(c) || c == '_' || c == '-')) {
+		if (!(isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')) {
 			return false;
 		}
 	}
@@ -151,6 +152,13 @@ std::string FreshMakeId() {
 	return id;
 }
 
+FreshResult FreshValidateJsonDocument(const JsonDocument &document, const char *label) {
+	if (document.overflowed()) {
+		return FreshJsonAllocationFailure(label);
+	}
+	return FreshResult::success();
+}
+
 FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) {
 	const char *name = label != nullptr ? label : "json";
 	const size_t payloadBytes = measureMsgPack(source);
@@ -162,7 +170,7 @@ FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const 
 	}
 
 	FreshBuffer buffer;
-	if (!buffer.allocate(payloadBytes)) {
+	if (!buffer.allocate(payloadBytes, FreshAllocationCategory::JsonCloneBuffer)) {
 		target.clear();
 		std::string message = "failed to allocate ";
 		message += name;
@@ -203,12 +211,18 @@ FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const 
 	return FreshResult::success("json cloned");
 }
 
-void FreshCopyJson(JsonDocument &target, const JsonDocument &source) {
-	target.clear();
-	target.set(source.as<JsonVariantConst>());
+FreshResult FreshCopyJson(JsonDocument &target, const JsonDocument &source, const char *label) {
+	return FreshCloneJson(target, source.as<JsonVariantConst>(), label);
 }
 
-void FreshMergePatch(JsonDocument &target, const JsonDocument &patch) {
+FreshResult FreshMergePatch(JsonDocument &target, const JsonDocument &patch) {
+	if (!patch.is<JsonObjectConst>()) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "patch must be an object");
+	}
+	if (!target.is<JsonObject>()) {
+		return FreshResult::failure(FreshStatus::InternalError, "patch target must be an object");
+	}
+
 	JsonObject targetObject = target.as<JsonObject>();
 	JsonObjectConst patchObject = patch.as<JsonObjectConst>();
 	for (JsonPairConst pair : patchObject) {
@@ -216,6 +230,20 @@ void FreshMergePatch(JsonDocument &target, const JsonDocument &patch) {
 		if (strcmp(key, "_id") == 0 || strcmp(key, "createdAt") == 0) {
 			continue;
 		}
-		targetObject[key].set(pair.value());
+		FreshResult setResult = FreshJsonSet(targetObject[key], pair.value(), target, "patch");
+		if (!setResult) {
+			return setResult;
+		}
 	}
+	return FreshValidateJsonDocument(target, "patch");
+}
+
+FreshResult FreshNextRevision(uint64_t current, uint64_t &next, const char *label) {
+	if (current == std::numeric_limits<uint64_t>::max()) {
+		std::string message = label != nullptr ? label : "revision";
+		message += " overflow";
+		return FreshResult::failure(FreshStatus::InternalError, message.c_str());
+	}
+	next = current + 1;
+	return FreshResult::success();
 }
