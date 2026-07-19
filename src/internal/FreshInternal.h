@@ -4,10 +4,13 @@
 #include "FreshBuffer.h"
 #include "FreshMutex.h"
 
+#include <cstring>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 constexpr uint32_t FreshJournalMagic = 0x4c4a5246; // FRJL
@@ -99,6 +102,18 @@ FreshResult FreshJsonSet(
     JsonDocument &document,
     const char *label
 ) {
+	using Value = std::decay_t<TValue>;
+	if constexpr (std::is_integral_v<Value>) {
+		if (label != nullptr && strcmp(label, "journal sequence") == 0) {
+			const uint64_t sequence = static_cast<uint64_t>(value);
+			if (sequence == 0 || sequence == std::numeric_limits<uint64_t>::max()) {
+				return FreshResult::failure(
+				    FreshStatus::InternalError,
+				    "journal sequence is exhausted"
+				);
+			}
+		}
+	}
 	if (!target.set(value) || document.overflowed()) {
 		return FreshJsonAllocationFailure(label);
 	}
