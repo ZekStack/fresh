@@ -15,8 +15,9 @@ constexpr uint16_t FreshJournalVersion = 3;
 constexpr size_t FreshJournalHeaderSize = 4 + 2 + 1 + 1 + 4 + 4;
 constexpr uint32_t FreshSlotMagic = 0x544c5346; // FSLT
 constexpr uint16_t FreshSlotVersion = 1;
-constexpr uint32_t FreshManifestVersion = 3;
-constexpr uint32_t FreshSnapshotVersion = 3;
+constexpr uint32_t FreshManifestVersion = 4;
+constexpr uint32_t FreshSnapshotVersion = 4;
+constexpr uint32_t FreshBackupVersion = 2;
 constexpr size_t FreshSlotHeaderSize = 4 + 2 + 8 + 4 + 4;
 constexpr size_t FreshMaxPersistedPayloadBytes = 1024 * 1024;
 constexpr size_t FreshMaxBackupBufferBytes = 1024 * 1024;
@@ -64,6 +65,7 @@ struct FreshModel::State {
 	size_t bytesSinceSnapshot = 0;
 	uint64_t checkpointSequence = 0;
 	uint64_t lastSequence = 0;
+	uint64_t revision = 1;
 	uint32_t storageEpoch = 0;
 };
 
@@ -84,6 +86,64 @@ struct FreshBackupRuntimeState {
 	FreshMutex mutex;
 };
 
+inline FreshResult FreshJsonAllocationFailure(const char *label) {
+	std::string message = "failed to construct ";
+	message += label != nullptr ? label : "json";
+	return FreshResult::failure(FreshStatus::OutOfMemory, message.c_str());
+}
+
+template <typename TTarget, typename TValue>
+FreshResult FreshJsonSet(
+    TTarget target,
+    const TValue &value,
+    JsonDocument &document,
+    const char *label
+) {
+	if (!target.set(value) || document.overflowed()) {
+		return FreshJsonAllocationFailure(label);
+	}
+	return FreshResult::success();
+}
+
+template <typename TTarget>
+FreshResult FreshJsonCreateArray(
+    TTarget target,
+    JsonDocument &document,
+    JsonArray &array,
+    const char *label
+) {
+	array = target.template to<JsonArray>();
+	if (array.isNull() || document.overflowed()) {
+		return FreshJsonAllocationFailure(label);
+	}
+	return FreshResult::success();
+}
+
+inline FreshResult FreshJsonAdd(
+    JsonArray array,
+    JsonVariantConst value,
+    JsonDocument &document,
+    const char *label
+) {
+	if (!array.add(value) || document.overflowed()) {
+		return FreshJsonAllocationFailure(label);
+	}
+	return FreshResult::success();
+}
+
+inline FreshResult FreshJsonAddObject(
+    JsonArray array,
+    JsonDocument &document,
+    JsonObject &object,
+    const char *label
+) {
+	object = array.add<JsonObject>();
+	if (object.isNull() || document.overflowed()) {
+		return FreshJsonAllocationFailure(label);
+	}
+	return FreshResult::success();
+}
+
 uint32_t FreshChecksum(const uint8_t *data, size_t length);
 void FreshWriteU16(File &file, uint16_t value);
 void FreshWriteU32(File &file, uint32_t value);
@@ -99,5 +159,7 @@ bool FreshParseJournalOp(uint8_t value, FreshJournalOp &op);
 const char *FreshJournalOpToString(FreshJournalOp op);
 std::string FreshMakeId();
 FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label);
-void FreshCopyJson(JsonDocument &target, const JsonDocument &source);
-void FreshMergePatch(JsonDocument &target, const JsonDocument &patch);
+FreshResult FreshCopyJson(JsonDocument &target, const JsonDocument &source, const char *label = "json");
+FreshResult FreshMergePatch(JsonDocument &target, const JsonDocument &patch);
+FreshResult FreshValidateJsonDocument(const JsonDocument &document, const char *label);
+FreshResult FreshNextRevision(uint64_t current, uint64_t &next, const char *label);
