@@ -99,6 +99,8 @@ struct FreshConfig {
 
 struct FreshDeinitOptions {
 	bool sync = true;
+	// Total deadline for the complete explicit shutdown operation. UINT32_MAX
+	// keeps destructor-style unbounded lifetime-barrier behavior.
 	uint32_t timeoutMS = 2000;
 };
 
@@ -383,6 +385,15 @@ class Fresh {
 	friend class FreshModel;
 	friend class FreshBackupPrint;
 
+	enum class Lifecycle : uint8_t {
+		Uninitialized,
+		Running,
+		FinalSync,
+		StopRequested,
+		WaitingForTaskExit,
+		Stopped,
+	};
+
 	static void syncTaskThunk(void *arg);
 
 	void syncLoop();
@@ -402,7 +413,7 @@ class Fresh {
 	FreshResult loadSnapshot(const std::shared_ptr<FreshModel::State> &state);
 	FreshResult loadJournal(const std::shared_ptr<FreshModel::State> &state);
 	FreshResult loadModel(const std::shared_ptr<FreshModel::State> &state);
-	JsonDocument recordToJson(const FreshPendingRecord &record);
+	FreshResult recordToJson(const FreshPendingRecord &record, JsonDocument &out);
 	FreshResult syncDirty(bool force);
 
 	bool backupWriteByte(uint8_t byte);
@@ -418,6 +429,7 @@ class Fresh {
 	FreshConfig _config;
 	FreshDiagnostics _diagnostics;
 	std::string _rootPath;
+	Lifecycle _lifecycle = Lifecycle::Uninitialized;
 	bool _initialized = false;
 	bool _stopping = false;
 	bool _stopTask = false;
@@ -426,6 +438,7 @@ class Fresh {
 	bool _syncTaskStarted = false;
 	uint32_t _manifestEpoch = 0;
 	uint64_t _nextPendingSequence = 1;
+	uint64_t _databaseRevision = 1;
 	TaskHandle_t _syncTaskHandle = nullptr;
 	SemaphoreHandle_t _syncTaskExited = nullptr;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> _models;
