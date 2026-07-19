@@ -1,9 +1,30 @@
 #include "Fresh.h"
 #include "internal/FreshInternal.h"
+#include "internal/FreshMemory.h"
 
 #include <LittleFS.h>
 #include <algorithm>
 #include <ctime>
+
+namespace {
+
+TickType_t FreshRemainingTicks(uint32_t startedAt, uint32_t timeoutMS, bool &expired) {
+	if (timeoutMS == UINT32_MAX) {
+		expired = false;
+		return portMAX_DELAY;
+	}
+	const uint32_t elapsed = millis() - startedAt;
+	if (elapsed >= timeoutMS) {
+		expired = true;
+		return 0;
+	}
+	expired = false;
+	const uint32_t remainingMS = timeoutMS - elapsed;
+	const TickType_t ticks = pdMS_TO_TICKS(remainingMS);
+	return ticks == 0 ? 1 : ticks;
+}
+
+} // namespace
 
 FreshResult FreshResult::success(const char *message, size_t affectedCount) {
 	FreshResult result;
@@ -91,15 +112,14 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "db path is required");
 	}
 	FreshResult configResult = validateConfig(config);
-	if (!configResult) {
-		return configResult;
-	}
+	if (!configResult) return configResult;
 
 	FreshLock lock(*_mutex);
 	if (!lock) {
 		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 	}
-	if (_initialized || _syncTaskStarted) {
+	if (_initialized || _syncTaskStarted ||
+	    (_lifecycle != Lifecycle::Uninitialized && _lifecycle != Lifecycle::Stopped)) {
 		return FreshResult::failure(FreshStatus::AlreadyInitialized, "database already initialized");
 	}
 
@@ -107,18 +127,23 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 		_models.clear();
 		_diagnostics = FreshDiagnostics();
 		_rootPath.clear();
+		_lifecycle = Lifecycle::Uninitialized;
 		_stopping = false;
 		_stopTask = false;
 		_manifestDirty = false;
 		_forceSyncRequested = false;
 		_manifestEpoch = 0;
 		_nextPendingSequence = 1;
+		_databaseRevision = 1;
 		_syncTaskHandle = nullptr;
 		_syncTaskStarted = false;
 		_backup->buffer.reset();
 		_backup->head = 0;
 		_backup->tail = 0;
 		_backup->used = 0;
+		_backup->progress = 0;
+		_backup->total = 0;
+		_backup->lastProgressEvent = 0;
 		_backup->requested = false;
 		_backup->running = false;
 		_backup->done = false;
@@ -130,16 +155,18 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 	_config = config;
 	_diagnostics = FreshDiagnostics();
 	_models.clear();
+	_lifecycle = Lifecycle::Uninitialized;
 	_stopping = false;
 	_stopTask = false;
 	_manifestDirty = false;
 	_forceSyncRequested = false;
 	_manifestEpoch = 0;
 	_nextPendingSequence = 1;
+	_databaseRevision = 1;
 	xSemaphoreTake(_syncTaskExited, 0);
 
 	const size_t backupBytes = std::max<size_t>(config.backupBufferSize, 512);
-	if (!_backup->buffer.allocate(backupBytes)) {
+	if (!_backup->buffer.allocate(backupBytes, FreshAllocationCategory::BackupBuffer)) {
 		resetInitState();
 		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate backup buffer");
 	}
@@ -157,9 +184,7 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 	_backup->result = FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
 
 	_rootPath = dbPath;
-	if (_rootPath.back() == '/' && _rootPath.size() > 1) {
-		_rootPath.pop_back();
-	}
+	if (_rootPath.back() == '/' && _rootPath.size() > 1) _rootPath.pop_back();
 
 	if (!LittleFS.begin(false)) {
 		if (!config.eraseOnFileSystemFailure || !LittleFS.begin(true)) {
@@ -187,6 +212,7 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 
 	_initialized = true;
 	_syncTaskStarted = true;
+	_lifecycle = Lifecycle::Running;
 
 	BaseType_t taskResult = pdFAIL;
 	if (config.syncTaskCore == tskNO_AFFINITY) {
@@ -223,24 +249,43 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 }
 
 FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
+	const uint32_t startedAt = millis();
+	bool expired = false;
 	TaskHandle_t handle = nullptr;
 	bool taskStarted = false;
-	FreshResult finalSyncResult = FreshResult::success("database deinitialized");
+	bool performFinalSync = false;
+
 	{
-		FreshLock lock(*_mutex);
-		if (!lock) {
-			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+		FreshLock lock(*_mutex, FreshRemainingTicks(startedAt, options.timeoutMS, expired));
+		if (expired || !lock) {
+			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out acquiring database lock");
 		}
-		if (!_initialized && !_syncTaskStarted) {
+		if ((!_initialized && !_syncTaskStarted) ||
+		    _lifecycle == Lifecycle::Uninitialized || _lifecycle == Lifecycle::Stopped) {
 			return FreshResult::success("database not initialized");
 		}
-		_stopping = true;
+		if (_lifecycle == Lifecycle::Running) {
+			_lifecycle = Lifecycle::FinalSync;
+			_stopping = true;
+			performFinalSync = options.sync;
+		}
 		handle = _syncTaskHandle;
 		taskStarted = _syncTaskStarted;
 	}
 
 	{
-		FreshLock backupLock(_backup->mutex);
+		FreshLock backupLock(
+		    _backup->mutex,
+		    FreshRemainingTicks(startedAt, options.timeoutMS, expired)
+		);
+		if (expired || !backupLock) {
+			FreshLock lock(*_mutex);
+			if (_lifecycle == Lifecycle::FinalSync) {
+				_lifecycle = Lifecycle::Running;
+				_stopping = false;
+			}
+			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out cancelling backup");
+		}
 		_backup->requested = false;
 		_backup->cancelled = true;
 		if (!_backup->running) {
@@ -249,33 +294,63 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		}
 	}
 
-	if (options.sync && _initialized) {
-		finalSyncResult = syncDirty(true);
+	if (performFinalSync) {
+		FreshLock syncLock(
+		    *_syncMutex,
+		    FreshRemainingTicks(startedAt, options.timeoutMS, expired)
+		);
+		if (expired || !syncLock) {
+			FreshLock lock(*_mutex);
+			_lifecycle = Lifecycle::Running;
+			_stopping = false;
+			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out waiting for sync");
+		}
+		FreshResult finalSyncResult = syncDirty(true);
+		if (!finalSyncResult) {
+			FreshLock lock(*_mutex);
+			_lifecycle = Lifecycle::Running;
+			_stopping = false;
+			return finalSyncResult;
+		}
+		FreshRemainingTicks(startedAt, options.timeoutMS, expired);
+		if (expired) {
+			FreshLock lock(*_mutex);
+			_lifecycle = Lifecycle::Running;
+			_stopping = false;
+			return FreshResult::failure(FreshStatus::Timeout, "database deinit deadline expired during final sync");
+		}
 	}
 
 	{
-		FreshLock lock(*_mutex);
-		_stopTask = true;
+		FreshLock lock(*_mutex, FreshRemainingTicks(startedAt, options.timeoutMS, expired));
+		if (expired || !lock) {
+			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out requesting stop");
+		}
+		if (_lifecycle == Lifecycle::FinalSync || _lifecycle == Lifecycle::Running) {
+			_lifecycle = Lifecycle::StopRequested;
+			_stopTask = true;
+		}
 		handle = _syncTaskHandle;
 		taskStarted = _syncTaskStarted;
 	}
-	if (handle != nullptr) {
-		xTaskNotifyGive(handle);
-	}
+	if (handle != nullptr) xTaskNotifyGive(handle);
 
 	if (taskStarted) {
-		const TickType_t timeoutTicks =
-		    options.timeoutMS == UINT32_MAX ? portMAX_DELAY : pdMS_TO_TICKS(options.timeoutMS);
-		if (xSemaphoreTake(_syncTaskExited, timeoutTicks) != pdTRUE) {
-			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out");
+		const TickType_t remaining = FreshRemainingTicks(startedAt, options.timeoutMS, expired);
+		if (expired || xSemaphoreTake(_syncTaskExited, remaining) != pdTRUE) {
+			FreshLock lock(*_mutex);
+			_lifecycle = Lifecycle::WaitingForTaskExit;
+			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out waiting for task exit");
 		}
-		if (handle != nullptr) {
-			vTaskDelete(handle);
-		}
+		if (handle != nullptr) vTaskDelete(handle);
 	}
 
 	{
-		FreshLock lock(*_mutex);
+		FreshLock lock(*_mutex, FreshRemainingTicks(startedAt, options.timeoutMS, expired));
+		if (expired || !lock) {
+			_lifecycle = Lifecycle::WaitingForTaskExit;
+			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out during cleanup");
+		}
 		_models.clear();
 		_diagnostics = FreshDiagnostics();
 		_onSync = nullptr;
@@ -289,12 +364,14 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		_manifestDirty = false;
 		_manifestEpoch = 0;
 		_nextPendingSequence = 1;
+		_databaseRevision = 1;
 		_initialized = false;
 		_stopping = false;
 		_stopTask = false;
 		_syncTaskHandle = nullptr;
 		_syncTaskStarted = false;
 		_rootPath.clear();
+		_lifecycle = Lifecycle::Stopped;
 	}
 
 	{
@@ -314,9 +391,6 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		_backup->result = FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
 	}
 
-	if (!finalSyncResult) {
-		return finalSyncResult;
-	}
 	return FreshResult::success("database deinitialized");
 }
 
@@ -330,9 +404,7 @@ void Fresh::syncLoop() {
 		bool force = false;
 		{
 			FreshLock lock(*_mutex);
-			if (_stopTask) {
-				break;
-			}
+			if (_stopTask) break;
 			force = _forceSyncRequested;
 			_forceSyncRequested = false;
 		}
@@ -340,9 +412,7 @@ void Fresh::syncLoop() {
 		runBackupIfRequested();
 		{
 			FreshLock lock(*_mutex);
-			if (_stopTask) {
-				break;
-			}
+			if (_stopTask) break;
 		}
 	}
 
@@ -356,13 +426,9 @@ uint64_t Fresh::now() {
 		FreshLock lock(*_mutex);
 		callback = _onTimeGet;
 	}
-	if (callback) {
-		return callback();
-	}
+	if (callback) return callback();
 	time_t current = time(nullptr);
-	if (current > 0) {
-		return static_cast<uint64_t>(current);
-	}
+	if (current > 0) return static_cast<uint64_t>(current);
 	return static_cast<uint64_t>(millis());
 }
 
@@ -372,9 +438,7 @@ void Fresh::emitEvent(FreshEvent event) {
 		FreshLock lock(*_mutex);
 		callback = _onEvent;
 	}
-	if (callback) {
-		callback(event);
-	}
+	if (callback) callback(event);
 }
 
 void Fresh::emitSync(FreshResult result) {
@@ -383,9 +447,7 @@ void Fresh::emitSync(FreshResult result) {
 		FreshLock lock(*_mutex);
 		callback = _onSync;
 	}
-	if (callback) {
-		callback(result);
-	}
+	if (callback) callback(result);
 }
 
 FreshStorageInfo Fresh::storageInfo() const {
@@ -439,132 +501,81 @@ void Fresh::onBackupError(FreshBackupCallback callback) {
 
 const char *Fresh::eventToString(FreshEventType type) const {
 	switch (type) {
-	case FreshEventType::ModelCreated:
-		return "modelCreated";
-	case FreshEventType::ModelDropped:
-		return "modelDropped";
-	case FreshEventType::ModelRenamed:
-		return "modelRenamed";
-	case FreshEventType::DocumentCreated:
-		return "documentCreated";
-	case FreshEventType::DocumentUpdated:
-		return "documentUpdated";
-	case FreshEventType::DocumentDeleted:
-		return "documentDeleted";
-	case FreshEventType::StreamAppended:
-		return "streamAppended";
-	case FreshEventType::SyncStarted:
-		return "syncStarted";
-	case FreshEventType::SyncFinished:
-		return "syncFinished";
-	case FreshEventType::BackupStarted:
-		return "backupStarted";
-	case FreshEventType::BackupFinished:
-		return "backupFinished";
-	case FreshEventType::BackupCancelled:
-		return "backupCancelled";
-	case FreshEventType::BackupError:
-		return "backupError";
+	case FreshEventType::ModelCreated: return "modelCreated";
+	case FreshEventType::ModelDropped: return "modelDropped";
+	case FreshEventType::ModelRenamed: return "modelRenamed";
+	case FreshEventType::DocumentCreated: return "documentCreated";
+	case FreshEventType::DocumentUpdated: return "documentUpdated";
+	case FreshEventType::DocumentDeleted: return "documentDeleted";
+	case FreshEventType::StreamAppended: return "streamAppended";
+	case FreshEventType::SyncStarted: return "syncStarted";
+	case FreshEventType::SyncFinished: return "syncFinished";
+	case FreshEventType::BackupStarted: return "backupStarted";
+	case FreshEventType::BackupFinished: return "backupFinished";
+	case FreshEventType::BackupCancelled: return "backupCancelled";
+	case FreshEventType::BackupError: return "backupError";
 	}
 	return "unknown";
 }
 
 const char *Fresh::backupErrorToString(FreshBackupError error) const {
 	switch (error) {
-	case FreshBackupError::None:
-		return "none";
-	case FreshBackupError::AlreadyRunning:
-		return "already running";
-	case FreshBackupError::NotRunning:
-		return "not running";
-	case FreshBackupError::Cancelled:
-		return "cancelled";
-	case FreshBackupError::SerializationFailed:
-		return "serialization failed";
-	case FreshBackupError::FileSystemError:
-		return "file system error";
-	case FreshBackupError::OutOfMemory:
-		return "out of memory";
+	case FreshBackupError::None: return "none";
+	case FreshBackupError::AlreadyRunning: return "already running";
+	case FreshBackupError::NotRunning: return "not running";
+	case FreshBackupError::Cancelled: return "cancelled";
+	case FreshBackupError::SerializationFailed: return "serialization failed";
+	case FreshBackupError::FileSystemError: return "file system error";
+	case FreshBackupError::OutOfMemory: return "out of memory";
 	}
 	return "unknown";
 }
 
 const char *Fresh::backupStateToString(FreshBackupState state) const {
 	switch (state) {
-	case FreshBackupState::NotRunning:
-		return "not running";
-	case FreshBackupState::Queued:
-		return "queued";
-	case FreshBackupState::Running:
-		return "running";
-	case FreshBackupState::Finished:
-		return "finished";
-	case FreshBackupState::Cancelled:
-		return "cancelled";
-	case FreshBackupState::Error:
-		return "error";
+	case FreshBackupState::NotRunning: return "not running";
+	case FreshBackupState::Queued: return "queued";
+	case FreshBackupState::Running: return "running";
+	case FreshBackupState::Finished: return "finished";
+	case FreshBackupState::Cancelled: return "cancelled";
+	case FreshBackupState::Error: return "error";
 	}
 	return "unknown";
 }
 
 const char *Fresh::loadStatusToString(FreshLoadStatus status) const {
 	switch (status) {
-	case FreshLoadStatus::LoadedOk:
-		return "loaded ok";
-	case FreshLoadStatus::LoadedWithRecoveredJournal:
-		return "loaded with recovered journal";
-	case FreshLoadStatus::LoadedWithCorruptSnapshot:
-		return "loaded with corrupt snapshot";
-	case FreshLoadStatus::LoadedWithCorruptJournal:
-		return "loaded with corrupt journal";
-	case FreshLoadStatus::FailedToLoad:
-		return "failed to load";
+	case FreshLoadStatus::LoadedOk: return "loaded ok";
+	case FreshLoadStatus::LoadedWithRecoveredJournal: return "loaded with recovered journal";
+	case FreshLoadStatus::LoadedWithCorruptSnapshot: return "loaded with corrupt snapshot";
+	case FreshLoadStatus::LoadedWithCorruptJournal: return "loaded with corrupt journal";
+	case FreshLoadStatus::FailedToLoad: return "failed to load";
 	}
 	return "unknown";
 }
 
 const char *Fresh::statusToString(FreshStatus status) const {
 	switch (status) {
-	case FreshStatus::Ok:
-		return "ok";
-	case FreshStatus::NotInitialized:
-		return "not initialized";
-	case FreshStatus::AlreadyInitialized:
-		return "already initialized";
-	case FreshStatus::InvalidArgument:
-		return "invalid argument";
-	case FreshStatus::FileSystemError:
-		return "file system error";
-	case FreshStatus::ModelExists:
-		return "model exists";
-	case FreshStatus::ModelNotFound:
-		return "model not found";
-	case FreshStatus::DocumentNotFound:
-		return "document not found";
-	case FreshStatus::InvalidModel:
-		return "invalid model";
-	case FreshStatus::ValidationFailed:
-		return "validation failed";
-	case FreshStatus::OutOfMemory:
-		return "out of memory";
-	case FreshStatus::UnsupportedOperation:
-		return "unsupported operation";
-	case FreshStatus::CorruptData:
-		return "corrupt data";
-	case FreshStatus::StorageFull:
-		return "storage full";
-	case FreshStatus::SizeLimitExceeded:
-		return "size limit exceeded";
-	case FreshStatus::Busy:
-		return "busy";
-	case FreshStatus::BackupNotRunning:
-		return "backup not running";
-	case FreshStatus::Cancelled:
-		return "cancelled";
-	case FreshStatus::Timeout:
-		return "timeout";
-	case FreshStatus::InternalError:
-		return "internal error";
+	case FreshStatus::Ok: return "ok";
+	case FreshStatus::NotInitialized: return "not initialized";
+	case FreshStatus::AlreadyInitialized: return "already initialized";
+	case FreshStatus::InvalidArgument: return "invalid argument";
+	case FreshStatus::FileSystemError: return "file system error";
+	case FreshStatus::ModelExists: return "model exists";
+	case FreshStatus::ModelNotFound: return "model not found";
+	case FreshStatus::DocumentNotFound: return "document not found";
+	case FreshStatus::InvalidModel: return "invalid model";
+	case FreshStatus::ValidationFailed: return "validation failed";
+	case FreshStatus::OutOfMemory: return "out of memory";
+	case FreshStatus::UnsupportedOperation: return "unsupported operation";
+	case FreshStatus::CorruptData: return "corrupt data";
+	case FreshStatus::StorageFull: return "storage full";
+	case FreshStatus::SizeLimitExceeded: return "size limit exceeded";
+	case FreshStatus::Busy: return "busy";
+	case FreshStatus::BackupNotRunning: return "backup not running";
+	case FreshStatus::Cancelled: return "cancelled";
+	case FreshStatus::Timeout: return "timeout";
+	case FreshStatus::InternalError: return "internal error";
 	}
 	return "unknown";
 }
