@@ -207,11 +207,8 @@ void Fresh::runBackupIfRequested() {
 		result = constructionResult;
 	} else {
 		total = measureMsgPack(archive);
-		if (total == 0 || total > FreshMaxPersistedPayloadBytes) {
-			result = FreshResult::failure(
-			    total == 0 ? FreshStatus::InternalError : FreshStatus::SizeLimitExceeded,
-			    total == 0 ? "backup archive is empty" : "backup archive is too large"
-			);
+		if (total == 0) {
+			result = FreshResult::failure(FreshStatus::InternalError, "backup archive is empty");
 		} else {
 			{
 				FreshLock lock(_backup->mutex);
@@ -420,6 +417,22 @@ FreshResult Fresh::backupImport(const uint8_t *data, size_t length) {
 }
 
 FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
+	// Hold the documented lock order for the complete prepare/commit transaction.
+	// Preparation performs no live mutation, but blocking concurrent operations
+	// here guarantees the captured registry cannot change before the swap.
+	FreshLock importSyncLock(*_syncMutex);
+	if (!importSyncLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock sync");
+	}
+	FreshLock importDbLock(*_mutex);
+	if (!importDbLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+	}
+	if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+	if (_stopping || _lifecycle != Lifecycle::Running) {
+		return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	}
+
 	if ((archive["version"] | 0U) != FreshBackupVersion ||
 	    !archive["modelCount"].is<uint64_t>() ||
 	    !archive["models"].is<JsonArrayConst>()) {
@@ -432,19 +445,8 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 		return FreshResult::failure(FreshStatus::CorruptData, "backup model count mismatch");
 	}
 
-	uint64_t capturedDatabaseRevision = 0;
-	std::map<std::string, std::shared_ptr<FreshModel::State>> oldModels;
-	{
-		FreshLock lock(*_mutex);
-		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
-		if (_stopping || _lifecycle != Lifecycle::Running) {
-			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
-		}
-		capturedDatabaseRevision = _databaseRevision;
-		oldModels = _models;
-	}
-
+	const uint64_t capturedDatabaseRevision = _databaseRevision;
+	const std::map<std::string, std::shared_ptr<FreshModel::State>> oldModels = _models;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> importedModels;
 	for (JsonObjectConst modelObject : modelArray) {
 		const char *name = modelObject["name"] | "";
@@ -541,51 +543,48 @@ FreshResult Fresh::importBackupArchive(const JsonDocument &archive) {
 	    "database revision"
 	);
 	if (!revisionResult) return revisionResult;
-
-	TaskHandle_t syncTaskHandle = nullptr;
-	size_t affectedCount = 0;
-	{
-		FreshLock syncLock(*_syncMutex);
-		if (!syncLock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock sync");
-		FreshLock lock(*_mutex);
-		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
-		if (_stopping || _lifecycle != Lifecycle::Running) {
-			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
+	if (_manifestEpoch == UINT32_MAX) {
+		return FreshResult::failure(FreshStatus::InternalError, "manifest epoch overflow");
+	}
+	for (const auto &entry : oldModels) {
+		const auto &state = entry.second;
+		if (state->revision == UINT64_MAX) {
+			return FreshResult::failure(FreshStatus::InternalError, "model revision overflow");
 		}
-		if (_databaseRevision != capturedDatabaseRevision) {
-			return FreshResult::failure(FreshStatus::Busy, "database changed while backup import was prepared");
+		if (importedModels.find(entry.first) == importedModels.end() &&
+		    state->storageEpoch == UINT32_MAX) {
+			return FreshResult::failure(FreshStatus::InternalError, "storage epoch overflow");
 		}
-
-		for (auto &entry : oldModels) {
-			auto &state = entry.second;
-			uint64_t nextRevision = 0;
-			FreshResult stateRevision = FreshNextRevision(state->revision, nextRevision, "model revision");
-			if (!stateRevision) return stateRevision;
-			state->revision = nextRevision;
-			state->dropped = true;
-			state->dirty = true;
-			state->snapshotRequired = false;
-			state->pending.clear();
-			if (importedModels.find(entry.first) == importedModels.end()) {
-				state->storageEpoch++;
-			}
-		}
-		for (auto &entry : importedModels) {
-			entry.second->revision = 1;
-			entry.second->dropped = false;
-			entry.second->dirty = true;
-			entry.second->snapshotRequired = true;
-		}
-
-		affectedCount = finalModels.size();
-		_models.swap(finalModels);
-		_manifestDirty = true;
-		_manifestEpoch++;
-		_databaseRevision = nextDatabaseRevision;
-		syncTaskHandle = _syncTaskHandle;
 	}
 
+	// No fallible work remains after this point.
+	for (auto &entry : oldModels) {
+		auto &state = entry.second;
+		state->revision++;
+		state->dropped = true;
+		state->dirty = true;
+		state->snapshotRequired = false;
+		state->pending.clear();
+		if (importedModels.find(entry.first) == importedModels.end()) {
+			state->storageEpoch++;
+		}
+	}
+	for (auto &entry : importedModels) {
+		entry.second->revision = 1;
+		entry.second->dropped = false;
+		entry.second->dirty = true;
+		entry.second->snapshotRequired = true;
+	}
+
+	const size_t affectedCount = finalModels.size();
+	_models.swap(finalModels);
+	_manifestDirty = true;
+	_manifestEpoch++;
+	_databaseRevision = nextDatabaseRevision;
+	TaskHandle_t syncTaskHandle = _syncTaskHandle;
+
+	// Release both recursive locks before waking the sync task.
+	(void)syncTaskHandle;
 	if (syncTaskHandle != nullptr) xTaskNotifyGive(syncTaskHandle);
 	return FreshResult::success("backup imported", affectedCount);
 }
