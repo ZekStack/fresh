@@ -6,8 +6,10 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -44,9 +46,22 @@ class CallbackBackupVisitor : public FreshBackupArchiveVisitor {
 	ModelCallback _onModelEnd;
 };
 
+bool isKnownRestoreMode(FreshRestoreMode mode) {
+	switch (mode) {
+	case FreshRestoreMode::ReplaceSelected:
+	case FreshRestoreMode::ReplaceAll:
+		return true;
+	}
+	return false;
+}
+
 } // namespace
 
 FreshResult Fresh::backupImport(Stream &input) {
+	return backupImport(input, FreshRestoreOptions());
+}
+
+FreshResult Fresh::backupImport(Stream &input, const FreshRestoreOptions &options) {
 	{
 		FreshLock backupLock(_backup->mutex);
 		if (_backup->running || _backup->requested) {
@@ -54,10 +69,15 @@ FreshResult Fresh::backupImport(Stream &input) {
 		}
 	}
 
+	if (!isKnownRestoreMode(options.mode)) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "invalid restore mode");
+	}
+
 	uint64_t capturedDatabaseRevision = 0;
 	size_t maxDocumentBytes = 0;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> oldModels;
 	std::map<std::string, uint64_t> oldRevisions;
+	std::set<std::string> protectedNames;
 	{
 		FreshLock lock(*_mutex);
 		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
@@ -65,6 +85,20 @@ FreshResult Fresh::backupImport(Stream &input) {
 		if (_stopping || _lifecycle != Lifecycle::Running) {
 			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
 		}
+
+		for (const std::string &name : options.protectedModels) {
+			if (!FreshIsValidName(name.c_str())) {
+				return FreshResult::failure(FreshStatus::InvalidArgument, "invalid protected model name");
+			}
+			if (!protectedNames.insert(name).second) {
+				return FreshResult::failure(FreshStatus::InvalidArgument, "duplicate protected model name");
+			}
+			auto model = _models.find(name);
+			if (model == _models.end() || !model->second || model->second->dropped) {
+				return FreshResult::failure(FreshStatus::ModelNotFound, "protected model not found");
+			}
+		}
+
 		capturedDatabaseRevision = _databaseRevision;
 		maxDocumentBytes = _config.maxDocumentBytes;
 		oldModels = _models;
@@ -76,6 +110,9 @@ FreshResult Fresh::backupImport(Stream &input) {
 
 	CallbackBackupVisitor visitor(
 	    [&](const FreshBackupModelMetadata &model) -> FreshResult {
+		    if (protectedNames.find(model.name) != protectedNames.end()) {
+			    return FreshResult::failure(FreshStatus::InvalidArgument, "backup contains a protected model");
+		    }
 		    currentModel = std::make_shared<FreshModel::State>();
 		    if (!currentModel) {
 			    return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate imported model");
@@ -130,9 +167,44 @@ FreshResult Fresh::backupImport(Stream &input) {
 		return FreshResult::failure(FreshStatus::InternalError, "backup import parser state mismatch");
 	}
 
-	std::map<std::string, std::shared_ptr<FreshModel::State>> finalModels = importedModels;
-	for (const auto &entry : oldModels) {
-		if (importedModels.find(entry.first) == importedModels.end()) finalModels[entry.first] = entry.second;
+	std::map<std::string, std::shared_ptr<FreshModel::State>> finalModels;
+	std::vector<std::shared_ptr<FreshModel::State>> retiredModels;
+	size_t createdModels = 0;
+	size_t replacedModels = 0;
+	size_t removedModels = 0;
+
+	if (options.mode == FreshRestoreMode::ReplaceSelected) {
+		finalModels = oldModels;
+		for (const auto &entry : importedModels) {
+			auto old = oldModels.find(entry.first);
+			if (old == oldModels.end()) {
+				createdModels++;
+			} else {
+				replacedModels++;
+				retiredModels.push_back(old->second);
+			}
+			finalModels[entry.first] = entry.second;
+		}
+	} else {
+		finalModels = importedModels;
+		for (const auto &entry : importedModels) {
+			auto old = oldModels.find(entry.first);
+			if (old == oldModels.end()) {
+				createdModels++;
+			} else {
+				replacedModels++;
+				retiredModels.push_back(old->second);
+			}
+		}
+		for (const auto &entry : oldModels) {
+			if (importedModels.find(entry.first) != importedModels.end()) continue;
+			if (protectedNames.find(entry.first) != protectedNames.end()) {
+				finalModels[entry.first] = entry.second;
+				continue;
+			}
+			removedModels++;
+			retiredModels.push_back(entry.second);
+		}
 	}
 
 	FreshLock importSyncLock(*_syncMutex);
@@ -165,16 +237,23 @@ FreshResult Fresh::backupImport(Stream &input) {
 	if (_manifestEpoch == UINT32_MAX) {
 		return FreshResult::failure(FreshStatus::InternalError, "manifest epoch overflow");
 	}
-	for (auto &entry : oldModels) {
-		if (importedModels.find(entry.first) == importedModels.end()) continue;
+
+	std::vector<uint64_t> retiredRevisions;
+	retiredRevisions.reserve(retiredModels.size());
+	for (const auto &state : retiredModels) {
 		uint64_t nextRevision = 0;
-		FreshResult oldRevision = FreshNextRevision(entry.second->revision, nextRevision, "model revision");
+		FreshResult oldRevision = FreshNextRevision(state->revision, nextRevision, "model revision");
 		if (!oldRevision) return oldRevision;
-		entry.second->revision = nextRevision;
-		entry.second->dropped = true;
-		entry.second->dirty = true;
-		entry.second->snapshotRequired = false;
-		entry.second->pending.clear();
+		retiredRevisions.push_back(nextRevision);
+	}
+
+	for (size_t i = 0; i < retiredModels.size(); ++i) {
+		auto &state = retiredModels[i];
+		state->revision = retiredRevisions[i];
+		state->dropped = true;
+		state->dirty = true;
+		state->snapshotRequired = false;
+		state->pending.clear();
 	}
 	for (auto &entry : importedModels) {
 		entry.second->revision = 1;
@@ -183,20 +262,32 @@ FreshResult Fresh::backupImport(Stream &input) {
 		entry.second->snapshotRequired = true;
 	}
 
-	const size_t affectedCount = importedModels.size();
+	const size_t affectedCount = createdModels + replacedModels + removedModels;
 	_models.swap(finalModels);
 	_manifestDirty = true;
 	_manifestEpoch++;
 	_databaseRevision = nextDatabaseRevision;
 	TaskHandle_t syncTaskHandle = _syncTaskHandle;
 	if (syncTaskHandle != nullptr) xTaskNotifyGive(syncTaskHandle);
-	return FreshResult::success("backup imported", affectedCount);
+	if (affectedCount == 0) return FreshResult::success("restore completed with no changes");
+	return FreshResult::success(
+	    options.mode == FreshRestoreMode::ReplaceAll ? "database restored" : "selected models restored",
+	    affectedCount
+	);
 }
 
 FreshResult Fresh::backupImport(const uint8_t *data, size_t length) {
+	return backupImport(data, length, FreshRestoreOptions());
+}
+
+FreshResult Fresh::backupImport(
+    const uint8_t *data,
+    size_t length,
+    const FreshRestoreOptions &options
+) {
 	if (data == nullptr || length == 0) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "backup buffer is required");
 	}
 	fresh_backup_v2::MemoryStream input(data, length);
-	return backupImport(input);
+	return backupImport(input, options);
 }
