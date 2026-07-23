@@ -422,6 +422,12 @@ class Fresh {
 	    size_t length,
 	    const FreshRestoreOptions &options
 	);
+	FreshResult restoreBackup(Stream &input, const FreshRestoreOptions &options);
+	FreshResult restoreBackup(
+	    const uint8_t *data,
+	    size_t length,
+	    const FreshRestoreOptions &options
+	);
 
 	void onSync(FreshSyncCallback callback);
 	void onEvent(FreshEventCallback callback);
