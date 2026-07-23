@@ -186,6 +186,22 @@ struct FreshBackupEstimate {
 	size_t recordCount = 0;
 };
 
+struct FreshBackupModelMetadata {
+	std::string name;
+	FreshModelType type = FreshModelType::General;
+	size_t recordCount = 0;
+};
+
+struct FreshBackupMetadata {
+	uint16_t containerVersion = 0;
+	uint64_t generatedAt = 0;
+	size_t totalBytes = 0;
+	size_t modelCount = 0;
+	size_t recordCount = 0;
+	bool legacyFormat = false;
+	std::vector<FreshBackupModelMetadata> models;
+};
+
 struct FreshStorageInfo {
 	size_t totalBytes = 0;
 	size_t usedBytes = 0;
@@ -380,6 +396,12 @@ class Fresh {
 	size_t readBackup(uint8_t *buffer, size_t length, uint32_t timeoutMS = 0);
 	FreshBackupStatus backupStatus() const;
 	FreshResult cancelBackup();
+	FreshResult inspectBackup(Stream &input, FreshBackupMetadata &metadata) const;
+	FreshResult inspectBackup(
+	    const uint8_t *data,
+	    size_t length,
+	    FreshBackupMetadata &metadata
+	) const;
 	FreshResult backupImport(Stream &input);
 	FreshResult backupImport(const uint8_t *data, size_t length);
 
@@ -437,7 +459,6 @@ class Fresh {
 
 	bool backupWriteByte(uint8_t byte);
 	void runBackupIfRequested();
-	FreshResult importBackupArchive(const JsonDocument &archive);
 	bool isBackupCancelled();
 	FreshResult validateBackupOptionsLocked(const FreshBackupOptions &options) const;
 	FreshResult prepareBackupPlan(const FreshBackupOptions &options, FreshBackupPlan &plan) const;
