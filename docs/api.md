@@ -251,16 +251,21 @@ if (status.state == FreshBackupState::Finished) {
 }
 ```
 
-Backup methods:
+Backup and restore methods:
 
 | Method | Purpose |
 | --- | --- |
-| `startBackup()` | Request backup generation. |
+| `estimateBackup(options, estimate)` | Calculate the exact archive size, model count, and record count for the current selected model state. |
+| `startBackup(options)` | Request all-model or selected-model backup generation. |
 | `readBackup(buffer, length, timeoutMS)` | Read generated backup bytes. |
 | `backupStatus()` | Return `FreshBackupStatus` with typed lifecycle state and detailed result. |
 | `cancelBackup()` | Cancel a running backup. |
-| `backupImport(Stream&)` | Import backup data from an Arduino `Stream`. |
-| `backupImport(data, length)` | Import backup data from memory. |
+| `inspectBackup(Stream&, metadata)` | Fully validate a backup stream and return metadata without modifying the database. |
+| `inspectBackup(data, length, metadata)` | Fully validate a memory-backed archive without modifying the database. |
+| `backupImport(Stream&)` | Restore archive models using backward-compatible `ReplaceSelected` semantics. |
+| `backupImport(Stream&, options)` | Restore from a stream with explicit selected/full replacement and protected models. |
+| `backupImport(data, length)` | Restore memory-backed data using `ReplaceSelected`. |
+| `backupImport(data, length, options)` | Restore memory-backed data with explicit restore options. |
 
 `FreshBackupStatus.state` is the stable lifecycle signal. `FreshBackupStatus.result` is the detailed success/failure result. `FreshBackupStatus::operator bool()` reflects only `result`, not lifecycle state.
 
@@ -269,3 +274,7 @@ Backup methods:
 `FreshBackupInfo` includes `progress`, `total`, `size`, `estimatedSize`, `error`, and `result`.
 
 `FreshBackupError` values include `None`, `AlreadyRunning`, `NotRunning`, `Cancelled`, `SerializationFailed`, `FileSystemError`, and `OutOfMemory`.
+
+`FreshRestoreMode::ReplaceSelected` replaces only archive models and preserves unrelated destination models. `FreshRestoreMode::ReplaceAll` removes unprotected destination models absent from the archive. Every protected model must already exist, and an archive containing a protected name is rejected before commit.
+
+On a successful restore, `FreshResult::affectedCount` is the number of created, replaced, and removed models. Destination validators remain mandatory for replaced models. See [`restore-modes.md`](restore-modes.md) for exact semantics, empty-archive behavior, persistence boundaries, and protected-model rules. See [`backup-inspection.md`](backup-inspection.md) for the upload, inspect, confirm, reopen, and restore workflow.
