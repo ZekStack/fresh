@@ -240,6 +240,7 @@ struct FreshStreamAppendOptions {
 class Fresh;
 class FreshModel;
 class FreshBackupPrint;
+struct FreshBackupModelSnapshot;
 struct FreshBackupPlan;
 struct FreshBackupRuntimeState;
 struct FreshMutex;
@@ -318,6 +319,7 @@ class FreshModel {
 
   private:
 	friend class Fresh;
+	friend struct FreshBackupModelSnapshot;
 	struct State;
 
 	FreshModel(Fresh *owner, std::shared_ptr<State> state);
