@@ -9,7 +9,7 @@ Fresh writes new backups as a bounded-memory binary container. The container is 
 - detect truncation and frame corruption before changing live state;
 - keep the existing `startBackup()` / `readBackup()` streaming API;
 - retain import compatibility with legacy monolithic MessagePack backup archives;
-- leave room for selective model export without another format revision.
+- support complete or allowlisted model export without changing the container format.
 
 ## Byte order
 
@@ -82,6 +82,12 @@ Temporary export memory is bounded by:
 - the configured backup ring buffer;
 - one cloned record;
 - model descriptors and small codec state.
+
+## Selective model export
+
+`FreshBackupOptions::modelNames` is an allowlist applied while the backup plan is prepared. An empty list includes every active model. A non-empty list includes exactly the named active models, serialized in deterministic registry name order. Duplicate names are rejected, and missing or dropped models are reported before generation is queued.
+
+The container header and terminal frame contain counts for the selected scope only. Unselected models do not contribute to exact-size measurement and their records are never cloned or serialized.
 
 ## Import behavior
 
