@@ -214,6 +214,20 @@ struct FreshRestoreOptions {
 	std::vector<std::string> protectedModels;
 };
 
+struct FreshGarbageCollectionResult {
+	size_t scannedDirectories = 0;
+	size_t removedDirectories = 0;
+	size_t reclaimedBytes = 0;
+	size_t failedDirectories = 0;
+};
+
+struct FreshGarbageCollectionDiagnostics {
+	bool attempted = false;
+	bool degraded = false;
+	std::string message;
+	FreshGarbageCollectionResult result;
+};
+
 struct FreshStorageInfo {
 	size_t totalBytes = 0;
 	size_t usedBytes = 0;
@@ -231,6 +245,7 @@ struct FreshModelLoadInfo {
 struct FreshDiagnostics {
 	std::vector<FreshModelLoadInfo> modelLoads;
 	size_t degradedModelCount = 0;
+	FreshGarbageCollectionDiagnostics garbageCollection;
 };
 
 struct FreshModelInfo {
@@ -399,6 +414,7 @@ class Fresh {
 
 	FreshStorageInfo storageInfo() const;
 	FreshDiagnostics diagnostics() const;
+	FreshResult collectGarbage(FreshGarbageCollectionResult &result);
 
 	FreshResult estimateBackup(
 	    const FreshBackupOptions &options,

@@ -6,6 +6,12 @@
 #include <algorithm>
 #include <ctime>
 
+FreshResult FreshCollectGarbageStorage(
+    const std::string &rootPath,
+    FreshGarbageCollectionResult &result,
+    bool &attempted
+);
+
 namespace {
 
 TickType_t FreshRemainingTicks(uint32_t startedAt, uint32_t timeoutMS, bool &expired) {
@@ -210,6 +216,18 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 		return manifestResult;
 	}
 
+	FreshGarbageCollectionResult startupGarbageCollection;
+	bool garbageCollectionAttempted = false;
+	FreshResult garbageCollectionResult = FreshCollectGarbageStorage(
+	    _rootPath,
+	    startupGarbageCollection,
+	    garbageCollectionAttempted
+	);
+	_diagnostics.garbageCollection.attempted = garbageCollectionAttempted;
+	_diagnostics.garbageCollection.degraded = !garbageCollectionResult;
+	_diagnostics.garbageCollection.message = garbageCollectionResult.message;
+	_diagnostics.garbageCollection.result = startupGarbageCollection;
+
 	_initialized = true;
 	_syncTaskStarted = true;
 	_lifecycle = Lifecycle::Running;
@@ -242,8 +260,22 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 		return FreshResult::failure(FreshStatus::InternalError, "failed to create sync task");
 	}
 
+	if (_diagnostics.degradedModelCount > 0 && _diagnostics.garbageCollection.degraded) {
+		const size_t warningCount = _diagnostics.degradedModelCount +
+		                            std::max<size_t>(
+		                                1,
+		                                _diagnostics.garbageCollection.result.failedDirectories
+		                            );
+		return FreshResult::success("database initialized with recovery warnings", warningCount);
+	}
 	if (_diagnostics.degradedModelCount > 0) {
 		return FreshResult::success("database initialized with recovered models", _diagnostics.degradedModelCount);
+	}
+	if (_diagnostics.garbageCollection.degraded) {
+		return FreshResult::success(
+		    "database initialized with garbage collection warning",
+		    std::max<size_t>(1, _diagnostics.garbageCollection.result.failedDirectories)
+		);
 	}
 	return FreshResult::success("database initialized");
 }
