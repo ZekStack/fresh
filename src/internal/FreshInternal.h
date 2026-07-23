@@ -72,8 +72,24 @@ struct FreshModel::State {
 	uint32_t storageEpoch = 0;
 };
 
+struct FreshBackupModelSnapshot {
+	std::shared_ptr<FreshModel::State> state;
+	std::string name;
+	FreshModelType type = FreshModelType::General;
+	uint64_t revision = 0;
+	uint64_t recordCount = 0;
+};
+
+struct FreshBackupPlan {
+	std::vector<FreshBackupModelSnapshot> models;
+	uint64_t databaseRevision = 0;
+	uint64_t recordCount = 0;
+	uint64_t totalBytes = 0;
+};
+
 struct FreshBackupRuntimeState {
 	FreshBuffer buffer;
+	FreshBackupOptions options;
 	size_t head = 0;
 	size_t tail = 0;
 	size_t used = 0;

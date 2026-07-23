@@ -81,6 +81,7 @@ bool Fresh::backupWriteByte(uint8_t byte) {
 }
 
 void Fresh::runBackupIfRequested() {
+	FreshBackupOptions options;
 	{
 		FreshLock lock(_backup->mutex);
 		if (!_backup->requested || _backup->running) return;
@@ -96,122 +97,30 @@ void Fresh::runBackupIfRequested() {
 		_backup->lastProgressEvent = 0;
 		_backup->state = FreshBackupState::Running;
 		_backup->result = FreshResult::success("backup running");
+		options = std::move(_backup->options);
+		_backup->options = FreshBackupOptions();
 	}
 
-	struct ModelSnapshot {
-		std::shared_ptr<FreshModel::State> state;
-		std::string name;
-		FreshModelType type = FreshModelType::General;
-		uint64_t revision = 0;
-		uint64_t recordCount = 0;
-	};
-
-	FreshResult result = FreshResult::success();
-	std::vector<ModelSnapshot> models;
-	uint64_t recordCount = 0;
-	uint64_t totalBytes = ContainerHeaderSize;
+	FreshBackupPlan plan;
+	FreshResult result = prepareBackupPlan(options, plan);
 	const uint64_t generatedAt = now();
-	uint64_t capturedDatabaseRevision = 0;
-
-	{
-		FreshLock lock(*_mutex);
-		if (!lock) {
-			result = FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		} else if (!_initialized || _stopping || _lifecycle != Lifecycle::Running) {
-			result = FreshResult::failure(FreshStatus::Busy, "database is stopping");
-		} else {
-			capturedDatabaseRevision = _databaseRevision;
-			size_t activeModelCount = 0;
-			for (const auto &entry : _models) {
-				if (!entry.second->dropped) activeModelCount++;
-			}
-			if (activeModelCount > UINT32_MAX) {
-				result = FreshResult::failure(FreshStatus::SizeLimitExceeded, "backup has too many models");
-			} else {
-				models.reserve(activeModelCount);
-			}
-
-			for (const auto &entry : _models) {
-				if (!result) break;
-				const auto &state = entry.second;
-				if (state->dropped) continue;
-				if (state->name.empty() || state->name.size() > UINT16_MAX) {
-					result = FreshResult::failure(FreshStatus::SizeLimitExceeded, "backup model name is too long");
-					break;
-				}
-				const uint64_t modelRecords = state->type == FreshModelType::Stream
-				                                  ? static_cast<uint64_t>(state->streamEntries.size())
-				                                  : static_cast<uint64_t>(state->docs.size());
-				if (!addSize(recordCount, modelRecords) ||
-				    !addSize(totalBytes, frameBytes(ModelBeginFixedPayloadSize + state->name.size())) ||
-				    !addSize(totalBytes, frameBytes(ModelEndPayloadSize))) {
-					result = FreshResult::failure(FreshStatus::SizeLimitExceeded, "backup size calculation overflow");
-					break;
-				}
-
-				if (state->type == FreshModelType::Stream) {
-					for (const JsonDocument &doc : state->streamEntries) {
-						const size_t payloadBytes = measureMsgPack(doc);
-						if (payloadBytes == 0 || payloadBytes > UINT32_MAX ||
-						    payloadBytes > _config.maxDocumentBytes ||
-						    !addSize(totalBytes, frameBytes(payloadBytes))) {
-							result = FreshResult::failure(
-							    payloadBytes > _config.maxDocumentBytes ? FreshStatus::SizeLimitExceeded
-							                                             : FreshStatus::InternalError,
-							    "invalid backup stream entry size"
-							);
-							break;
-						}
-					}
-				} else {
-					for (const auto &docEntry : state->docs) {
-						const size_t payloadBytes = measureMsgPack(docEntry.second);
-						if (payloadBytes == 0 || payloadBytes > UINT32_MAX ||
-						    payloadBytes > _config.maxDocumentBytes ||
-						    !addSize(totalBytes, frameBytes(payloadBytes))) {
-							result = FreshResult::failure(
-							    payloadBytes > _config.maxDocumentBytes ? FreshStatus::SizeLimitExceeded
-							                                             : FreshStatus::InternalError,
-							    "invalid backup document size"
-							);
-							break;
-						}
-					}
-				}
-				if (!result) break;
-				models.push_back({
-				    .state = state,
-				    .name = state->name,
-				    .type = state->type,
-				    .revision = state->revision,
-				    .recordCount = modelRecords,
-				});
-			}
-		}
-	}
-
-	if (result && !addSize(totalBytes, frameBytes(ArchiveEndPayloadSize))) {
-		result = FreshResult::failure(FreshStatus::SizeLimitExceeded, "backup size calculation overflow");
-	}
-	if (result && totalBytes > SIZE_MAX) {
-		result = FreshResult::failure(FreshStatus::SizeLimitExceeded, "backup is too large for this platform");
-	}
+	const uint64_t totalBytes = result ? plan.totalBytes : 0;
 
 	if (result) {
 		{
 			FreshLock lock(_backup->mutex);
-			_backup->total = static_cast<size_t>(totalBytes);
+			_backup->total = static_cast<size_t>(plan.totalBytes);
 		}
 		FreshBackupInfo startInfo;
-		startInfo.estimatedSize = static_cast<size_t>(totalBytes);
-		startInfo.total = static_cast<size_t>(totalBytes);
+		startInfo.estimatedSize = static_cast<size_t>(plan.totalBytes);
+		startInfo.total = static_cast<size_t>(plan.totalBytes);
 		callBackupStart(startInfo);
 		emitEvent({.type = FreshEventType::BackupStarted, .result = FreshResult::success("backup started")});
 
 		{
 			FreshLock lock(*_mutex);
 			if (!lock || !_initialized || _stopping || _lifecycle != Lifecycle::Running ||
-			    _databaseRevision != capturedDatabaseRevision) {
+			    _databaseRevision != plan.databaseRevision) {
 				result = FreshResult::failure(FreshStatus::Busy, "database changed during backup");
 			}
 		}
@@ -220,9 +129,9 @@ void Fresh::runBackupIfRequested() {
 		Writer writer(output);
 		ContainerHeader header{
 		    .generatedAt = generatedAt,
-		    .modelCount = static_cast<uint32_t>(models.size()),
-		    .recordCount = recordCount,
-		    .totalBytes = totalBytes,
+		    .modelCount = static_cast<uint32_t>(plan.models.size()),
+		    .recordCount = plan.recordCount,
+		    .totalBytes = plan.totalBytes,
 		};
 		if (result && !writer.writeContainerHeader(header)) {
 			result = isBackupCancelled()
@@ -231,7 +140,7 @@ void Fresh::runBackupIfRequested() {
 		}
 
 		uint64_t writtenRecords = 0;
-		for (const ModelSnapshot &snapshot : models) {
+		for (const FreshBackupModelSnapshot &snapshot : plan.models) {
 			if (!result) break;
 			{
 				FreshLock lock(*_mutex);
@@ -313,10 +222,10 @@ void Fresh::runBackupIfRequested() {
 		if (result) {
 			FreshLock lock(*_mutex);
 			if (!lock || !_initialized || _stopping || _lifecycle != Lifecycle::Running ||
-			    _databaseRevision != capturedDatabaseRevision) {
+			    _databaseRevision != plan.databaseRevision) {
 				result = FreshResult::failure(FreshStatus::Busy, "database changed during backup");
 			} else {
-				for (const ModelSnapshot &snapshot : models) {
+				for (const FreshBackupModelSnapshot &snapshot : plan.models) {
 					auto current = _models.find(snapshot.name);
 					const uint64_t currentCount = snapshot.type == FreshModelType::Stream
 					                                  ? static_cast<uint64_t>(snapshot.state->streamEntries.size())
@@ -331,15 +240,15 @@ void Fresh::runBackupIfRequested() {
 			}
 		}
 
-		if (result && writtenRecords != recordCount) {
+		if (result && writtenRecords != plan.recordCount) {
 			result = FreshResult::failure(FreshStatus::InternalError, "backup record count changed");
 		}
-		if (result && !writer.writeArchiveEnd(static_cast<uint32_t>(models.size()), recordCount)) {
+		if (result && !writer.writeArchiveEnd(static_cast<uint32_t>(plan.models.size()), plan.recordCount)) {
 			result = isBackupCancelled()
 			             ? FreshResult::failure(FreshStatus::Cancelled, "backup cancelled")
 			             : FreshResult::failure(FreshStatus::InternalError, "failed to finish backup archive");
 		}
-		if (result && writer.bytesWritten() != totalBytes) {
+		if (result && writer.bytesWritten() != plan.totalBytes) {
 			result = FreshResult::failure(FreshStatus::InternalError, "backup byte count mismatch");
 		}
 		if (result) result = FreshResult::success("backup finished", static_cast<size_t>(writer.bytesWritten()));
@@ -383,29 +292,6 @@ bool Fresh::isBackupCancelled() {
 	return _backup->cancelled;
 }
 
-size_t Fresh::estimateBackupSize() {
-	FreshLock lock(*_mutex);
-	if (!lock || !_initialized || _stopping || _lifecycle != Lifecycle::Running) return 0;
-	uint64_t total = ContainerHeaderSize;
-	for (const auto &entry : _models) {
-		const auto &state = entry.second;
-		if (state->dropped || state->name.size() > UINT16_MAX) continue;
-		if (!addSize(total, frameBytes(ModelBeginFixedPayloadSize + state->name.size())) ||
-		    !addSize(total, frameBytes(ModelEndPayloadSize))) return 0;
-		if (state->type == FreshModelType::Stream) {
-			for (const JsonDocument &doc : state->streamEntries) {
-				if (!addSize(total, frameBytes(measureMsgPack(doc)))) return 0;
-			}
-		} else {
-			for (const auto &docEntry : state->docs) {
-				if (!addSize(total, frameBytes(measureMsgPack(docEntry.second)))) return 0;
-			}
-		}
-	}
-	if (!addSize(total, frameBytes(ArchiveEndPayloadSize)) || total > SIZE_MAX) return 0;
-	return static_cast<size_t>(total);
-}
-
 void Fresh::callBackupStart(FreshBackupInfo info) {
 	FreshBackupCallback callback;
 	{
@@ -442,7 +328,7 @@ void Fresh::callBackupError(FreshBackupInfo info) {
 	if (callback) callback(info);
 }
 
-FreshResult Fresh::startBackup() {
+FreshResult Fresh::startBackup(const FreshBackupOptions &options) {
 	FreshLock dbLock(*_mutex);
 	if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 	if (_stopping || _lifecycle != Lifecycle::Running) {
@@ -453,6 +339,9 @@ FreshResult Fresh::startBackup() {
 		if (_backup->running || _backup->requested) {
 			return FreshResult::failure(FreshStatus::Busy, "backup already running");
 		}
+		FreshResult validation = validateBackupOptionsLocked(options);
+		if (!validation) return validation;
+		_backup->options = options;
 		_backup->requested = true;
 		_backup->done = false;
 		_backup->cancelled = false;
@@ -496,6 +385,7 @@ FreshResult Fresh::cancelBackup() {
 	}
 	_backup->cancelled = true;
 	_backup->requested = false;
+	_backup->options = FreshBackupOptions();
 	_backup->state = FreshBackupState::Cancelled;
 	_backup->result = FreshResult::failure(FreshStatus::Cancelled, "backup cancelled");
 	return _backup->result;

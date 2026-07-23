@@ -174,6 +174,18 @@ struct FreshBackupInfo {
 	FreshResult result;
 };
 
+struct FreshBackupOptions {
+	// Empty backs up every active model. A non-empty list is an exact model
+	// allowlist. Names are validated and copied when the backup is queued.
+	std::vector<std::string> modelNames;
+};
+
+struct FreshBackupEstimate {
+	size_t totalBytes = 0;
+	size_t modelCount = 0;
+	size_t recordCount = 0;
+};
+
 struct FreshStorageInfo {
 	size_t totalBytes = 0;
 	size_t usedBytes = 0;
@@ -228,6 +240,8 @@ struct FreshStreamAppendOptions {
 class Fresh;
 class FreshModel;
 class FreshBackupPrint;
+struct FreshBackupModelSnapshot;
+struct FreshBackupPlan;
 struct FreshBackupRuntimeState;
 struct FreshMutex;
 struct FreshPendingRecord;
@@ -305,6 +319,7 @@ class FreshModel {
 
   private:
 	friend class Fresh;
+	friend struct FreshBackupModelSnapshot;
 	struct State;
 
 	FreshModel(Fresh *owner, std::shared_ptr<State> state);
@@ -357,7 +372,11 @@ class Fresh {
 	FreshStorageInfo storageInfo() const;
 	FreshDiagnostics diagnostics() const;
 
-	FreshResult startBackup();
+	FreshResult estimateBackup(
+	    const FreshBackupOptions &options,
+	    FreshBackupEstimate &estimate
+	) const;
+	FreshResult startBackup(const FreshBackupOptions &options = FreshBackupOptions());
 	size_t readBackup(uint8_t *buffer, size_t length, uint32_t timeoutMS = 0);
 	FreshBackupStatus backupStatus() const;
 	FreshResult cancelBackup();
@@ -420,7 +439,8 @@ class Fresh {
 	void runBackupIfRequested();
 	FreshResult importBackupArchive(const JsonDocument &archive);
 	bool isBackupCancelled();
-	size_t estimateBackupSize();
+	FreshResult validateBackupOptionsLocked(const FreshBackupOptions &options) const;
+	FreshResult prepareBackupPlan(const FreshBackupOptions &options, FreshBackupPlan &plan) const;
 	void callBackupStart(FreshBackupInfo info);
 	void callBackupProgress(FreshBackupInfo info);
 	void callBackupEnd(FreshBackupInfo info);
