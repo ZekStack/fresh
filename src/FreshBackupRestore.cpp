@@ -7,6 +7,7 @@
 
 #include <LittleFS.h>
 
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <map>
@@ -51,6 +52,24 @@ class DurableRestoreVisitor : public FreshBackupArchiveVisitor {
 	ModelCallback _onModelEnd;
 };
 
+enum class FreshRestoreManifestCommitState : uint8_t {
+	NotCommitted,
+	Committed,
+	Unknown,
+};
+
+enum class FreshRestoreSlotVerification : uint8_t {
+	Exact,
+	Invalid,
+	Unavailable,
+};
+
+struct FreshRestoreSlotProbe {
+	bool exists = false;
+	bool valid = false;
+	uint64_t generation = 0;
+};
+
 bool FreshRestoreModeKnown(FreshRestoreMode mode) {
 	switch (mode) {
 	case FreshRestoreMode::ReplaceSelected:
@@ -66,19 +85,57 @@ bool FreshRestoreAddBytes(size_t &total, size_t value) {
 	return true;
 }
 
-std::string FreshRestoreSlotPath(const std::string &modelPath, char slot) {
-	std::string name = FreshSnapshotFile;
+std::string FreshRestoreDurableSlotPath(
+    const std::string &basePath,
+    const char *fileBaseName,
+    char slot
+) {
+	std::string name = fileBaseName;
 	name += ".";
 	name.push_back(slot);
 	name += ".msgpack";
-	return FreshJoinPath(modelPath, name);
+	return FreshJoinPath(basePath, name);
+}
+
+std::string FreshRestoreSnapshotSlotPath(const std::string &modelPath, char slot) {
+	return FreshRestoreDurableSlotPath(modelPath, FreshSnapshotFile, slot);
 }
 
 bool FreshRemoveRestoreStorage(const std::string &modelPath) {
 	LittleFS.remove(FreshJoinPath(modelPath, FreshJournalFile).c_str());
-	LittleFS.remove(FreshRestoreSlotPath(modelPath, 'a').c_str());
-	LittleFS.remove(FreshRestoreSlotPath(modelPath, 'b').c_str());
+	LittleFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'a').c_str());
+	LittleFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'b').c_str());
 	return !LittleFS.exists(modelPath.c_str()) || LittleFS.rmdir(modelPath.c_str());
+}
+
+FreshResult FreshValidateRestoreManifest(const JsonDocument &manifest) {
+	if ((manifest["version"] | 0U) != FreshManifestVersion ||
+	    !manifest["modelCount"].is<uint64_t>() ||
+	    !manifest["models"].is<JsonArrayConst>()) {
+		return FreshResult::failure(FreshStatus::CorruptData, "invalid restore manifest");
+	}
+
+	const uint64_t declaredCount = manifest["modelCount"].as<uint64_t>();
+	JsonArrayConst models = manifest["models"].as<JsonArrayConst>();
+	if (declaredCount > SIZE_MAX || static_cast<size_t>(declaredCount) != models.size()) {
+		return FreshResult::failure(FreshStatus::CorruptData, "restore manifest count mismatch");
+	}
+
+	std::set<std::string> names;
+	std::set<std::string> storageIds;
+	for (JsonObjectConst model : models) {
+		const char *name = model["name"] | "";
+		const char *storageId = model["storageId"] | "";
+		const char *type = model["type"] | "";
+		if (!FreshIsValidName(name) || !FreshIsValidName(storageId) ||
+		    (strcmp(type, "general") != 0 && strcmp(type, "stream") != 0)) {
+			return FreshResult::failure(FreshStatus::CorruptData, "invalid restore manifest model");
+		}
+		if (!names.insert(name).second || !storageIds.insert(storageId).second) {
+			return FreshResult::failure(FreshStatus::CorruptData, "duplicate restore manifest model");
+		}
+	}
+	return FreshResult::success("restore manifest valid");
 }
 
 FreshResult FreshValidateRestoreSnapshot(
@@ -106,12 +163,236 @@ FreshResult FreshValidateRestoreSnapshot(
 		return FreshResult::failure(FreshStatus::CorruptData, "restore snapshot records are missing");
 	}
 	const uint64_t declaredCount = payload["recordCount"].as<uint64_t>();
-	const size_t actualCount = payload[arrayName].as<JsonArrayConst>().size();
-	if (declaredCount > SIZE_MAX || static_cast<size_t>(declaredCount) != actualCount ||
-	    actualCount != expectedRecordCount) {
+	JsonArrayConst records = payload[arrayName].as<JsonArrayConst>();
+	if (declaredCount > SIZE_MAX || static_cast<size_t>(declaredCount) != records.size() ||
+	    records.size() != expectedRecordCount) {
 		return FreshResult::failure(FreshStatus::CorruptData, "restore snapshot record count mismatch");
 	}
+
+	std::set<std::string> documentIds;
+	for (JsonVariantConst record : records) {
+		if (!record.is<JsonObjectConst>()) {
+			return FreshResult::failure(FreshStatus::CorruptData, "restore snapshot record is not an object");
+		}
+		if (type == FreshModelType::General) {
+			const char *id = record["_id"] | "";
+			if (*id == '\0' || !documentIds.insert(id).second) {
+				return FreshResult::failure(FreshStatus::CorruptData, "invalid restore snapshot document id");
+			}
+		}
+	}
 	return FreshResult::success("restore snapshot valid");
+}
+
+FreshResult FreshEncodeRestorePayload(
+    const JsonDocument &payload,
+    size_t maxBytes,
+    const char *label,
+    FreshBuffer &encoded
+) {
+	FreshResult valid = FreshValidateJsonDocument(payload, label);
+	if (!valid) return valid;
+	const size_t payloadBytes = measureMsgPack(payload);
+	if (payloadBytes == 0 || payloadBytes > maxBytes ||
+	    payloadBytes > FreshMaxPersistedPayloadBytes || payloadBytes > UINT32_MAX) {
+		return FreshResult::failure(FreshStatus::SizeLimitExceeded, "restore payload size limit exceeded");
+	}
+	if (!encoded.allocate(payloadBytes, FreshAllocationCategory::DurableSlotPayload)) {
+		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate restore payload");
+	}
+	if (serializeMsgPack(payload, encoded.data(), encoded.size()) != encoded.size()) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to serialize restore payload");
+	}
+	return FreshResult::success("restore payload encoded");
+}
+
+FreshRestoreSlotVerification FreshVerifyExactRestoreSlot(
+    const std::string &path,
+    uint64_t expectedGeneration,
+    const FreshBuffer &expected
+) {
+	File input = LittleFS.open(path.c_str(), "r");
+	if (!input) return FreshRestoreSlotVerification::Unavailable;
+
+	uint32_t magic = 0;
+	uint16_t version = 0;
+	uint64_t generation = 0;
+	uint32_t payloadSize = 0;
+	uint32_t expectedChecksum = 0;
+	const bool headerOk = FreshReadU32(input, magic) && FreshReadU16(input, version) &&
+	                      FreshReadU64(input, generation) && FreshReadU32(input, payloadSize) &&
+	                      FreshReadU32(input, expectedChecksum);
+	if (!headerOk || magic != FreshSlotMagic || version != FreshSlotVersion ||
+	    generation != expectedGeneration || payloadSize != expected.size() ||
+	    input.available() != static_cast<int>(payloadSize)) {
+		input.close();
+		return FreshRestoreSlotVerification::Invalid;
+	}
+
+	uint32_t checksum = 2166136261u;
+	uint8_t buffer[256];
+	size_t offset = 0;
+	while (offset < expected.size()) {
+		const size_t remaining = expected.size() - offset;
+		const size_t chunkSize = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+		const int read = input.read(buffer, chunkSize);
+		if (read != static_cast<int>(chunkSize)) {
+			input.close();
+			return FreshRestoreSlotVerification::Invalid;
+		}
+		for (size_t i = 0; i < chunkSize; ++i) {
+			if (buffer[i] != expected.data()[offset + i]) {
+				input.close();
+				return FreshRestoreSlotVerification::Invalid;
+			}
+			checksum ^= buffer[i];
+			checksum *= 16777619u;
+		}
+		offset += chunkSize;
+	}
+	const bool trailing = input.available() != 0;
+	input.close();
+	if (trailing || checksum != expectedChecksum || checksum != FreshChecksum(expected.data(), expected.size())) {
+		return FreshRestoreSlotVerification::Invalid;
+	}
+	return FreshRestoreSlotVerification::Exact;
+}
+
+FreshResult FreshProbeRestoreManifestSlot(
+    const std::string &path,
+    FreshRestoreSlotProbe &probe
+) {
+	probe = FreshRestoreSlotProbe();
+	probe.exists = LittleFS.exists(path.c_str());
+	if (!probe.exists) return FreshResult::success("manifest slot missing");
+
+	File input = LittleFS.open(path.c_str(), "r");
+	if (!input) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open manifest slot");
+	}
+	uint32_t magic = 0;
+	uint16_t version = 0;
+	uint64_t generation = 0;
+	uint32_t payloadSize = 0;
+	uint32_t checksum = 0;
+	const bool headerOk = FreshReadU32(input, magic) && FreshReadU16(input, version) &&
+	                      FreshReadU64(input, generation) && FreshReadU32(input, payloadSize) &&
+	                      FreshReadU32(input, checksum);
+	if (!headerOk || magic != FreshSlotMagic || version != FreshSlotVersion || payloadSize == 0 ||
+	    payloadSize > FreshMaxPersistedPayloadBytes || input.available() != static_cast<int>(payloadSize)) {
+		input.close();
+		return FreshResult::success("manifest slot invalid");
+	}
+
+	FreshBuffer bytes;
+	if (!bytes.allocate(payloadSize, FreshAllocationCategory::DurableSlotPayload)) {
+		input.close();
+		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate manifest probe payload");
+	}
+	const int read = input.read(bytes.data(), bytes.size());
+	const bool trailing = input.available() != 0;
+	input.close();
+	if (read != static_cast<int>(bytes.size()) || trailing ||
+	    FreshChecksum(bytes.data(), bytes.size()) != checksum) {
+		return FreshResult::success("manifest slot invalid");
+	}
+
+	JsonDocument manifest(&FreshJsonAllocator());
+	DeserializationError decode = deserializeMsgPack(manifest, bytes.data(), bytes.size());
+	if (decode || manifest.overflowed()) {
+		if (decode == DeserializationError::NoMemory || manifest.overflowed()) {
+			return FreshResult::failure(FreshStatus::OutOfMemory, "failed to decode manifest probe");
+		}
+		return FreshResult::success("manifest slot invalid");
+	}
+	FreshResult valid = FreshValidateRestoreManifest(manifest);
+	if (!valid) return FreshResult::success("manifest slot invalid");
+	probe.valid = true;
+	probe.generation = generation;
+	return FreshResult::success("manifest slot valid");
+}
+
+FreshResult FreshCommitRestoreManifest(
+    const std::string &rootPath,
+    const JsonDocument &manifest,
+    FreshRestoreManifestCommitState &commitState
+) {
+	commitState = FreshRestoreManifestCommitState::NotCommitted;
+	FreshResult valid = FreshValidateRestoreManifest(manifest);
+	if (!valid) return valid;
+
+	FreshBuffer encoded;
+	FreshResult encodedResult = FreshEncodeRestorePayload(
+	    manifest,
+	    FreshMaxPersistedPayloadBytes,
+	    "restore manifest",
+	    encoded
+	);
+	if (!encodedResult) return encodedResult;
+
+	const std::string slotA = FreshRestoreDurableSlotPath(rootPath, FreshManifestFile, 'a');
+	const std::string slotB = FreshRestoreDurableSlotPath(rootPath, FreshManifestFile, 'b');
+	FreshRestoreSlotProbe probeA;
+	FreshRestoreSlotProbe probeB;
+	FreshResult probeResult = FreshProbeRestoreManifestSlot(slotA, probeA);
+	if (!probeResult) return probeResult;
+	probeResult = FreshProbeRestoreManifestSlot(slotB, probeB);
+	if (!probeResult) return probeResult;
+
+	const bool anyExisting = probeA.exists || probeB.exists;
+	if (anyExisting && !probeA.valid && !probeB.valid) {
+		return FreshResult::failure(FreshStatus::CorruptData, "no valid manifest slot before restore");
+	}
+	uint64_t currentGeneration = 0;
+	if (probeA.valid && probeA.generation > currentGeneration) currentGeneration = probeA.generation;
+	if (probeB.valid && probeB.generation > currentGeneration) currentGeneration = probeB.generation;
+	if (currentGeneration == UINT64_MAX) {
+		return FreshResult::failure(FreshStatus::InternalError, "manifest generation overflow");
+	}
+	const uint64_t nextGeneration = currentGeneration + 1;
+	const char targetSlot = nextGeneration % 2 == 0 ? 'a' : 'b';
+	const std::string targetPath = targetSlot == 'a' ? slotA : slotB;
+
+	File output = LittleFS.open(targetPath.c_str(), "w");
+	if (!output) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open restore manifest slot");
+	}
+	FreshWriteU32(output, FreshSlotMagic);
+	FreshWriteU16(output, FreshSlotVersion);
+	FreshWriteU64(output, nextGeneration);
+	FreshWriteU32(output, static_cast<uint32_t>(encoded.size()));
+	FreshWriteU32(output, FreshChecksum(encoded.data(), encoded.size()));
+	const size_t written = output.write(encoded.data(), encoded.size());
+	output.flush();
+	output.close();
+
+	const FreshRestoreSlotVerification verification = FreshVerifyExactRestoreSlot(
+	    targetPath,
+	    nextGeneration,
+	    encoded
+	);
+	if (verification == FreshRestoreSlotVerification::Exact) {
+		commitState = FreshRestoreManifestCommitState::Committed;
+		return FreshResult::success("restore manifest committed");
+	}
+	if (verification == FreshRestoreSlotVerification::Invalid) {
+		commitState = FreshRestoreManifestCommitState::NotCommitted;
+		return FreshResult::failure(
+		    FreshStatus::FileSystemError,
+		    written == encoded.size()
+		        ? "restore manifest verification failed"
+		        : "restore manifest write was incomplete"
+		);
+	}
+
+	// The slot could be complete even though verification could not reopen it.
+	// Retaining staged snapshots is mandatory because reboot will resolve which
+	// manifest generation is valid.
+	commitState = FreshRestoreManifestCommitState::Unknown;
+	return FreshResult::failure(
+	    FreshStatus::FileSystemError,
+	    "restore manifest commit could not be verified; reboot required"
+	);
 }
 
 FreshResult FreshWriteRestoreSnapshot(
@@ -130,19 +411,14 @@ FreshResult FreshWriteRestoreSnapshot(
 	);
 	if (!semanticResult) return semanticResult;
 
-	const size_t payloadBytes = measureMsgPack(payload);
-	if (payloadBytes == 0 || payloadBytes > maxSnapshotBytes ||
-	    payloadBytes > FreshMaxPersistedPayloadBytes || payloadBytes > UINT32_MAX) {
-		return FreshResult::failure(FreshStatus::SizeLimitExceeded, "restore snapshot size limit exceeded");
-	}
-
 	FreshBuffer encoded;
-	if (!encoded.allocate(payloadBytes, FreshAllocationCategory::DurableSlotPayload)) {
-		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate restore snapshot payload");
-	}
-	if (serializeMsgPack(payload, encoded.data(), encoded.size()) != encoded.size()) {
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to serialize restore snapshot");
-	}
+	FreshResult encodedResult = FreshEncodeRestorePayload(
+	    payload,
+	    maxSnapshotBytes,
+	    "restore snapshot",
+	    encoded
+	);
+	if (!encodedResult) return encodedResult;
 
 	if (LittleFS.exists(modelPath.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "restore storage path already exists");
@@ -151,7 +427,7 @@ FreshResult FreshWriteRestoreSnapshot(
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create restore storage directory");
 	}
 
-	const std::string slotPath = FreshRestoreSlotPath(modelPath, 'b');
+	const std::string slotPath = FreshRestoreSnapshotSlotPath(modelPath, 'b');
 	File output = LittleFS.open(slotPath.c_str(), "w");
 	if (!output) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open restore snapshot slot");
@@ -167,55 +443,10 @@ FreshResult FreshWriteRestoreSnapshot(
 	if (written != encoded.size()) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write restore snapshot");
 	}
-
-	File input = LittleFS.open(slotPath.c_str(), "r");
-	if (!input) {
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to reopen restore snapshot");
+	if (FreshVerifyExactRestoreSlot(slotPath, 1, encoded) != FreshRestoreSlotVerification::Exact) {
+		return FreshResult::failure(FreshStatus::CorruptData, "restore snapshot verification failed");
 	}
-	uint32_t magic = 0;
-	uint16_t version = 0;
-	uint64_t generation = 0;
-	uint32_t storedSize = 0;
-	uint32_t storedChecksum = 0;
-	const bool headerOk = FreshReadU32(input, magic) && FreshReadU16(input, version) &&
-	                      FreshReadU64(input, generation) && FreshReadU32(input, storedSize) &&
-	                      FreshReadU32(input, storedChecksum);
-	if (!headerOk || magic != FreshSlotMagic || version != FreshSlotVersion || generation != 1 ||
-	    storedSize != encoded.size() || input.available() != static_cast<int>(storedSize)) {
-		input.close();
-		return FreshResult::failure(FreshStatus::CorruptData, "invalid restore snapshot slot");
-	}
-
-	FreshBuffer verifiedBytes;
-	if (!verifiedBytes.allocate(storedSize, FreshAllocationCategory::DurableSlotPayload)) {
-		input.close();
-		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate restore verification payload");
-	}
-	const size_t read = input.read(verifiedBytes.data(), verifiedBytes.size());
-	const bool trailing = input.available() != 0;
-	input.close();
-	if (read != verifiedBytes.size() || trailing) {
-		return FreshResult::failure(FreshStatus::CorruptData, "truncated restore snapshot slot");
-	}
-	if (FreshChecksum(verifiedBytes.data(), verifiedBytes.size()) != storedChecksum) {
-		return FreshResult::failure(FreshStatus::CorruptData, "restore snapshot checksum mismatch");
-	}
-
-	JsonDocument verified(&FreshJsonAllocator());
-	DeserializationError decode = deserializeMsgPack(
-	    verified,
-	    verifiedBytes.data(),
-	    verifiedBytes.size()
-	);
-	if (decode || verified.overflowed()) {
-		return FreshResult::failure(
-		    decode == DeserializationError::NoMemory || verified.overflowed()
-		        ? FreshStatus::OutOfMemory
-		        : FreshStatus::CorruptData,
-		    "failed to decode restore snapshot"
-		);
-	}
-	return FreshValidateRestoreSnapshot(verified, storageId, type, expectedRecordCount);
+	return FreshResult::success("restore snapshot written");
 }
 
 #if defined(FRESH_TESTING)
@@ -264,8 +495,8 @@ FreshResult Fresh::restoreBackup(Stream &input, const FreshRestoreOptions &optio
 		}
 	}
 
-	// The current registry must be fully durable before it can contribute
-	// preserved models to the transactional manifest.
+	// Preserved and protected states keep their existing storage IDs, so the
+	// current registry must be fully durable before restore planning begins.
 	FreshResult syncResult = forceSync();
 	if (!syncResult) return syncResult;
 
@@ -479,12 +710,7 @@ FreshResult Fresh::restoreBackup(Stream &input, const FreshRestoreOptions &optio
 		if (!jsonResult) return jsonResult;
 		jsonResult = FreshJsonSet(modelObject["name"], entry.second->name, manifest, "manifest model name");
 		if (!jsonResult) return jsonResult;
-		jsonResult = FreshJsonSet(
-		    modelObject["storageId"],
-		    entry.second->storageId,
-		    manifest,
-		    "manifest storage id"
-		);
+		jsonResult = FreshJsonSet(modelObject["storageId"], entry.second->storageId, manifest, "manifest storage id");
 		if (!jsonResult) return jsonResult;
 		jsonResult = FreshJsonSet(
 		    modelObject["type"],
@@ -494,7 +720,7 @@ FreshResult Fresh::restoreBackup(Stream &input, const FreshRestoreOptions &optio
 		);
 		if (!jsonResult) return jsonResult;
 	}
-	jsonResult = FreshValidateJsonDocument(manifest, "restore manifest");
+	jsonResult = FreshValidateRestoreManifest(manifest);
 	if (!jsonResult) return jsonResult;
 
 	size_t requiredBytes = 0;
@@ -614,9 +840,10 @@ FreshResult Fresh::restoreBackup(Stream &input, const FreshRestoreOptions &optio
 			retiredRevisions.push_back(nextRevision);
 		}
 
-		FreshResult manifestResult = writeManifest(manifest);
+		FreshRestoreManifestCommitState commitState = FreshRestoreManifestCommitState::NotCommitted;
+		FreshResult manifestResult = FreshCommitRestoreManifest(_rootPath, manifest, commitState);
 		if (!manifestResult) {
-			cleanupStaged();
+			if (commitState == FreshRestoreManifestCommitState::NotCommitted) cleanupStaged();
 			return manifestResult;
 		}
 		if (FreshRestoreShouldFail(FreshRestoreTestFailurePoint::AfterManifestCommit)) {
