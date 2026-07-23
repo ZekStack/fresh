@@ -202,6 +202,18 @@ struct FreshBackupMetadata {
 	std::vector<FreshBackupModelMetadata> models;
 };
 
+enum class FreshRestoreMode : uint8_t {
+	ReplaceSelected,
+	ReplaceAll,
+};
+
+struct FreshRestoreOptions {
+	// ReplaceSelected preserves models that are absent from the archive.
+	// ReplaceAll removes absent models unless they are explicitly protected.
+	FreshRestoreMode mode = FreshRestoreMode::ReplaceSelected;
+	std::vector<std::string> protectedModels;
+};
+
 struct FreshStorageInfo {
 	size_t totalBytes = 0;
 	size_t usedBytes = 0;
@@ -403,7 +415,13 @@ class Fresh {
 	    FreshBackupMetadata &metadata
 	) const;
 	FreshResult backupImport(Stream &input);
+	FreshResult backupImport(Stream &input, const FreshRestoreOptions &options);
 	FreshResult backupImport(const uint8_t *data, size_t length);
+	FreshResult backupImport(
+	    const uint8_t *data,
+	    size_t length,
+	    const FreshRestoreOptions &options
+	);
 
 	void onSync(FreshSyncCallback callback);
 	void onEvent(FreshEventCallback callback);
