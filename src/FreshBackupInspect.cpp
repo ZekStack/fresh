@@ -1,6 +1,7 @@
 #include "Fresh.h"
 #include "internal/FreshBackupArchive.h"
 #include "internal/FreshBackupFormat.h"
+#include "internal/FreshCooperativeStream.h"
 #include "internal/FreshInternal.h"
 
 #include <utility>
@@ -26,7 +27,13 @@ FreshResult Fresh::inspectBackup(Stream &input, FreshBackupMetadata &metadata) c
 
 	FreshBackupArchiveVisitor visitor;
 	FreshBackupMetadata parsed;
-	FreshResult result = FreshReadBackupArchive(input, maxDocumentBytes, visitor, parsed);
+	FreshCooperativeStream cooperativeInput(input);
+	FreshResult result = FreshReadBackupArchive(
+	    cooperativeInput,
+	    maxDocumentBytes,
+	    visitor,
+	    parsed
+	);
 	if (!result) {
 		metadata = FreshBackupMetadata();
 		return result;
