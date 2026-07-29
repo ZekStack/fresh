@@ -19,6 +19,8 @@ class FreshFile final : public Stream {
 	FreshFile(FreshFile &&other) noexcept;
 	FreshFile &operator=(FreshFile &&other) noexcept;
 
+	using Print::write;
+
 	explicit operator bool() const {
 		return _file != nullptr;
 	}
