@@ -63,6 +63,7 @@ class FreshFile final : public Stream {
 
 	FreshResult sync();
 	FreshResult close();
+	FreshResult syncAndClose();
 
   private:
 	friend class FreshStorage;
