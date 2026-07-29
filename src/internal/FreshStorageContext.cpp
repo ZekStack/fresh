@@ -58,9 +58,13 @@ FreshFile FreshStorageFileSystem::open(const char *path, const char *mode) const
 }
 
 bool FreshStorageFileSystem::exists(const char *path) const {
-	if (FreshActiveStorage == nullptr) return false;
+	if (FreshActiveStorage == nullptr) return true;
 	bool result = false;
-	return FreshActiveStorage->exists(path, result) && result;
+	FreshResult existsResult = FreshActiveStorage->exists(path, result);
+	// Existing persistence code treats false as proven absence. On backend
+	// failure, conservatively report present so the following open/read fails
+	// instead of creating an empty database or deleting uncertain storage.
+	return !existsResult || result;
 }
 
 bool FreshStorageFileSystem::mkdir(const char *path) const {

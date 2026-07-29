@@ -270,3 +270,9 @@ FreshResult FreshFile::close() {
 	if (storage != nullptr) storage->releaseFileHandle();
 	return result;
 }
+
+FreshResult FreshFile::syncAndClose() {
+	FreshResult syncResult = sync();
+	FreshResult closeResult = close();
+	return syncResult ? closeResult : syncResult;
+}

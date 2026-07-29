@@ -269,11 +269,12 @@ FreshResult writeDurableSlot(
 	FreshWriteU32(file, static_cast<uint32_t>(bytes.size()));
 	FreshWriteU32(file, FreshChecksum(bytes.data(), bytes.size()));
 	const size_t written = file.write(bytes.data(), bytes.size());
-	file.flush();
-	file.close();
-	if (written != bytes.size()) {
+	const bool writeFailed = file.getWriteError() != 0;
+	FreshResult durabilityResult = file.syncAndClose();
+	if (writeFailed || written != bytes.size()) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write durable slot");
 	}
+	if (!durabilityResult) return durabilityResult;
 
 	JsonDocument verified(&FreshJsonAllocator());
 	uint64_t verifiedGeneration = 0;
@@ -358,12 +359,13 @@ FreshResult FreshWriteJournalRecord(const FreshModelSyncBatch &batch, const Fres
 	FreshWriteU32(file, static_cast<uint32_t>(record.payload.size()));
 	FreshWriteU32(file, FreshChecksum(record.payload.data(), record.payload.size()));
 	const size_t written = file.write(record.payload.data(), record.payload.size());
-	file.flush();
-	file.close();
+	const bool writeFailed = file.getWriteError() != 0;
+	FreshResult durabilityResult = file.syncAndClose();
 
-	if (written != record.payload.size()) {
+	if (writeFailed || written != record.payload.size()) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write journal");
 	}
+	if (!durabilityResult) return durabilityResult;
 	return FreshResult::success("journal record written");
 }
 
@@ -498,7 +500,7 @@ FreshResult Fresh::checkFreeSpace(size_t requiredBytes) const {
 	const size_t used = FreshFS.usedBytes();
 	const size_t freeBytes = total > used ? total - used : 0;
 	if (freeBytes < _config.minFreeBytes || freeBytes - _config.minFreeBytes < requiredBytes) {
-		return FreshResult::failure(FreshStatus::StorageFull, "not enough LittleFS space");
+		return FreshResult::failure(FreshStatus::StorageFull, "not enough storage space");
 	}
 	return FreshResult::success();
 }

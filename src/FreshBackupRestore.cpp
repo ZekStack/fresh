@@ -367,8 +367,8 @@ FreshResult FreshCommitRestoreManifest(
 	FreshWriteU32(output, static_cast<uint32_t>(encoded.size()));
 	FreshWriteU32(output, FreshChecksum(encoded.data(), encoded.size()));
 	const size_t written = output.write(encoded.data(), encoded.size());
-	output.flush();
-	output.close();
+	const bool writeFailed = output.getWriteError() != 0;
+	FreshResult durabilityResult = output.syncAndClose();
 
 	const FreshRestoreSlotVerification verification = FreshVerifyExactRestoreSlot(
 	    targetPath,
@@ -376,6 +376,13 @@ FreshResult FreshCommitRestoreManifest(
 	    encoded
 	);
 	if (verification == FreshRestoreSlotVerification::Exact) {
+		if (writeFailed || written != encoded.size() || !durabilityResult) {
+			commitState = FreshRestoreManifestCommitState::Unknown;
+			return FreshResult::failure(
+			    FreshStatus::FileSystemError,
+			    "restore manifest durability could not be confirmed; reboot required"
+			);
+		}
 		commitState = FreshRestoreManifestCommitState::Committed;
 		return FreshResult::success("restore manifest committed");
 	}
@@ -383,7 +390,7 @@ FreshResult FreshCommitRestoreManifest(
 		commitState = FreshRestoreManifestCommitState::NotCommitted;
 		return FreshResult::failure(
 		    FreshStatus::FileSystemError,
-		    written == encoded.size()
+		    !writeFailed && written == encoded.size() && durabilityResult
 		        ? "restore manifest verification failed"
 		        : "restore manifest write was incomplete"
 		);
@@ -442,11 +449,12 @@ FreshResult FreshWriteRestoreSnapshot(
 	FreshWriteU32(output, static_cast<uint32_t>(encoded.size()));
 	FreshWriteU32(output, FreshChecksum(encoded.data(), encoded.size()));
 	const size_t written = output.write(encoded.data(), encoded.size());
-	output.flush();
-	output.close();
-	if (written != encoded.size()) {
+	const bool writeFailed = output.getWriteError() != 0;
+	FreshResult durabilityResult = output.syncAndClose();
+	if (writeFailed || written != encoded.size()) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write restore snapshot");
 	}
+	if (!durabilityResult) return durabilityResult;
 	if (FreshVerifyExactRestoreSlot(slotPath, 1, encoded) != FreshRestoreSlotVerification::Exact) {
 		return FreshResult::failure(FreshStatus::CorruptData, "restore snapshot verification failed");
 	}
