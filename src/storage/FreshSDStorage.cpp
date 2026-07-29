@@ -6,7 +6,6 @@
 #include <driver/sdspi_host.h>
 #include <esp_err.h>
 #include <esp_vfs_fat.h>
-#include <soc/soc_caps.h>
 #endif
 
 #include <climits>
@@ -100,9 +99,10 @@ FreshResult FreshSDStorage::mountSPI() {
 	);
 	_nativeError = static_cast<int>(mounted);
 	if (mounted != ESP_OK) {
-		releaseManagedSPIBus();
 		_card = nullptr;
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to mount SDSPI storage");
+		FreshResult released = releaseManagedSPIBus();
+		if (!released) return released;
+		return FreshResult::failure(FreshStatus::StorageUnavailable, "failed to mount SDSPI storage");
 	}
 	return FreshResult::success("SDSPI storage mounted");
 #endif
@@ -116,11 +116,6 @@ FreshResult FreshSDStorage::mountSDMMC() {
 }
 
 FreshResult FreshSDStorage::unmount() {
-	if (!isMounted()) {
-		releaseManagedSPIBus();
-		setState(FreshStorageState::Uninitialized);
-		return FreshResult::success("SD storage not mounted");
-	}
 	FreshResult canUnmount = validateCanUnmount();
 	if (!canUnmount) return canUnmount;
 
@@ -128,28 +123,21 @@ FreshResult FreshSDStorage::unmount() {
 	setState(FreshStorageState::Error);
 	return FreshResult::failure(FreshStatus::UnsupportedOperation, "SD storage requires ESP32");
 #else
-	setState(FreshStorageState::Unmounting);
-	if (_card == nullptr) {
-		setState(FreshStorageState::Error);
-		return FreshResult::failure(FreshStatus::InternalError, "SD card handle is missing");
-	}
-	esp_err_t unmounted = esp_vfs_fat_sdcard_unmount(mountPath(), _card);
-	_nativeError = static_cast<int>(unmounted);
-	if (unmounted != ESP_OK) {
-		setState(FreshStorageState::Error);
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to unmount SD storage");
-	}
-	_card = nullptr;
-
-	if (_config.interface == FreshSDInterface::SPI &&
-	    _config.spi.busOwnership == FreshSPIBusOwnership::Managed && _spiBusInitialized) {
-		esp_err_t released = spi_bus_free(_config.spi.host);
-		_nativeError = static_cast<int>(released);
-		if (released != ESP_OK) {
+	if (_card != nullptr) {
+		setState(FreshStorageState::Unmounting);
+		esp_err_t unmounted = esp_vfs_fat_sdcard_unmount(mountPath(), _card);
+		_nativeError = static_cast<int>(unmounted);
+		if (unmounted != ESP_OK) {
 			setState(FreshStorageState::Error);
-			return FreshResult::failure(FreshStatus::FileSystemError, "failed to release SDSPI bus");
+			return FreshResult::failure(FreshStatus::FileSystemError, "failed to unmount SD storage");
 		}
-		_spiBusInitialized = false;
+		_card = nullptr;
+	}
+
+	FreshResult released = releaseManagedSPIBus();
+	if (!released) {
+		setState(FreshStorageState::Error);
+		return released;
 	}
 
 	setState(FreshStorageState::Uninitialized);
@@ -158,12 +146,20 @@ FreshResult FreshSDStorage::unmount() {
 #endif
 }
 
-void FreshSDStorage::releaseManagedSPIBus() {
-#if defined(ESP32)
-	if (_config.spi.busOwnership != FreshSPIBusOwnership::Managed || !_spiBusInitialized) return;
+FreshResult FreshSDStorage::releaseManagedSPIBus() {
+#if !defined(ESP32)
+	return FreshResult::success("SDSPI bus not configured");
+#else
+	if (_config.spi.busOwnership != FreshSPIBusOwnership::Managed || !_spiBusInitialized) {
+		return FreshResult::success("SDSPI bus not owned");
+	}
 	esp_err_t released = spi_bus_free(_config.spi.host);
 	_nativeError = static_cast<int>(released);
-	if (released == ESP_OK) _spiBusInitialized = false;
+	if (released != ESP_OK) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to release SDSPI bus");
+	}
+	_spiBusInitialized = false;
+	return FreshResult::success("SDSPI bus released");
 #endif
 }
 
