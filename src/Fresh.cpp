@@ -2,6 +2,7 @@
 #include "internal/FreshInternal.h"
 #include "internal/FreshMemory.h"
 #include "internal/FreshStorageFactory.h"
+#include "internal/FreshStorageContext.h"
 
 #include <algorithm>
 #include <ctime>
@@ -126,16 +127,6 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 	FreshResult configResult = validateConfig(config);
 	if (!configResult) return configResult;
 
-	// The SD backend and VFS file layer are implemented, but the persistence
-	// engine still has direct Arduino LittleFS calls. Keep SD unavailable until
-	// every journal, snapshot, manifest, restore, and GC path is migrated.
-	if (config.storageType != FreshStorageType::LittleFS) {
-		return FreshResult::failure(
-		    FreshStatus::UnsupportedOperation,
-		    "selected storage backend is not connected to the persistence engine yet"
-		);
-	}
-
 	FreshLock lock(*_mutex);
 	if (!lock) {
 		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
@@ -209,6 +200,7 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 		resetInitState();
 		return storageMounted;
 	}
+	FreshStorageScope storageScope(_storage.get());
 
 	const size_t backupBytes = std::max<size_t>(_config.backupBufferSize, 512);
 	if (!_backup->buffer.allocate(backupBytes, FreshAllocationCategory::BackupBuffer)) {

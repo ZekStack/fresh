@@ -2,7 +2,11 @@
 #include "internal/FreshInternal.h"
 #include "internal/FreshMemory.h"
 
-#include <LittleFS.h>
+#include "FreshFile.h"
+#include "internal/FreshStorageContext.h"
+
+#define File FreshFile
+#define LittleFS FreshCurrentFileSystem()
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -968,6 +972,10 @@ FreshResult Fresh::recordToJson(const FreshPendingRecord &record, JsonDocument &
 }
 
 FreshResult Fresh::syncDirty(bool force) {
+	if (!_storage || !_storage->isMounted()) {
+		return FreshResult::failure(FreshStatus::StorageUnavailable, "storage is unavailable");
+	}
+	FreshStorageScope storageScope(_storage.get());
 	FreshLock syncLock(*_syncMutex);
 	if (!syncLock) {
 		return FreshResult::failure(FreshStatus::InternalError, "failed to lock sync");

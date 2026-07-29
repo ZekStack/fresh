@@ -167,7 +167,7 @@ FreshGarbageCollectionManifestSlot FreshReadGarbageCollectionManifestSlot(
 			    FreshStatus::CorruptData,
 			    "failed to decode garbage collection manifest"
 			);
-n		}
+		}
 		return slot;
 	}
 

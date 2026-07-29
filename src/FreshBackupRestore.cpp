@@ -5,7 +5,11 @@
 #include "internal/FreshInternal.h"
 #include "internal/FreshMemory.h"
 
-#include <LittleFS.h>
+#include "FreshFile.h"
+#include "internal/FreshStorageContext.h"
+
+#define File FreshFile
+#define LittleFS FreshCurrentFileSystem()
 
 #include <cstring>
 #include <functional>
@@ -489,11 +493,14 @@ FreshResult Fresh::restoreBackup(Stream &input, const FreshRestoreOptions &optio
 	{
 		FreshLock lock(*_mutex);
 		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		if (!_initialized || !_storage || !_storage->isMounted()) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
 		if (_stopping || _lifecycle != Lifecycle::Running) {
 			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
 		}
 	}
+	FreshStorageScope storageScope(_storage.get());
 
 	// Preserved and protected states keep their existing storage IDs, so the
 	// current registry must be fully durable before restore planning begins.
