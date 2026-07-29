@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <new>
 #include <set>
 #include <string>
 #include <vector>
@@ -36,6 +37,7 @@ class MemoryFileBackend final : public FreshFileBackend {
 	int read(uint8_t *buffer, size_t size) override {
 		if (!_open || buffer == nullptr) return -1;
 		const size_t count = std::min(size, _bytes.size() - std::min(_position, _bytes.size()));
+		if (count == 0) return 0;
 		std::copy_n(_bytes.data() + _position, count, buffer);
 		_position += count;
 		return static_cast<int>(count);
@@ -167,7 +169,7 @@ class MemoryStorage final : public FreshStorage {
 		}
 		if (found == _files.end()) found = _files.emplace(path, std::vector<uint8_t>()).first;
 		if (mode == FreshOpenMode::Write) found->second.clear();
-		backend.reset(new MemoryFileBackend(found->second, mode));
+		backend.reset(new (std::nothrow) MemoryFileBackend(found->second, mode));
 		return backend ? FreshResult::success("memory file opened")
 		               : FreshResult::failure(FreshStatus::OutOfMemory, "memory file allocation failed");
 	}
@@ -255,6 +257,14 @@ void require(bool condition, const char *message) {
 	Serial.print("FAILED: ");
 	Serial.println(message);
 	while (true) delay(1000);
+}
+
+void require(const FreshResult &result, const char *message) {
+	require(static_cast<bool>(result), message);
+}
+
+void require(const FreshModelResult &result, const char *message) {
+	require(static_cast<bool>(result), message);
 }
 
 } // namespace
