@@ -6,22 +6,17 @@
 Fresh database;
 
 FreshResult writeBackupArchive(const char* archivePath) {
-    FreshStorage* storage = database.storage();
-    if (storage == nullptr) {
-        return FreshResult::failure(
-            FreshStatus::NotInitialized,
-            "database storage is unavailable"
-        );
-    }
-
-    FreshResult directory = storage->createDirectory("/backups");
-    if (!directory) return directory;
-
     FreshFile archive;
-    FreshResult opened = storage->open(
-        archivePath,
-        FreshOpenMode::Write,
-        archive
+    FreshResult opened = database.withStorage(
+        [&](FreshStorage& storage) -> FreshResult {
+            FreshResult directory = storage.createDirectory("/backups");
+            if (!directory) return directory;
+            return storage.open(
+                archivePath,
+                FreshOpenMode::Write,
+                archive
+            );
+        }
     );
     if (!opened) return opened;
 
