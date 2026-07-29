@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -17,10 +18,12 @@ struct FreshResult;
 struct FreshStorageInfo;
 class Fresh;
 class FreshFile;
+class FreshFileBackend;
 
 enum class FreshStorageType : uint8_t {
 	LittleFS,
 	SD,
+	Custom,
 };
 
 enum class FreshStorageState : uint8_t {
@@ -111,6 +114,9 @@ struct FreshDirectoryEntry {
 	size_t size = 0;
 };
 
+// Storage lifecycle is controlled by Fresh. Custom backends may override the
+// file and directory primitives directly, so they are not required to use VFS.
+// Backends that mount into ESP-IDF VFS can inherit the default implementations.
 class FreshStorage {
   public:
 	virtual ~FreshStorage() = default;
@@ -147,15 +153,34 @@ class FreshStorage {
 
 	virtual const char *name() const = 0;
 	virtual FreshStorageInfo info() const = 0;
+	virtual int nativeError() const {
+		return 0;
+	}
 
   protected:
 	friend class Fresh;
 	friend class FreshFile;
 
-	FreshStorage(FreshStorageType type, const char *mountPath);
+	explicit FreshStorage(FreshStorageType type, const char *mountPath = nullptr);
 
 	virtual FreshResult mount() = 0;
 	virtual FreshResult unmount() = 0;
+
+	// Default implementations resolve the logical path below mountPath() and
+	// use ESP-IDF VFS/POSIX. Custom backends may override every primitive.
+	virtual FreshResult openBackend(
+	    const char *logicalPath,
+	    FreshOpenMode mode,
+	    std::unique_ptr<FreshFileBackend> &backend
+	);
+	virtual FreshResult existsBackend(const char *logicalPath, bool &result) const;
+	virtual FreshResult createDirectoryBackend(const char *logicalPath);
+	virtual FreshResult removeFileBackend(const char *logicalPath);
+	virtual FreshResult removeDirectoryBackend(const char *logicalPath);
+	virtual FreshResult listDirectoryBackend(
+	    const char *logicalPath,
+	    std::vector<FreshDirectoryEntry> &entries
+	) const;
 
 	FreshResult validateCanUnmount() const;
 	FreshResult resolvePath(const char *logicalPath, std::string &resolvedPath) const;
