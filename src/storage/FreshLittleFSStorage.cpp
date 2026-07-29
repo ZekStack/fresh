@@ -6,7 +6,9 @@
 #include <limits>
 
 FreshLittleFSStorage::FreshLittleFSStorage(const FreshLittleFSConfig &config)
-    : FreshStorage(FreshStorageType::LittleFS), _config(config) {
+    : FreshStorage(FreshStorageType::LittleFS, config.mountPath),
+      _config(config),
+      _partitionLabel(config.partitionLabel != nullptr ? config.partitionLabel : "") {
 }
 
 const char *FreshLittleFSStorage::name() const {
@@ -17,11 +19,11 @@ FreshResult FreshLittleFSStorage::mount() {
 	if (isMounted()) {
 		return FreshResult::success("LittleFS already mounted");
 	}
-	if (_config.mountPath == nullptr || *_config.mountPath == '\0') {
+	if (*mountPath() == '\0' || mountPath()[0] != '/') {
 		setState(FreshStorageState::Error);
-		return FreshResult::failure(FreshStatus::InvalidArgument, "LittleFS mount path is required");
+		return FreshResult::failure(FreshStatus::InvalidArgument, "LittleFS mount path is invalid");
 	}
-	if (_config.partitionLabel == nullptr || *_config.partitionLabel == '\0') {
+	if (_partitionLabel.empty()) {
 		setState(FreshStorageState::Error);
 		return FreshResult::failure(FreshStatus::InvalidArgument, "LittleFS partition label is required");
 	}
@@ -34,9 +36,9 @@ FreshResult FreshLittleFSStorage::mount() {
 	setState(FreshStorageState::Mounting);
 	if (!LittleFS.begin(
 	        _config.formatOnMountFailure,
-	        _config.mountPath,
+	        mountPath(),
 	        static_cast<uint8_t>(_config.maxOpenFiles),
-	        _config.partitionLabel
+	        _partitionLabel.c_str()
 	    )) {
 		setState(FreshStorageState::Error);
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to mount LittleFS storage");
@@ -51,6 +53,8 @@ FreshResult FreshLittleFSStorage::unmount() {
 		setState(FreshStorageState::Uninitialized);
 		return FreshResult::success("LittleFS storage not mounted");
 	}
+	FreshResult canUnmount = validateCanUnmount();
+	if (!canUnmount) return canUnmount;
 
 	setState(FreshStorageState::Unmounting);
 	LittleFS.end();
