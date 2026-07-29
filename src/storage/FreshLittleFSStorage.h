@@ -17,8 +17,9 @@ class FreshLittleFSStorage final : public FreshStorage {
   private:
 	FreshResult mount() override;
 	FreshResult unmount() override;
+	FreshResult readInfoBackend(FreshStorageInfo &result) const override;
 
 	FreshLittleFSConfig _config;
 	std::string _partitionLabel;
-	int _nativeError = 0;
+	mutable int _nativeError = 0;
 };

@@ -581,17 +581,22 @@ void Fresh::emitSync(FreshResult result) {
 }
 
 FreshStorageInfo Fresh::storageInfo() const {
+	FreshStorageInfo result;
+	storageInfo(result);
+	return result;
+}
+
+FreshResult Fresh::storageInfo(FreshStorageInfo &result) const {
 	FreshLock lock(*_mutex);
-	FreshStorageInfo info;
-	if (!_storage) return info;
-	info = _storage->info();
-	info.type = _storage->type();
-	info.state = _storage->state();
-	info.name = _storage->name() != nullptr ? _storage->name() : "";
-	info.mountPath = _storage->mountPath() != nullptr ? _storage->mountPath() : "";
-	info.nativeError = _storage->nativeError();
-	info.openFileCount = _storage->openFileCount();
-	return info;
+	if (!lock) {
+		result = FreshStorageInfo();
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+	}
+	if (!_storage) {
+		result = FreshStorageInfo();
+		return FreshResult::failure(FreshStatus::NotInitialized, "database storage is not initialized");
+	}
+	return _storage->readInfo(result);
 }
 
 FreshStorage *Fresh::storage() {

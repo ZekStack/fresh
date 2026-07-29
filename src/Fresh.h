@@ -437,6 +437,7 @@ class Fresh {
 	FreshResult forceSync();
 
 	FreshStorageInfo storageInfo() const;
+	FreshResult storageInfo(FreshStorageInfo &result) const;
 	FreshStorage *storage();
 	const FreshStorage *storage() const;
 	FreshDiagnostics diagnostics() const;

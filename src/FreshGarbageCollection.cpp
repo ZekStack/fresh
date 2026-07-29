@@ -329,9 +329,15 @@ FreshResult FreshCollectGarbageStorage(
 			continue;
 		}
 
-		const size_t usedBefore = storage->info().usedBytes;
+		FreshStorageInfo beforeInfo;
+		FreshResult beforeInfoResult = storage->readInfo(beforeInfo);
+		if (!beforeInfoResult) return beforeInfoResult;
 		const bool removed = FreshRemoveGarbageCollectionTree(*storage, candidate);
-		const size_t usedAfter = storage->info().usedBytes;
+		FreshStorageInfo afterInfo;
+		FreshResult afterInfoResult = storage->readInfo(afterInfo);
+		if (!afterInfoResult) return afterInfoResult;
+		const size_t usedBefore = beforeInfo.usedBytes;
+		const size_t usedAfter = afterInfo.usedBytes;
 		if (usedBefore > usedAfter) {
 			const size_t reclaimed = usedBefore - usedAfter;
 			if (reclaimed > std::numeric_limits<size_t>::max() - result.reclaimedBytes) {

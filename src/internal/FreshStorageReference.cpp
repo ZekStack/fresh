@@ -87,6 +87,10 @@ int FreshStorageReference::nativeError() const {
 	return _target.nativeError();
 }
 
+FreshResult FreshStorageReference::readInfoBackend(FreshStorageInfo &result) const {
+	return _target.readInfo(result);
+}
+
 FreshResult FreshStorageReference::mount() {
 	if (!_target.isMounted()) {
 		setState(FreshStorageState::Error);

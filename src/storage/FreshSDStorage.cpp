@@ -237,16 +237,30 @@ FreshResult FreshSDStorage::releaseManagedSPIBus() {
 }
 
 FreshStorageInfo FreshSDStorage::info() const {
-	FreshStorageInfo info;
-#if defined(ESP32)
-	if (!isMounted()) return info;
+	FreshStorageInfo result;
+	readInfoBackend(result);
+	return result;
+}
+
+FreshResult FreshSDStorage::readInfoBackend(FreshStorageInfo &result) const {
+	result = FreshStorageInfo();
+#if !defined(ESP32)
+	return FreshResult::failure(FreshStatus::UnsupportedOperation, "SD storage requires ESP32");
+#else
+	if (!isMounted()) {
+		return FreshResult::failure(FreshStatus::StorageUnavailable, "SD storage is not mounted");
+	}
 	uint64_t totalBytes = 0;
 	uint64_t freeBytes = 0;
-	if (esp_vfs_fat_info(mountPath(), &totalBytes, &freeBytes) != ESP_OK) return info;
+	const esp_err_t queried = esp_vfs_fat_info(mountPath(), &totalBytes, &freeBytes);
+	_nativeError = static_cast<int>(queried);
+	if (queried != ESP_OK) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to query SD storage");
+	}
 	const uint64_t maxSize = static_cast<uint64_t>(std::numeric_limits<size_t>::max());
-	info.totalBytes = static_cast<size_t>(totalBytes > maxSize ? maxSize : totalBytes);
-	info.freeBytes = static_cast<size_t>(freeBytes > maxSize ? maxSize : freeBytes);
-	info.usedBytes = info.totalBytes > info.freeBytes ? info.totalBytes - info.freeBytes : 0;
+	result.totalBytes = static_cast<size_t>(totalBytes > maxSize ? maxSize : totalBytes);
+	result.freeBytes = static_cast<size_t>(freeBytes > maxSize ? maxSize : freeBytes);
+	result.usedBytes = result.totalBytes > result.freeBytes ? result.totalBytes - result.freeBytes : 0;
+	return FreshResult::success("SD storage information read");
 #endif
-	return info;
 }

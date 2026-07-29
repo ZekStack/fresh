@@ -223,6 +223,32 @@ FreshResult FreshStorage::listDirectoryBackend(
 	return FreshResult::success("storage directory listed", entries.size());
 }
 
+FreshResult FreshStorage::readInfo(FreshStorageInfo &result) const {
+	result = FreshStorageInfo();
+	if (!isMounted()) {
+		result.type = type();
+		result.state = state();
+		result.name = name() != nullptr ? name() : "";
+		result.mountPath = mountPath() != nullptr ? mountPath() : "";
+		result.nativeError = nativeError();
+		result.openFileCount = openFileCount();
+		return FreshResult::failure(FreshStatus::StorageUnavailable, "storage is not mounted");
+	}
+	FreshResult infoResult = readInfoBackend(result);
+	result.type = type();
+	result.state = state();
+	result.name = name() != nullptr ? name() : "";
+	result.mountPath = mountPath() != nullptr ? mountPath() : "";
+	result.nativeError = nativeError();
+	result.openFileCount = openFileCount();
+	return infoResult;
+}
+
+FreshResult FreshStorage::readInfoBackend(FreshStorageInfo &result) const {
+	result = info();
+	return FreshResult::success("storage information read");
+}
+
 FreshResult FreshStorage::validateCanUnmount() const {
 	if (openFileCount() != 0) {
 		return FreshResult::failure(FreshStatus::Busy, "storage still has open files", openFileCount());

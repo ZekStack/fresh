@@ -15,6 +15,7 @@ class FreshStorageReference final : public FreshStorage {
   private:
 	FreshResult mount() override;
 	FreshResult unmount() override;
+	FreshResult readInfoBackend(FreshStorageInfo &result) const override;
 	FreshResult openBackend(
 	    const char *logicalPath,
 	    FreshOpenMode mode,

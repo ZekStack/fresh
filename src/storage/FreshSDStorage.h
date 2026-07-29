@@ -19,6 +19,7 @@ class FreshSDStorage final : public FreshStorage {
   private:
 	FreshResult mount() override;
 	FreshResult unmount() override;
+	FreshResult readInfoBackend(FreshStorageInfo &result) const override;
 	FreshResult mountSPI();
 	FreshResult mountSDMMC();
 	FreshResult releaseManagedSPIBus();
@@ -28,5 +29,5 @@ class FreshSDStorage final : public FreshStorage {
 	sdmmc_card_t *_card = nullptr;
 #endif
 	bool _spiBusInitialized = false;
-	int _nativeError = 0;
+	mutable int _nativeError = 0;
 };

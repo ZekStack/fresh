@@ -99,20 +99,33 @@ FreshResult FreshLittleFSStorage::unmount() {
 }
 
 FreshStorageInfo FreshLittleFSStorage::info() const {
-	FreshStorageInfo info;
-#if defined(ESP32)
-	if (!isMounted()) return info;
+	FreshStorageInfo result;
+	readInfoBackend(result);
+	return result;
+}
+
+FreshResult FreshLittleFSStorage::readInfoBackend(FreshStorageInfo &result) const {
+	result = FreshStorageInfo();
+#if !defined(ESP32)
+	return FreshResult::failure(FreshStatus::UnsupportedOperation, "LittleFS backend requires ESP32");
+#else
+	if (!isMounted()) {
+		return FreshResult::failure(FreshStatus::StorageUnavailable, "LittleFS storage is not mounted");
+	}
 	size_t totalBytes = 0;
 	size_t usedBytes = 0;
-	const esp_err_t result = esp_littlefs_info(
+	const esp_err_t queried = esp_littlefs_info(
 	    _partitionLabel.c_str(),
 	    &totalBytes,
 	    &usedBytes
 	);
-	if (result != ESP_OK) return info;
-	info.totalBytes = totalBytes;
-	info.usedBytes = usedBytes;
-	info.freeBytes = totalBytes > usedBytes ? totalBytes - usedBytes : 0;
+	_nativeError = static_cast<int>(queried);
+	if (queried != ESP_OK) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to query LittleFS storage");
+	}
+	result.totalBytes = totalBytes;
+	result.usedBytes = usedBytes;
+	result.freeBytes = totalBytes > usedBytes ? totalBytes - usedBytes : 0;
+	return FreshResult::success("LittleFS storage information read");
 #endif
-	return info;
 }

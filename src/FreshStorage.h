@@ -153,6 +153,7 @@ class FreshStorage {
 
 	virtual const char *name() const = 0;
 	virtual FreshStorageInfo info() const = 0;
+	FreshResult readInfo(FreshStorageInfo &result) const;
 	virtual int nativeError() const {
 		return 0;
 	}
@@ -168,6 +169,7 @@ class FreshStorage {
 
 	// Default implementations resolve the logical path below mountPath() and
 	// use ESP-IDF VFS/POSIX. Custom backends may override every primitive.
+	virtual FreshResult readInfoBackend(FreshStorageInfo &result) const;
 	virtual FreshResult openBackend(
 	    const char *logicalPath,
 	    FreshOpenMode mode,
