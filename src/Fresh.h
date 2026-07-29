@@ -405,6 +405,16 @@ class Fresh {
 	Fresh &operator=(const Fresh &) = delete;
 
 	FreshResult init(const char *dbPath, const FreshConfig &config = FreshConfig());
+	FreshResult init(
+	    const char *dbPath,
+	    std::unique_ptr<FreshStorage> storage,
+	    const FreshConfig &config = FreshConfig()
+	);
+	FreshResult init(
+	    const char *dbPath,
+	    FreshStorage &storage,
+	    const FreshConfig &config = FreshConfig()
+	);
 	FreshResult deinit(const FreshDeinitOptions &options = FreshDeinitOptions());
 
 	FreshModel model(const char *modelName);
@@ -495,6 +505,11 @@ class Fresh {
 	void emitSync(FreshResult result);
 
 	FreshResult validateConfig(const FreshConfig &config) const;
+	FreshResult initWithStorage(
+	    const char *dbPath,
+	    const FreshConfig &config,
+	    std::unique_ptr<FreshStorage> suppliedStorage
+	);
 	std::string modelPath(const std::string &storageId) const;
 	std::string modelFile(const std::string &storageId, const char *fileName) const;
 	FreshResult ensureDir(const std::string &path);

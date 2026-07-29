@@ -2,6 +2,7 @@
 #include "internal/FreshInternal.h"
 #include "internal/FreshMemory.h"
 #include "internal/FreshStorageFactory.h"
+#include "internal/FreshStorageReference.h"
 #include "internal/FreshStorageContext.h"
 
 #include <algorithm>
@@ -112,15 +113,63 @@ FreshResult Fresh::validateConfig(const FreshConfig &config) const {
 		);
 	}
 
-	FreshLittleFSConfig littleFS = config.littleFS;
-	if (config.eraseOnFileSystemFailure) littleFS.formatOnMountFailure = true;
-	FreshResult storageConfig = FreshValidateStorageConfig(config.storageType, littleFS, config.sd);
-	if (!storageConfig) return storageConfig;
+	if (config.storageType != FreshStorageType::Custom) {
+		FreshLittleFSConfig littleFS = config.littleFS;
+		if (config.eraseOnFileSystemFailure) littleFS.formatOnMountFailure = true;
+		FreshResult storageConfig = FreshValidateStorageConfig(config.storageType, littleFS, config.sd);
+		if (!storageConfig) return storageConfig;
+	}
 
 	return FreshResult::success("configuration valid");
 }
 
 FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
+	if (config.storageType == FreshStorageType::Custom) {
+		return FreshResult::failure(
+		    FreshStatus::InvalidArgument,
+		    "custom storage requires a storage instance"
+		);
+	}
+	return initWithStorage(dbPath, config, nullptr);
+}
+
+FreshResult Fresh::init(
+    const char *dbPath,
+    std::unique_ptr<FreshStorage> storage,
+    const FreshConfig &config
+) {
+	if (!storage) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "custom storage is required");
+	}
+	FreshConfig effectiveConfig = config;
+	effectiveConfig.storageType = FreshStorageType::Custom;
+	return initWithStorage(dbPath, effectiveConfig, std::move(storage));
+}
+
+FreshResult Fresh::init(
+    const char *dbPath,
+    FreshStorage &storage,
+    const FreshConfig &config
+) {
+	std::unique_ptr<FreshStorage> reference(
+	    new (std::nothrow) FreshStorageReference(storage)
+	);
+	if (!reference) {
+		return FreshResult::failure(
+		    FreshStatus::OutOfMemory,
+		    "failed to allocate custom storage reference"
+		);
+	}
+	FreshConfig effectiveConfig = config;
+	effectiveConfig.storageType = FreshStorageType::Custom;
+	return initWithStorage(dbPath, effectiveConfig, std::move(reference));
+}
+
+FreshResult Fresh::initWithStorage(
+    const char *dbPath,
+    const FreshConfig &config,
+    std::unique_ptr<FreshStorage> suppliedStorage
+) {
 	if (dbPath == nullptr || *dbPath == '\0') {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "db path is required");
 	}
@@ -185,15 +234,19 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 	_databaseRevision = 1;
 	xSemaphoreTake(_syncTaskExited, 0);
 
-	FreshResult storageCreated = FreshCreateStorage(
-	    _config.storageType,
-	    _config.littleFS,
-	    _config.sd,
-	    _storage
-	);
-	if (!storageCreated) {
-		resetInitState();
-		return storageCreated;
+	if (suppliedStorage) {
+		_storage = std::move(suppliedStorage);
+	} else {
+		FreshResult storageCreated = FreshCreateStorage(
+		    _config.storageType,
+		    _config.littleFS,
+		    _config.sd,
+		    _storage
+		);
+		if (!storageCreated) {
+			resetInitState();
+			return storageCreated;
+		}
 	}
 	FreshResult storageMounted = _storage->mount();
 	if (!storageMounted) {
