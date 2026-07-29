@@ -4,6 +4,10 @@
 #include "../storage/FreshLittleFSStorage.h"
 #include "../storage/FreshSDStorage.h"
 
+#if defined(ESP32)
+#include <soc/soc_caps.h>
+#endif
+
 #include <climits>
 #include <limits>
 #include <new>
@@ -16,6 +20,10 @@ bool FreshValidMountPath(const char *path) {
 		if (*cursor == '\\') return false;
 	}
 	return true;
+}
+
+bool FreshValidAllocationUnit(size_t size) {
+	return size >= 512 && size <= 64 * 1024 && (size & (size - 1)) == 0;
 }
 
 FreshResult FreshValidateLittleFSConfig(const FreshLittleFSConfig &config) {
@@ -39,8 +47,11 @@ FreshResult FreshValidateSDConfig(const FreshSDConfig &config) {
 	if (config.maxOpenFiles == 0 || config.maxOpenFiles > static_cast<size_t>(INT_MAX)) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "SD max open files is out of range");
 	}
-	if (config.allocationUnitSize == 0 || config.allocationUnitSize > 128 * 1024) {
-		return FreshResult::failure(FreshStatus::InvalidArgument, "SD allocation unit size is out of range");
+	if (!FreshValidAllocationUnit(config.allocationUnitSize)) {
+		return FreshResult::failure(
+		    FreshStatus::InvalidArgument,
+		    "SD allocation unit must be a power of two between 512 and 65536 bytes"
+		);
 	}
 
 	switch (config.interface) {
@@ -61,8 +72,47 @@ FreshResult FreshValidateSDConfig(const FreshSDConfig &config) {
 		}
 		return FreshResult::success("SDSPI configuration valid");
 
-	case FreshSDInterface::SDMMC:
-		return FreshResult::success("SDMMC configuration accepted for later mount validation");
+	case FreshSDInterface::SDMMC: {
+#if defined(ESP32) && defined(SOC_SDMMC_HOST_SUPPORTED) && SOC_SDMMC_HOST_SUPPORTED
+		if (config.sdmmc.slot < 0) {
+			return FreshResult::failure(FreshStatus::InvalidArgument, "SDMMC slot is invalid");
+		}
+		const bool customPins = config.sdmmc.clockPin != GPIO_NUM_NC ||
+		                        config.sdmmc.commandPin != GPIO_NUM_NC ||
+		                        config.sdmmc.data0Pin != GPIO_NUM_NC ||
+		                        config.sdmmc.data1Pin != GPIO_NUM_NC ||
+		                        config.sdmmc.data2Pin != GPIO_NUM_NC ||
+		                        config.sdmmc.data3Pin != GPIO_NUM_NC;
+		if (customPins) {
+#if defined(SOC_SDMMC_USE_GPIO_MATRIX) && SOC_SDMMC_USE_GPIO_MATRIX
+			if (config.sdmmc.clockPin == GPIO_NUM_NC ||
+			    config.sdmmc.commandPin == GPIO_NUM_NC ||
+			    config.sdmmc.data0Pin == GPIO_NUM_NC) {
+				return FreshResult::failure(
+				    FreshStatus::InvalidArgument,
+				    "custom SDMMC pins require clock, command, and data0"
+				);
+			}
+			if (!config.sdmmc.oneBitMode &&
+			    (config.sdmmc.data1Pin == GPIO_NUM_NC || config.sdmmc.data2Pin == GPIO_NUM_NC ||
+			     config.sdmmc.data3Pin == GPIO_NUM_NC)) {
+				return FreshResult::failure(
+				    FreshStatus::InvalidArgument,
+				    "four-bit SDMMC requires data1, data2, and data3"
+				);
+			}
+#else
+			return FreshResult::failure(
+			    FreshStatus::UnsupportedOperation,
+			    "target SDMMC host does not support custom GPIO routing"
+			);
+#endif
+		}
+		return FreshResult::success("SDMMC configuration valid");
+#else
+		return FreshResult::failure(FreshStatus::UnsupportedOperation, "target does not support SDMMC host");
+#endif
+	}
 	}
 	return FreshResult::failure(FreshStatus::InvalidArgument, "unknown SD interface");
 }
@@ -77,6 +127,11 @@ FreshResult FreshValidateStorageConfig(
 	switch (type) {
 	case FreshStorageType::LittleFS: return FreshValidateLittleFSConfig(littleFS);
 	case FreshStorageType::SD: return FreshValidateSDConfig(sd);
+	case FreshStorageType::Custom:
+		return FreshResult::failure(
+		    FreshStatus::InvalidArgument,
+		    "custom storage must be supplied through a custom-storage init overload"
+		);
 	}
 	return FreshResult::failure(FreshStatus::UnsupportedOperation, "unknown storage type");
 }
@@ -98,6 +153,11 @@ FreshResult FreshCreateStorage(
 	case FreshStorageType::SD:
 		storage.reset(new (std::nothrow) FreshSDStorage(sd));
 		break;
+	case FreshStorageType::Custom:
+		return FreshResult::failure(
+		    FreshStatus::InvalidArgument,
+		    "custom storage cannot be created by the built-in storage factory"
+		);
 	}
 	if (!storage) {
 		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate storage backend");
