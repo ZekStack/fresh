@@ -2,6 +2,8 @@
 
 #include "../FreshStorage.h"
 
+#include <string>
+
 class FreshLittleFSStorage final : public FreshStorage {
   public:
 	explicit FreshLittleFSStorage(const FreshLittleFSConfig &config);
@@ -14,4 +16,5 @@ class FreshLittleFSStorage final : public FreshStorage {
 	FreshResult unmount() override;
 
 	FreshLittleFSConfig _config;
+	std::string _partitionLabel;
 };
