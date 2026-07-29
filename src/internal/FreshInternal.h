@@ -1,67 +1,38 @@
 #pragma once
 
 #include "../Fresh.h"
-#include "FreshMemory.h"
+#include "FreshBuffer.h"
+#include "FreshMutex.h"
 
-#include <cstddef>
-#include <cstdint>
+#include <cstring>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
-constexpr uint16_t FreshManifestVersion = 1;
-constexpr uint32_t FreshSlotMagic = 0x46525348;
+constexpr uint32_t FreshJournalMagic = 0x4c4a5246; // FRJL
+constexpr uint16_t FreshJournalVersion = 3;
+constexpr size_t FreshJournalHeaderSize = 4 + 2 + 1 + 1 + 4 + 4;
+constexpr uint32_t FreshSlotMagic = 0x544c5346; // FSLT
 constexpr uint16_t FreshSlotVersion = 1;
-constexpr uint32_t FreshJournalMagic = 0x4A524E4C;
-constexpr uint8_t FreshJournalVersion = 1;
-constexpr size_t FreshSlotHeaderSize = sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint64_t) +
-                                       sizeof(uint32_t) + sizeof(uint32_t);
-constexpr size_t FreshJournalHeaderSize = sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) +
-                                          sizeof(uint32_t);
+constexpr uint32_t FreshManifestVersion = 4;
+constexpr uint32_t FreshSnapshotVersion = 4;
+constexpr uint32_t FreshBackupVersion = 2;
+constexpr size_t FreshSlotHeaderSize = 4 + 2 + 8 + 4 + 4;
 constexpr size_t FreshMaxPersistedPayloadBytes = 1024 * 1024;
-constexpr size_t FreshMaxBackupBufferBytes = 256 * 1024;
-constexpr size_t FreshMaxBackupFrameBytes = FreshMaxPersistedPayloadBytes;
-constexpr size_t FreshMaxModelCount = 1024;
-constexpr size_t FreshMaxNameBytes = 128;
+constexpr size_t FreshMaxBackupBufferBytes = 1024 * 1024;
 constexpr const char *FreshManifestFile = "manifest";
 constexpr const char *FreshSnapshotFile = "snapshot";
 constexpr const char *FreshJournalFile = "journal.log";
 
-struct FreshMutex {
-	FreshMutex();
-	~FreshMutex();
-
-	FreshMutex(const FreshMutex &) = delete;
-	FreshMutex &operator=(const FreshMutex &) = delete;
-
-	SemaphoreHandle_t handle = nullptr;
-};
-
-class FreshLock {
-  public:
-	explicit FreshLock(FreshMutex &mutex, TickType_t timeout = portMAX_DELAY);
-	~FreshLock();
-
-	FreshLock(const FreshLock &) = delete;
-	FreshLock &operator=(const FreshLock &) = delete;
-
-	explicit operator bool() const {
-		return _locked;
-	}
-
-  private:
-	FreshMutex *_mutex = nullptr;
-	bool _locked = false;
-};
-
 enum class FreshJournalOp : uint8_t {
 	Create = 1,
-	Replace = 2,
-	Update = 3,
-	Delete = 4,
-	Append = 5,
+	Update = 2,
+	Delete = 3,
+	Append = 4,
 };
 
 struct FreshPendingRecord {
@@ -72,29 +43,53 @@ struct FreshPendingRecord {
 	size_t maxEntries = 0;
 };
 
+struct FreshSlotReadResult {
+	FreshResult result = FreshResult::success("slot missing");
+	JsonDocument payload;
+	uint64_t generation = 0;
+	bool hadCorruptSlot = false;
+	bool hadValidSlot = false;
+	bool missing = true;
+};
+
 struct FreshModel::State {
 	std::string name;
 	std::string storageId;
 	FreshModelType type = FreshModelType::General;
 	std::map<std::string, JsonDocument> docs;
 	std::deque<JsonDocument> streamEntries;
-	std::vector<FreshPendingRecord> pending;
+	std::deque<FreshPendingRecord> pending;
 	FreshResultValidator validator;
 	bool dirty = false;
-	bool snapshotRequired = false;
-	bool degraded = false;
 	bool dropped = false;
-	uint64_t generation = 0;
+	bool degraded = false;
+	bool snapshotRequired = false;
+	uint32_t recordsSinceSnapshot = 0;
+	size_t bytesSinceSnapshot = 0;
+	uint64_t checkpointSequence = 0;
 	uint64_t lastSequence = 0;
-	uint32_t journalRecordCount = 0;
-	size_t journalBytes = 0;
-	uint32_t storageEpoch = 0;
 	uint64_t revision = 1;
+	uint32_t storageEpoch = 0;
+};
+
+struct FreshBackupModelSnapshot {
+	std::shared_ptr<FreshModel::State> state;
+	std::string name;
+	FreshModelType type = FreshModelType::General;
+	uint64_t revision = 0;
+	uint64_t recordCount = 0;
+};
+
+struct FreshBackupPlan {
+	std::vector<FreshBackupModelSnapshot> models;
+	uint64_t databaseRevision = 0;
+	uint64_t recordCount = 0;
+	uint64_t totalBytes = 0;
 };
 
 struct FreshBackupRuntimeState {
-	FreshMutex mutex;
 	FreshBuffer buffer;
+	FreshBackupOptions options;
 	size_t head = 0;
 	size_t tail = 0;
 	size_t used = 0;
@@ -107,24 +102,63 @@ struct FreshBackupRuntimeState {
 	bool cancelled = false;
 	FreshBackupState state = FreshBackupState::NotRunning;
 	FreshResult result = FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
-	FreshBackupOptions options;
+	FreshMutex mutex;
 };
 
 inline FreshResult FreshJsonAllocationFailure(const char *label) {
-	std::string message = label != nullptr ? label : "json";
-	message += " allocation failed";
+	std::string message = "failed to construct ";
+	message += label != nullptr ? label : "json";
 	return FreshResult::failure(FreshStatus::OutOfMemory, message.c_str());
 }
 
-template <typename TDestination, typename TValue>
+template <typename TTarget, typename TValue>
 FreshResult FreshJsonSet(
-    TDestination destination,
+    TTarget target,
     const TValue &value,
     JsonDocument &document,
     const char *label
 ) {
-	destination.set(value);
-	if (document.overflowed()) return FreshJsonAllocationFailure(label);
+	using Value = std::decay_t<TValue>;
+	if constexpr (std::is_integral_v<Value>) {
+		if (label != nullptr && strcmp(label, "journal sequence") == 0) {
+			const uint64_t sequence = static_cast<uint64_t>(value);
+			if (sequence == 0 || sequence == std::numeric_limits<uint64_t>::max()) {
+				return FreshResult::failure(
+				    FreshStatus::InternalError,
+				    "journal sequence is exhausted"
+				);
+			}
+		}
+	}
+	if (!target.set(value) || document.overflowed()) {
+		return FreshJsonAllocationFailure(label);
+	}
+	return FreshResult::success();
+}
+
+template <typename TTarget>
+FreshResult FreshJsonCreateArray(
+    TTarget target,
+    JsonDocument &document,
+    JsonArray &array,
+    const char *label
+) {
+	array = target.template to<JsonArray>();
+	if (array.isNull() || document.overflowed()) {
+		return FreshJsonAllocationFailure(label);
+	}
+	return FreshResult::success();
+}
+
+inline FreshResult FreshJsonAdd(
+    JsonArray array,
+    JsonVariantConst value,
+    JsonDocument &document,
+    const char *label
+) {
+	if (!array.add(value) || document.overflowed()) {
+		return FreshJsonAllocationFailure(label);
+	}
 	return FreshResult::success();
 }
 
