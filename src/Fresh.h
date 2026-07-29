@@ -5,6 +5,7 @@
 #include <FS.h>
 #include <Print.h>
 #include <Stream.h>
+#include "FreshStorage.h"
 #include <functional>
 #include <initializer_list>
 #include <map>
@@ -24,6 +25,7 @@ enum class FreshStatus : uint8_t {
 	AlreadyInitialized,
 	InvalidArgument,
 	FileSystemError,
+	StorageUnavailable,
 	ModelExists,
 	ModelNotFound,
 	DocumentNotFound,
@@ -81,10 +83,16 @@ enum class FreshLoadStatus : uint8_t {
 };
 
 struct FreshConfig {
+	FreshStorageType storageType = FreshStorageType::LittleFS;
+	FreshLittleFSConfig littleFS;
+	FreshSDConfig sd;
+
 	uint32_t syncIntervalMS = 5000;
 	UBaseType_t syncTaskPriority = 1;
 	BaseType_t syncTaskCore = tskNO_AFFINITY;
 	uint32_t syncTaskStackSize = 8192;
+	// Deprecated compatibility option. When true, it enables
+	// littleFS.formatOnMountFailure for the default LittleFS backend.
 	bool eraseOnFileSystemFailure = false;
 	FreshCompressionType compressionType = FreshCompressionType::MessagePack;
 	FreshModelType defaultModelType = FreshModelType::General;
@@ -413,6 +421,8 @@ class Fresh {
 	FreshResult forceSync();
 
 	FreshStorageInfo storageInfo() const;
+	FreshStorage *storage();
+	const FreshStorage *storage() const;
 	FreshDiagnostics diagnostics() const;
 	FreshResult collectGarbage(FreshGarbageCollectionResult &result);
 
@@ -460,7 +470,7 @@ class Fresh {
 	const char *statusToString(FreshStatus status) const;
 
 	// Internal checked staging boundary shared by the model implementation.
-	// These are not application-level APIs and may change before v0.1.0.
+	// These are not application-level APIs and may change before v0.2.0.
 	FreshResult checkPayloadSize(size_t payloadBytes, size_t limit, const char *label) const;
 	FreshResult recordToJson(const FreshPendingRecord &record, JsonDocument &out);
 
@@ -509,6 +519,7 @@ class Fresh {
 
 	FreshConfig _config;
 	FreshDiagnostics _diagnostics;
+	std::unique_ptr<FreshStorage> _storage;
 	std::string _rootPath;
 	Lifecycle _lifecycle = Lifecycle::Uninitialized;
 	bool _initialized = false;
