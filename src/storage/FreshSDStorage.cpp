@@ -55,7 +55,7 @@ FreshResult FreshSDStorage::mountSPI() {
 	}
 
 	sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-	host.slot = _config.spi.host;
+	host.slot = static_cast<int>(_config.spi.host);
 	host.max_freq_khz = static_cast<int>(_config.spi.frequencyHz / 1000);
 	if (host.max_freq_khz <= 0) host.max_freq_khz = 1;
 
@@ -75,7 +75,8 @@ FreshResult FreshSDStorage::mountSPI() {
 		busConfig.quadhd_io_num = -1;
 		busConfig.max_transfer_sz = static_cast<int>(_config.allocationUnitSize);
 
-		esp_err_t initialized = spi_bus_initialize(host.slot, &busConfig, SPI_DMA_CH_AUTO);
+		esp_err_t initialized =
+		    spi_bus_initialize(_config.spi.host, &busConfig, SPI_DMA_CH_AUTO);
 		_nativeError = static_cast<int>(initialized);
 		if (initialized != ESP_OK) {
 			return FreshResult::failure(FreshStatus::FileSystemError, "failed to initialize SDSPI bus");
@@ -84,7 +85,7 @@ FreshResult FreshSDStorage::mountSPI() {
 	}
 
 	sdspi_device_config_t deviceConfig = SDSPI_DEVICE_CONFIG_DEFAULT();
-	deviceConfig.host_id = host.slot;
+	deviceConfig.host_id = _config.spi.host;
 	deviceConfig.gpio_cs = _config.spi.chipSelectPin;
 
 	esp_vfs_fat_sdmmc_mount_config_t mountConfig = {};
