@@ -378,6 +378,13 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 			}
 			return FreshResult::success("database not initialized");
 		}
+		if (_storage && _storage->openFileCount() != 0) {
+			return FreshResult::failure(
+			    FreshStatus::Busy,
+			    "storage still has open files",
+			    _storage->openFileCount()
+			);
+		}
 		if (_lifecycle == Lifecycle::Running) {
 			_lifecycle = Lifecycle::FinalSync;
 			_stopping = true;
@@ -575,7 +582,16 @@ void Fresh::emitSync(FreshResult result) {
 
 FreshStorageInfo Fresh::storageInfo() const {
 	FreshLock lock(*_mutex);
-	return _storage ? _storage->info() : FreshStorageInfo();
+	FreshStorageInfo info;
+	if (!_storage) return info;
+	info = _storage->info();
+	info.type = _storage->type();
+	info.state = _storage->state();
+	info.name = _storage->name() != nullptr ? _storage->name() : "";
+	info.mountPath = _storage->mountPath() != nullptr ? _storage->mountPath() : "";
+	info.nativeError = _storage->nativeError();
+	info.openFileCount = _storage->openFileCount();
+	return info;
 }
 
 FreshStorage *Fresh::storage() {

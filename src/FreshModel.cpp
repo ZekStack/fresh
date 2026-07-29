@@ -2,7 +2,9 @@
 #include "internal/FreshInternal.h"
 #include "internal/FreshMemory.h"
 
-#include <LittleFS.h>
+#include "internal/FreshStorageContext.h"
+
+#define LittleFS FreshCurrentFileSystem()
 
 #include <limits>
 #include <utility>
@@ -930,6 +932,14 @@ FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) 
 		if (_stopping || _lifecycle != Lifecycle::Running) {
 			return {.result = false, .status = FreshStatus::Busy, .message = "database is stopping"};
 		}
+		if (!_storage || !_storage->isMounted()) {
+			return {
+			    .result = false,
+			    .status = FreshStatus::StorageUnavailable,
+			    .message = "storage is unavailable"
+			};
+		}
+		FreshStorageScope storageScope(_storage.get());
 		auto existing = _models.find(modelName);
 		if (existing != _models.end()) {
 			if (existing->second->dropped) {

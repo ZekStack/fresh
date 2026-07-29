@@ -237,6 +237,12 @@ struct FreshGarbageCollectionDiagnostics {
 };
 
 struct FreshStorageInfo {
+	FreshStorageType type = FreshStorageType::LittleFS;
+	FreshStorageState state = FreshStorageState::Uninitialized;
+	std::string name;
+	std::string mountPath;
+	int nativeError = 0;
+	size_t openFileCount = 0;
 	size_t totalBytes = 0;
 	size_t usedBytes = 0;
 	size_t freeBytes = 0;
