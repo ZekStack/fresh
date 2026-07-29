@@ -2,14 +2,13 @@
 
 #include "Fresh.h"
 #include "FreshFile.h"
+#include "internal/FreshVFSFile.h"
 
 #include <cerrno>
-#include <cstdio>
 #include <cstring>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <utility>
 
 namespace {
 
@@ -31,15 +30,6 @@ bool FreshPathContainsTraversal(const char *path) {
 	return false;
 }
 
-const char *FreshOpenModeString(FreshOpenMode mode) {
-	switch (mode) {
-	case FreshOpenMode::Read: return "rb";
-	case FreshOpenMode::Write: return "wb";
-	case FreshOpenMode::Append: return "ab";
-	}
-	return nullptr;
-}
-
 } // namespace
 
 FreshStorage::FreshStorage(FreshStorageType type, const char *mountPath)
@@ -53,7 +43,10 @@ FreshResult FreshStorage::resolvePath(const char *logicalPath, std::string &reso
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
 	}
 	if (_mountPath.empty() || _mountPath.front() != '/') {
-		return FreshResult::failure(FreshStatus::InvalidArgument, "storage mount path is invalid");
+		return FreshResult::failure(
+		    FreshStatus::UnsupportedOperation,
+		    "storage backend does not provide default VFS path operations"
+		);
 	}
 	if (logicalPath == nullptr || *logicalPath == '\0' || logicalPath[0] != '/') {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "storage path must be absolute");
@@ -72,29 +65,78 @@ FreshResult FreshStorage::resolvePath(const char *logicalPath, std::string &reso
 }
 
 FreshResult FreshStorage::open(const char *path, FreshOpenMode mode, FreshFile &file) {
+	if (!isMounted()) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
+	}
 	if (file) {
 		return FreshResult::failure(FreshStatus::Busy, "destination file is already open");
 	}
-	std::string resolved;
-	FreshResult pathResult = resolvePath(path, resolved);
-	if (!pathResult) return pathResult;
-	const char *modeString = FreshOpenModeString(mode);
-	if (modeString == nullptr) {
-		return FreshResult::failure(FreshStatus::InvalidArgument, "unsupported file mode");
+	std::unique_ptr<FreshFileBackend> backend;
+	FreshResult result = openBackend(path, mode, backend);
+	if (!result) return result;
+	if (!backend || !backend->isOpen()) {
+		return FreshResult::failure(FreshStatus::InternalError, "storage backend returned an invalid file");
 	}
-	FILE *handle = fopen(resolved.c_str(), modeString);
-	if (handle == nullptr) {
-		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open storage file");
-	}
-	_openFileCount.fetch_add(1, std::memory_order_relaxed);
-	file.attach(handle, this);
+	_openFileCount.fetch_add(1);
+	file.attach(std::move(backend), this);
 	return FreshResult::success("storage file opened");
 }
 
 FreshResult FreshStorage::exists(const char *path, bool &result) const {
+	if (!isMounted()) {
+		result = false;
+		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
+	}
+	return existsBackend(path, result);
+}
+
+FreshResult FreshStorage::createDirectory(const char *path) {
+	if (!isMounted()) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
+	}
+	return createDirectoryBackend(path);
+}
+
+FreshResult FreshStorage::removeFile(const char *path) {
+	if (!isMounted()) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
+	}
+	return removeFileBackend(path);
+}
+
+FreshResult FreshStorage::removeDirectory(const char *path) {
+	if (!isMounted()) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
+	}
+	return removeDirectoryBackend(path);
+}
+
+FreshResult FreshStorage::listDirectory(
+    const char *path,
+    std::vector<FreshDirectoryEntry> &entries
+) const {
+	if (!isMounted()) {
+		entries.clear();
+		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
+	}
+	return listDirectoryBackend(path, entries);
+}
+
+FreshResult FreshStorage::openBackend(
+    const char *logicalPath,
+    FreshOpenMode mode,
+    std::unique_ptr<FreshFileBackend> &backend
+) {
+	std::string resolved;
+	FreshResult pathResult = resolvePath(logicalPath, resolved);
+	if (!pathResult) return pathResult;
+	return FreshOpenVFSFile(resolved.c_str(), mode, backend);
+}
+
+FreshResult FreshStorage::existsBackend(const char *logicalPath, bool &result) const {
 	result = false;
 	std::string resolved;
-	FreshResult pathResult = resolvePath(path, resolved);
+	FreshResult pathResult = resolvePath(logicalPath, resolved);
 	if (!pathResult) return pathResult;
 	struct stat status {};
 	if (stat(resolved.c_str(), &status) == 0) {
@@ -105,9 +147,9 @@ FreshResult FreshStorage::exists(const char *path, bool &result) const {
 	return FreshResult::failure(FreshStatus::FileSystemError, "failed to inspect storage path");
 }
 
-FreshResult FreshStorage::createDirectory(const char *path) {
+FreshResult FreshStorage::createDirectoryBackend(const char *logicalPath) {
 	std::string resolved;
-	FreshResult pathResult = resolvePath(path, resolved);
+	FreshResult pathResult = resolvePath(logicalPath, resolved);
 	if (!pathResult) return pathResult;
 	if (mkdir(resolved.c_str(), 0755) == 0) {
 		return FreshResult::success("storage directory created");
@@ -121,35 +163,33 @@ FreshResult FreshStorage::createDirectory(const char *path) {
 	return FreshResult::failure(FreshStatus::FileSystemError, "failed to create storage directory");
 }
 
-FreshResult FreshStorage::removeFile(const char *path) {
+FreshResult FreshStorage::removeFileBackend(const char *logicalPath) {
 	std::string resolved;
-	FreshResult pathResult = resolvePath(path, resolved);
+	FreshResult pathResult = resolvePath(logicalPath, resolved);
 	if (!pathResult) return pathResult;
-	if (unlink(resolved.c_str()) == 0) {
+	if (unlink(resolved.c_str()) == 0 || errno == ENOENT) {
 		return FreshResult::success("storage file removed");
 	}
-	if (errno == ENOENT) return FreshResult::success("storage file not found");
 	return FreshResult::failure(FreshStatus::FileSystemError, "failed to remove storage file");
 }
 
-FreshResult FreshStorage::removeDirectory(const char *path) {
+FreshResult FreshStorage::removeDirectoryBackend(const char *logicalPath) {
 	std::string resolved;
-	FreshResult pathResult = resolvePath(path, resolved);
+	FreshResult pathResult = resolvePath(logicalPath, resolved);
 	if (!pathResult) return pathResult;
-	if (rmdir(resolved.c_str()) == 0) {
+	if (rmdir(resolved.c_str()) == 0 || errno == ENOENT) {
 		return FreshResult::success("storage directory removed");
 	}
-	if (errno == ENOENT) return FreshResult::success("storage directory not found");
 	return FreshResult::failure(FreshStatus::FileSystemError, "failed to remove storage directory");
 }
 
-FreshResult FreshStorage::listDirectory(
-    const char *path,
+FreshResult FreshStorage::listDirectoryBackend(
+    const char *logicalPath,
     std::vector<FreshDirectoryEntry> &entries
 ) const {
 	entries.clear();
 	std::string resolved;
-	FreshResult pathResult = resolvePath(path, resolved);
+	FreshResult pathResult = resolvePath(logicalPath, resolved);
 	if (!pathResult) return pathResult;
 	DIR *directory = opendir(resolved.c_str());
 	if (directory == nullptr) {
@@ -168,11 +208,11 @@ FreshResult FreshStorage::listDirectory(
 			entries.clear();
 			return FreshResult::failure(FreshStatus::FileSystemError, "failed to inspect directory entry");
 		}
-		FreshDirectoryEntry result;
-		result.name = entry->d_name;
-		result.isDirectory = S_ISDIR(status.st_mode);
-		result.size = status.st_size > 0 ? static_cast<size_t>(status.st_size) : 0;
-		entries.push_back(std::move(result));
+		FreshDirectoryEntry item;
+		item.name = entry->d_name;
+		item.isDirectory = S_ISDIR(status.st_mode);
+		item.size = status.st_size > 0 ? static_cast<size_t>(status.st_size) : 0;
+		entries.push_back(std::move(item));
 	}
 	const int readError = errno;
 	const int closeError = closedir(directory);
@@ -184,13 +224,14 @@ FreshResult FreshStorage::listDirectory(
 }
 
 FreshResult FreshStorage::validateCanUnmount() const {
-	const size_t count = openFileCount();
-	if (count != 0) {
-		return FreshResult::failure(FreshStatus::Busy, "storage still has open files", count);
+	if (openFileCount() != 0) {
+		return FreshResult::failure(FreshStatus::Busy, "storage still has open files", openFileCount());
 	}
 	return FreshResult::success("storage can unmount");
 }
 
 void FreshStorage::releaseFileHandle() {
-	_openFileCount.fetch_sub(1, std::memory_order_relaxed);
+	size_t current = _openFileCount.load();
+	while (current != 0 && !_openFileCount.compare_exchange_weak(current, current - 1)) {
+	}
 }
