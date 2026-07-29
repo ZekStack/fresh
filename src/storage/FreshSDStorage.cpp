@@ -3,9 +3,11 @@
 #include "../Fresh.h"
 
 #if defined(ESP32)
+#include <driver/sdmmc_host.h>
 #include <driver/sdspi_host.h>
 #include <esp_err.h>
 #include <esp_vfs_fat.h>
+#include <soc/soc_caps.h>
 #endif
 
 #include <climits>
@@ -16,7 +18,7 @@ FreshSDStorage::FreshSDStorage(const FreshSDConfig &config)
 }
 
 const char *FreshSDStorage::name() const {
-	return "SD";
+	return _config.interface == FreshSDInterface::SPI ? "SDSPI" : "SDMMC";
 }
 
 FreshResult FreshSDStorage::mount() {
@@ -109,10 +111,79 @@ FreshResult FreshSDStorage::mountSPI() {
 }
 
 FreshResult FreshSDStorage::mountSDMMC() {
-	return FreshResult::failure(
-	    FreshStatus::UnsupportedOperation,
-	    "SDMMC storage is not implemented yet"
+#if !defined(ESP32)
+	return FreshResult::failure(FreshStatus::UnsupportedOperation, "SDMMC requires ESP32");
+#elif !defined(SOC_SDMMC_HOST_SUPPORTED) || !SOC_SDMMC_HOST_SUPPORTED
+	return FreshResult::failure(FreshStatus::UnsupportedOperation, "target does not support SDMMC host");
+#else
+	if (_config.sdmmc.slot < 0) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "SDMMC slot is invalid");
+	}
+
+	sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+	host.slot = _config.sdmmc.slot;
+
+	sdmmc_slot_config_t slotConfig = SDMMC_SLOT_CONFIG_DEFAULT();
+	slotConfig.width = _config.sdmmc.oneBitMode ? 1 : 4;
+
+	const bool customPins = _config.sdmmc.clockPin != GPIO_NUM_NC ||
+	                        _config.sdmmc.commandPin != GPIO_NUM_NC ||
+	                        _config.sdmmc.data0Pin != GPIO_NUM_NC ||
+	                        _config.sdmmc.data1Pin != GPIO_NUM_NC ||
+	                        _config.sdmmc.data2Pin != GPIO_NUM_NC ||
+	                        _config.sdmmc.data3Pin != GPIO_NUM_NC;
+	if (customPins) {
+#if defined(SOC_SDMMC_USE_GPIO_MATRIX) && SOC_SDMMC_USE_GPIO_MATRIX
+		if (_config.sdmmc.clockPin == GPIO_NUM_NC || _config.sdmmc.commandPin == GPIO_NUM_NC ||
+		    _config.sdmmc.data0Pin == GPIO_NUM_NC) {
+			return FreshResult::failure(
+			    FreshStatus::InvalidArgument,
+			    "custom SDMMC pins require clock, command, and data0"
+			);
+		}
+		if (!_config.sdmmc.oneBitMode &&
+		    (_config.sdmmc.data1Pin == GPIO_NUM_NC || _config.sdmmc.data2Pin == GPIO_NUM_NC ||
+		     _config.sdmmc.data3Pin == GPIO_NUM_NC)) {
+			return FreshResult::failure(
+			    FreshStatus::InvalidArgument,
+			    "four-bit SDMMC requires data1, data2, and data3"
+			);
+		}
+		slotConfig.clk = _config.sdmmc.clockPin;
+		slotConfig.cmd = _config.sdmmc.commandPin;
+		slotConfig.d0 = _config.sdmmc.data0Pin;
+		if (!_config.sdmmc.oneBitMode) {
+			slotConfig.d1 = _config.sdmmc.data1Pin;
+			slotConfig.d2 = _config.sdmmc.data2Pin;
+			slotConfig.d3 = _config.sdmmc.data3Pin;
+		}
+#else
+		return FreshResult::failure(
+		    FreshStatus::UnsupportedOperation,
+		    "target SDMMC host does not support custom GPIO routing"
+		);
+#endif
+	}
+
+	esp_vfs_fat_sdmmc_mount_config_t mountConfig = {};
+	mountConfig.format_if_mount_failed = _config.formatOnMountFailure;
+	mountConfig.max_files = static_cast<int>(_config.maxOpenFiles);
+	mountConfig.allocation_unit_size = _config.allocationUnitSize;
+
+	esp_err_t mounted = esp_vfs_fat_sdmmc_mount(
+	    mountPath(),
+	    &host,
+	    &slotConfig,
+	    &mountConfig,
+	    &_card
 	);
+	_nativeError = static_cast<int>(mounted);
+	if (mounted != ESP_OK) {
+		_card = nullptr;
+		return FreshResult::failure(FreshStatus::StorageUnavailable, "failed to mount SDMMC storage");
+	}
+	return FreshResult::success("SDMMC storage mounted");
+#endif
 }
 
 FreshResult FreshSDStorage::unmount() {
@@ -150,7 +221,8 @@ FreshResult FreshSDStorage::releaseManagedSPIBus() {
 #if !defined(ESP32)
 	return FreshResult::success("SDSPI bus not configured");
 #else
-	if (_config.spi.busOwnership != FreshSPIBusOwnership::Managed || !_spiBusInitialized) {
+	if (_config.interface != FreshSDInterface::SPI ||
+	    _config.spi.busOwnership != FreshSPIBusOwnership::Managed || !_spiBusInitialized) {
 		return FreshResult::success("SDSPI bus not owned");
 	}
 	esp_err_t released = spi_bus_free(_config.spi.host);
