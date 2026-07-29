@@ -114,6 +114,10 @@ class MemoryStorage final : public FreshStorage {
 		return FreshResult::success("memory storage detached");
 	}
 
+	void failNextInfoQuery() {
+		_failNextInfoQuery = true;
+	}
+
 	const char *name() const override {
 		return "MemoryStorage";
 	}
@@ -148,6 +152,19 @@ class MemoryStorage final : public FreshStorage {
 
 	FreshResult unmount() override {
 		return detach();
+	}
+
+	FreshResult readInfoBackend(FreshStorageInfo &result) const override {
+		if (_failNextInfoQuery) {
+			_failNextInfoQuery = false;
+			result = FreshStorageInfo();
+			return FreshResult::failure(
+			    FreshStatus::FileSystemError,
+			    "injected memory storage information failure"
+			);
+		}
+		result = info();
+		return FreshResult::success("memory storage information read");
 	}
 
 	FreshResult openBackend(
@@ -250,6 +267,7 @@ class MemoryStorage final : public FreshStorage {
 
 	std::map<std::string, std::vector<uint8_t>> _files;
 	std::set<std::string> _directories;
+	mutable bool _failNextInfoQuery = false;
 };
 
 void require(bool condition, const char *message) {
@@ -297,6 +315,44 @@ void setup() {
 		require(database.init("/fresh", storage), "reinitialize custom storage");
 		FreshResult found = database.model("settings").findById(documentId);
 		require(found && std::string(found.doc["name"] | "") == "custom-storage", "reload document");
+
+		FreshStorageInfo storageInfo;
+		storage.failNextInfoQuery();
+		FreshResult infoFailure = database.storageInfo(storageInfo);
+		require(
+		    !infoFailure && infoFailure.status == FreshStatus::FileSystemError,
+		    "propagate custom storage information failure"
+		);
+		require(database.storageInfo(storageInfo), "retry custom storage information");
+
+		FreshStorage *activeStorage = database.storage();
+		require(activeStorage != nullptr, "resolve custom storage view");
+		FreshFile forbidden;
+		FreshResult forbiddenOpen = activeStorage->open(
+		    "/fresh/forbidden.bin",
+		    FreshOpenMode::Write,
+		    forbidden
+		);
+		require(
+		    !forbiddenOpen && forbiddenOpen.status == FreshStatus::UnsupportedOperation,
+		    "protect custom database root"
+		);
+
+		require(activeStorage->createDirectory("/backups"), "create custom backup directory");
+		FreshFile archive;
+		require(
+		    activeStorage->open("/backups/custom.bin", FreshOpenMode::Write, archive),
+		    "open custom application file"
+		);
+		const uint8_t marker[] = {0x46, 0x52, 0x45, 0x53, 0x48};
+		require(archive.write(marker, sizeof(marker)) == sizeof(marker), "write custom application file");
+
+		FreshResult busy = database.deinit();
+		require(
+		    !busy && busy.status == FreshStatus::Busy,
+		    "custom storage deinit rejects open file"
+		);
+		require(archive.syncAndClose(), "close custom application file");
 		require(database.deinit(), "deinitialize second database");
 	}
 
