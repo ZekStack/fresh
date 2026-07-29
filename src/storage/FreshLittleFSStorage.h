@@ -10,6 +10,9 @@ class FreshLittleFSStorage final : public FreshStorage {
 
 	const char *name() const override;
 	FreshStorageInfo info() const override;
+	int nativeError() const override {
+		return _nativeError;
+	}
 
   private:
 	FreshResult mount() override;
@@ -17,4 +20,5 @@ class FreshLittleFSStorage final : public FreshStorage {
 
 	FreshLittleFSConfig _config;
 	std::string _partitionLabel;
+	int _nativeError = 0;
 };
