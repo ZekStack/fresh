@@ -44,6 +44,10 @@ FreshStorage *FreshCurrentStorage() {
 	return FreshActiveStorage;
 }
 
+bool FreshHasInternalStorageAccess(const FreshStorage *storage) {
+	return storage != nullptr && FreshActiveStorage == storage;
+}
+
 FreshStorage *FreshStorageFileSystem::storage() const {
 	return FreshActiveStorage;
 }

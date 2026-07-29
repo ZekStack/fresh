@@ -3,6 +3,7 @@
 #include "Fresh.h"
 #include "FreshFile.h"
 #include "internal/FreshVFSFile.h"
+#include "internal/FreshStorageContext.h"
 
 #include <cerrno>
 #include <cstring>
@@ -37,6 +38,35 @@ FreshStorage::FreshStorage(FreshStorageType type, const char *mountPath)
 	while (_mountPath.size() > 1 && _mountPath.back() == '/') _mountPath.pop_back();
 }
 
+void FreshStorage::setProtectedPath(const std::string &path) {
+	_protectedPath = path;
+	while (_protectedPath.size() > 1 && _protectedPath.back() == '/') {
+		_protectedPath.pop_back();
+	}
+}
+
+FreshResult FreshStorage::validatePathAccess(const char *path) const {
+	if (path == nullptr || *path == '\0') {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "storage path is required");
+	}
+	if (_protectedPath.empty() || FreshHasInternalStorageAccess(this)) {
+		return FreshResult::success("storage path allowed");
+	}
+	const std::string logicalPath(path);
+	const bool exact = logicalPath == _protectedPath;
+	const bool child = _protectedPath == "/" ||
+	                   (logicalPath.size() > _protectedPath.size() &&
+	                    logicalPath.compare(0, _protectedPath.size(), _protectedPath) == 0 &&
+	                    logicalPath[_protectedPath.size()] == '/');
+	if (exact || child) {
+		return FreshResult::failure(
+		    FreshStatus::UnsupportedOperation,
+		    "application access to the Fresh database root is forbidden"
+		);
+	}
+	return FreshResult::success("storage path allowed");
+}
+
 FreshResult FreshStorage::resolvePath(const char *logicalPath, std::string &resolvedPath) const {
 	resolvedPath.clear();
 	if (!isMounted()) {
@@ -65,6 +95,8 @@ FreshResult FreshStorage::resolvePath(const char *logicalPath, std::string &reso
 }
 
 FreshResult FreshStorage::open(const char *path, FreshOpenMode mode, FreshFile &file) {
+	FreshResult accessResult = validatePathAccess(path);
+	if (!accessResult) return accessResult;
 	if (!isMounted()) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
 	}
@@ -83,6 +115,8 @@ FreshResult FreshStorage::open(const char *path, FreshOpenMode mode, FreshFile &
 }
 
 FreshResult FreshStorage::exists(const char *path, bool &result) const {
+	FreshResult accessResult = validatePathAccess(path);
+	if (!accessResult) return accessResult;
 	if (!isMounted()) {
 		result = false;
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
@@ -91,6 +125,8 @@ FreshResult FreshStorage::exists(const char *path, bool &result) const {
 }
 
 FreshResult FreshStorage::createDirectory(const char *path) {
+	FreshResult accessResult = validatePathAccess(path);
+	if (!accessResult) return accessResult;
 	if (!isMounted()) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
 	}
@@ -98,6 +134,8 @@ FreshResult FreshStorage::createDirectory(const char *path) {
 }
 
 FreshResult FreshStorage::removeFile(const char *path) {
+	FreshResult accessResult = validatePathAccess(path);
+	if (!accessResult) return accessResult;
 	if (!isMounted()) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
 	}
@@ -105,6 +143,8 @@ FreshResult FreshStorage::removeFile(const char *path) {
 }
 
 FreshResult FreshStorage::removeDirectory(const char *path) {
+	FreshResult accessResult = validatePathAccess(path);
+	if (!accessResult) return accessResult;
 	if (!isMounted()) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
 	}
@@ -115,6 +155,11 @@ FreshResult FreshStorage::listDirectory(
     const char *path,
     std::vector<FreshDirectoryEntry> &entries
 ) const {
+	FreshResult accessResult = validatePathAccess(path);
+	if (!accessResult) {
+		entries.clear();
+		return accessResult;
+	}
 	if (!isMounted()) {
 		entries.clear();
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");

@@ -31,3 +31,4 @@ class FreshStorageScope {
 
 FreshStorageFileSystem &FreshCurrentFileSystem();
 FreshStorage *FreshCurrentStorage();
+bool FreshHasInternalStorageAccess(const FreshStorage *storage);

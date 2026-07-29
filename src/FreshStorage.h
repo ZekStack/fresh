@@ -193,9 +193,12 @@ class FreshStorage {
 
   private:
 	void releaseFileHandle();
+	void setProtectedPath(const std::string &path);
+	FreshResult validatePathAccess(const char *path) const;
 
 	FreshStorageType _type;
 	FreshStorageState _state = FreshStorageState::Uninitialized;
 	std::string _mountPath;
+	std::string _protectedPath;
 	std::atomic<size_t> _openFileCount{0};
 };

@@ -275,6 +275,7 @@ FreshResult Fresh::initWithStorage(
 
 	_rootPath = dbPath;
 	if (_rootPath.back() == '/' && _rootPath.size() > 1) _rootPath.pop_back();
+	_storage->setProtectedPath(_rootPath);
 
 	FreshResult dirResult = ensureDir(_rootPath);
 	if (!dirResult) {
