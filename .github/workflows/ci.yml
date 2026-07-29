@@ -33,6 +33,14 @@ jobs:
             echo "Embedded safety audit failed"
             exit 1
           fi
+          if grep -RInE '#include[[:space:]]*[<"](LittleFS|SD|SD_MMC)\.h[>"]' src; then
+            echo "Production storage code must use FreshStorage or ESP-IDF backends"
+            exit 1
+          fi
+          if grep -RInE '(^|[^[:alnum:]_])LittleFS[[:space:]]*\.' src; then
+            echo "Direct Arduino LittleFS singleton access is forbidden"
+            exit 1
+          fi
 
       - name: Check version consistency
         run: python3 scripts/check_version_consistency.py
