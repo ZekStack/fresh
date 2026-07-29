@@ -112,7 +112,6 @@ replace_once(
 ''',
 )
 
-# Correct a typo caught immediately after the backend-neutral GC replacement.
-replace_once("src/FreshGarbageCollection.cpp", "\n n\t\t}\n", "\n\t\t}\n")
+replace_once("src/FreshGarbageCollection.cpp", "\nn\t\t}\n", "\n\t\t}\n")
 
 print("storage context migration applied")
