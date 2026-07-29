@@ -4,7 +4,7 @@
 
 #include "internal/FreshStorageContext.h"
 
-#define LittleFS FreshCurrentFileSystem()
+#define FreshFS FreshCurrentFileSystem()
 
 #include <limits>
 #include <utility>
@@ -966,7 +966,7 @@ FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) 
 		bool duplicate = false;
 		do {
 			storageId = FreshMakeId();
-			duplicate = LittleFS.exists(modelPath(storageId).c_str());
+			duplicate = FreshFS.exists(modelPath(storageId).c_str());
 			for (const auto &entry : _models) {
 				if (entry.second->storageId == storageId) {
 					duplicate = true;

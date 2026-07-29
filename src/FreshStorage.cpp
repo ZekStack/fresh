@@ -6,7 +6,7 @@
 #include "internal/FreshStorageContext.h"
 
 #define File FreshFile
-#define LittleFS FreshCurrentFileSystem()
+#define FreshFS FreshCurrentFileSystem()
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -125,7 +125,7 @@ FreshResult FreshReadSlotFile(
     uint64_t &generation,
     size_t maxPayloadBytes
 ) {
-	File file = LittleFS.open(path.c_str(), "r");
+	File file = FreshFS.open(path.c_str(), "r");
 	if (!file) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open durable slot");
 	}
@@ -188,8 +188,8 @@ FreshSlotReadResult readDurableSlot(
 	FreshSlotReadResult result;
 	const std::string slotAPath = FreshSlotPath(basePath, fileBaseName, 'a');
 	const std::string slotBPath = FreshSlotPath(basePath, fileBaseName, 'b');
-	const bool existsA = LittleFS.exists(slotAPath.c_str());
-	const bool existsB = LittleFS.exists(slotBPath.c_str());
+	const bool existsA = FreshFS.exists(slotAPath.c_str());
+	const bool existsB = FreshFS.exists(slotBPath.c_str());
 	if (!existsA && !existsB) {
 		result.missing = true;
 		result.result = FreshResult::success("durable slot missing");
@@ -198,7 +198,7 @@ FreshSlotReadResult readDurableSlot(
 
 	FreshResult lastFailure = FreshResult::failure(FreshStatus::CorruptData, "no valid durable slot");
 	for (const std::string &path : {slotAPath, slotBPath}) {
-		if (!LittleFS.exists(path.c_str())) {
+		if (!FreshFS.exists(path.c_str())) {
 			continue;
 		}
 		JsonDocument candidate(&FreshJsonAllocator());
@@ -258,7 +258,7 @@ FreshResult writeDurableSlot(
 	}
 	const char targetSlot = nextGeneration % 2 == 0 ? 'a' : 'b';
 	const std::string targetPath = FreshSlotPath(basePath, fileBaseName, targetSlot);
-	File file = LittleFS.open(targetPath.c_str(), "w");
+	File file = FreshFS.open(targetPath.c_str(), "w");
 	if (!file) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open durable slot");
 	}
@@ -342,11 +342,11 @@ FreshResult FreshWriteJournalRecord(const FreshModelSyncBatch &batch, const Fres
 	    record.payload.size() > FreshMaxPersistedPayloadBytes) {
 		return FreshResult::failure(FreshStatus::SizeLimitExceeded, "journal record payload is too large");
 	}
-	if (!LittleFS.exists(batch.path.c_str()) && !LittleFS.mkdir(batch.path.c_str())) {
+	if (!FreshFS.exists(batch.path.c_str()) && !FreshFS.mkdir(batch.path.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create model directory");
 	}
 
-	File file = LittleFS.open(batch.journalPath.c_str(), "a");
+	File file = FreshFS.open(batch.journalPath.c_str(), "a");
 	if (!file) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open journal");
 	}
@@ -369,7 +369,7 @@ FreshResult FreshWriteJournalRecord(const FreshModelSyncBatch &batch, const Fres
 
 FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch, bool &snapshotWritten) {
 	snapshotWritten = false;
-	if (!LittleFS.exists(batch.path.c_str()) && !LittleFS.mkdir(batch.path.c_str())) {
+	if (!FreshFS.exists(batch.path.c_str()) && !FreshFS.mkdir(batch.path.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create model directory");
 	}
 
@@ -401,7 +401,7 @@ FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch, bool &snap
 	}
 	snapshotWritten = true;
 
-	if (LittleFS.exists(batch.journalPath.c_str()) && !LittleFS.remove(batch.journalPath.c_str())) {
+	if (FreshFS.exists(batch.journalPath.c_str()) && !FreshFS.remove(batch.journalPath.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "snapshot written but journal cleanup failed");
 	}
 	return FreshResult::success("snapshot written");
@@ -437,10 +437,10 @@ FreshModelSyncResult FreshWriteActiveModelBatch(const FreshModelSyncBatch &batch
 
 FreshModelSyncResult FreshDeleteModelBatch(const FreshModelSyncBatch &batch) {
 	FreshModelSyncResult result;
-	LittleFS.remove(batch.journalPath.c_str());
-	LittleFS.remove(FreshSlotPath(batch.path, FreshSnapshotFile, 'a').c_str());
-	LittleFS.remove(FreshSlotPath(batch.path, FreshSnapshotFile, 'b').c_str());
-	if (LittleFS.exists(batch.path.c_str()) && !LittleFS.rmdir(batch.path.c_str())) {
+	FreshFS.remove(batch.journalPath.c_str());
+	FreshFS.remove(FreshSlotPath(batch.path, FreshSnapshotFile, 'a').c_str());
+	FreshFS.remove(FreshSlotPath(batch.path, FreshSnapshotFile, 'b').c_str());
+	if (FreshFS.exists(batch.path.c_str()) && !FreshFS.rmdir(batch.path.c_str())) {
 		result.result = FreshResult::failure(FreshStatus::FileSystemError, "failed to remove model directory");
 		return result;
 	}
@@ -484,18 +484,18 @@ std::string Fresh::modelFile(const std::string &storageId, const char *fileName)
 }
 
 FreshResult Fresh::ensureDir(const std::string &path) {
-	if (LittleFS.exists(path.c_str())) {
+	if (FreshFS.exists(path.c_str())) {
 		return FreshResult::success();
 	}
-	if (!LittleFS.mkdir(path.c_str())) {
+	if (!FreshFS.mkdir(path.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create directory");
 	}
 	return FreshResult::success();
 }
 
 FreshResult Fresh::checkFreeSpace(size_t requiredBytes) const {
-	const size_t total = LittleFS.totalBytes();
-	const size_t used = LittleFS.usedBytes();
+	const size_t total = FreshFS.totalBytes();
+	const size_t used = FreshFS.usedBytes();
 	const size_t freeBytes = total > used ? total - used : 0;
 	if (freeBytes < _config.minFreeBytes || freeBytes - _config.minFreeBytes < requiredBytes) {
 		return FreshResult::failure(FreshStatus::StorageFull, "not enough LittleFS space");
@@ -748,11 +748,11 @@ FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state)
 
 FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) {
 	const std::string path = modelFile(state->storageId, FreshJournalFile);
-	if (!LittleFS.exists(path.c_str())) {
+	if (!FreshFS.exists(path.c_str())) {
 		return FreshLoadResult(FreshLoadStatus::LoadedOk, "journal not found");
 	}
 
-	File file = LittleFS.open(path.c_str(), "r");
+	File file = FreshFS.open(path.c_str(), "r");
 	if (!file) {
 		state->degraded = true;
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open journal");
@@ -1005,7 +1005,7 @@ FreshResult Fresh::syncDirty(bool force) {
 				do {
 					state->storageId = FreshMakeId();
 				} while (usedStorageIds.find(state->storageId) != usedStorageIds.end() ||
-				         LittleFS.exists(modelPath(state->storageId).c_str()));
+				         FreshFS.exists(modelPath(state->storageId).c_str()));
 				usedStorageIds.insert(state->storageId);
 				state->storageEpoch++;
 				state->dirty = true;

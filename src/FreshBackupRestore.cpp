@@ -9,7 +9,7 @@
 #include "internal/FreshStorageContext.h"
 
 #define File FreshFile
-#define LittleFS FreshCurrentFileSystem()
+#define FreshFS FreshCurrentFileSystem()
 
 #include <cstring>
 #include <functional>
@@ -106,10 +106,10 @@ std::string FreshRestoreSnapshotSlotPath(const std::string &modelPath, char slot
 }
 
 bool FreshRemoveRestoreStorage(const std::string &modelPath) {
-	LittleFS.remove(FreshJoinPath(modelPath, FreshJournalFile).c_str());
-	LittleFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'a').c_str());
-	LittleFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'b').c_str());
-	return !LittleFS.exists(modelPath.c_str()) || LittleFS.rmdir(modelPath.c_str());
+	FreshFS.remove(FreshJoinPath(modelPath, FreshJournalFile).c_str());
+	FreshFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'a').c_str());
+	FreshFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'b').c_str());
+	return !FreshFS.exists(modelPath.c_str()) || FreshFS.rmdir(modelPath.c_str());
 }
 
 FreshResult FreshValidateRestoreManifest(const JsonDocument &manifest) {
@@ -215,7 +215,7 @@ FreshRestoreSlotVerification FreshVerifyExactRestoreSlot(
     uint64_t expectedGeneration,
     const FreshBuffer &expected
 ) {
-	File input = LittleFS.open(path.c_str(), "r");
+	File input = FreshFS.open(path.c_str(), "r");
 	if (!input) return FreshRestoreSlotVerification::Unavailable;
 
 	uint32_t magic = 0;
@@ -267,10 +267,10 @@ FreshResult FreshProbeRestoreManifestSlot(
     FreshRestoreSlotProbe &probe
 ) {
 	probe = FreshRestoreSlotProbe();
-	probe.exists = LittleFS.exists(path.c_str());
+	probe.exists = FreshFS.exists(path.c_str());
 	if (!probe.exists) return FreshResult::success("manifest slot missing");
 
-	File input = LittleFS.open(path.c_str(), "r");
+	File input = FreshFS.open(path.c_str(), "r");
 	if (!input) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open manifest slot");
 	}
@@ -357,7 +357,7 @@ FreshResult FreshCommitRestoreManifest(
 	const char targetSlot = nextGeneration % 2 == 0 ? 'a' : 'b';
 	const std::string targetPath = targetSlot == 'a' ? slotA : slotB;
 
-	File output = LittleFS.open(targetPath.c_str(), "w");
+	File output = FreshFS.open(targetPath.c_str(), "w");
 	if (!output) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open restore manifest slot");
 	}
@@ -424,15 +424,15 @@ FreshResult FreshWriteRestoreSnapshot(
 	);
 	if (!encodedResult) return encodedResult;
 
-	if (LittleFS.exists(modelPath.c_str())) {
+	if (FreshFS.exists(modelPath.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "restore storage path already exists");
 	}
-	if (!LittleFS.mkdir(modelPath.c_str())) {
+	if (!FreshFS.mkdir(modelPath.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create restore storage directory");
 	}
 
 	const std::string slotPath = FreshRestoreSnapshotSlotPath(modelPath, 'b');
-	File output = LittleFS.open(slotPath.c_str(), "w");
+	File output = FreshFS.open(slotPath.c_str(), "w");
 	if (!output) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open restore snapshot slot");
 	}
@@ -661,7 +661,7 @@ FreshResult Fresh::restoreBackup(Stream &input, const FreshRestoreOptions &optio
 		do {
 			storageId = FreshMakeId();
 		} while (storageId.empty() || usedStorageIds.find(storageId) != usedStorageIds.end() ||
-		         LittleFS.exists(modelPath(storageId).c_str()));
+		         FreshFS.exists(modelPath(storageId).c_str()));
 		entry.second->storageId = storageId;
 		usedStorageIds.insert(storageId);
 	}
