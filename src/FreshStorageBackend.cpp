@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 
 namespace {
 
@@ -85,7 +86,7 @@ FreshResult FreshStorage::open(const char *path, FreshOpenMode mode, FreshFile &
 	if (handle == nullptr) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open storage file");
 	}
-	_openFileCount.fetch_add(1);
+	_openFileCount.fetch_add(1, std::memory_order_relaxed);
 	file.attach(handle, this);
 	return FreshResult::success("storage file opened");
 }
@@ -124,9 +125,10 @@ FreshResult FreshStorage::removeFile(const char *path) {
 	std::string resolved;
 	FreshResult pathResult = resolvePath(path, resolved);
 	if (!pathResult) return pathResult;
-	if (unlink(resolved.c_str()) == 0 || errno == ENOENT) {
+	if (unlink(resolved.c_str()) == 0) {
 		return FreshResult::success("storage file removed");
 	}
+	if (errno == ENOENT) return FreshResult::success("storage file not found");
 	return FreshResult::failure(FreshStatus::FileSystemError, "failed to remove storage file");
 }
 
@@ -134,9 +136,10 @@ FreshResult FreshStorage::removeDirectory(const char *path) {
 	std::string resolved;
 	FreshResult pathResult = resolvePath(path, resolved);
 	if (!pathResult) return pathResult;
-	if (rmdir(resolved.c_str()) == 0 || errno == ENOENT) {
+	if (rmdir(resolved.c_str()) == 0) {
 		return FreshResult::success("storage directory removed");
 	}
+	if (errno == ENOENT) return FreshResult::success("storage directory not found");
 	return FreshResult::failure(FreshStatus::FileSystemError, "failed to remove storage directory");
 }
 
@@ -181,13 +184,13 @@ FreshResult FreshStorage::listDirectory(
 }
 
 FreshResult FreshStorage::validateCanUnmount() const {
-	if (openFileCount() != 0) {
-		return FreshResult::failure(FreshStatus::Busy, "storage still has open files", openFileCount());
+	const size_t count = openFileCount();
+	if (count != 0) {
+		return FreshResult::failure(FreshStatus::Busy, "storage still has open files", count);
 	}
 	return FreshResult::success("storage can unmount");
 }
 
 void FreshStorage::releaseFileHandle() {
-	const size_t count = _openFileCount.load();
-	if (count != 0) _openFileCount.fetch_sub(1);
+	_openFileCount.fetch_sub(1, std::memory_order_relaxed);
 }
