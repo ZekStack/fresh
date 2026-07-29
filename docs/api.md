@@ -23,7 +23,7 @@ if (!result) {
 | `doc` | Optional returned `JsonDocument`. |
 | `affectedCount` | Number of affected documents, records, or models. |
 
-`FreshStatus` values include `Ok`, `NotInitialized`, `AlreadyInitialized`, `InvalidArgument`, `FileSystemError`, `ModelExists`, `ModelNotFound`, `DocumentNotFound`, `InvalidModel`, `ValidationFailed`, `OutOfMemory`, `UnsupportedOperation`, `CorruptData`, `StorageFull`, `SizeLimitExceeded`, `Busy`, `BackupNotRunning`, `Cancelled`, `Timeout`, and `InternalError`.
+`FreshStatus` values include `Ok`, `NotInitialized`, `AlreadyInitialized`, `InvalidArgument`, `FileSystemError`, `StorageUnavailable`, `ModelExists`, `ModelNotFound`, `DocumentNotFound`, `InvalidModel`, `ValidationFailed`, `OutOfMemory`, `UnsupportedOperation`, `CorruptData`, `StorageFull`, `SizeLimitExceeded`, `Busy`, `BackupNotRunning`, `Cancelled`, `Timeout`, and `InternalError`.
 
 `FreshModelResult` is returned by `createModel(...)`.
 
@@ -49,7 +49,7 @@ FreshResult result = db.init("/fresh_app", config);
 
 See [`configuration.md`](configuration.md) for every option and default.
 
-Storage limits can return `StorageFull` when sync preflight cannot preserve the configured LittleFS reserve, or `SizeLimitExceeded` when a document, stream entry, journal record, or snapshot exceeds configured serialized-size limits.
+Storage limits can return `StorageFull` when sync preflight cannot preserve the configured backend reserve, `StorageUnavailable` when the selected backend is not mounted, or `SizeLimitExceeded` when a document, stream entry, journal record, or snapshot exceeds configured serialized-size limits.
 
 ## Fresh
 
@@ -64,8 +64,10 @@ Common methods:
 
 | Method | Purpose |
 | --- | --- |
-| `init(path, config)` | Mount/load the database and start the sync task. |
-| `deinit(options)` | Stop the sync task, optionally run a final forced checkpoint, and release runtime state. |
+| `init(path, config)` | Create and manage the selected built-in backend, load the database, and start the sync task. |
+| `init(path, unique_ptr<FreshStorage>, config)` | Take ownership of a custom backend and manage its complete lifecycle. |
+| `init(path, FreshStorage&, config)` | Attach an already-mounted caller-owned custom backend without unmounting it. |
+| `deinit(options)` | Stop the sync task, optionally run a final forced checkpoint, detach or unmount storage, and release runtime state. |
 | `createModel(name)` | Create or open a model using the default model type and return `FreshModelResult`. |
 | `createModel(name, type)` | Create or open a general or stream model and return `FreshModelResult`. |
 | `model(name)` | Look up an existing model handle. |
@@ -76,7 +78,9 @@ Common methods:
 | `flush()` | Block until captured pending operations are journaled, without forcing a checkpoint snapshot. |
 | `forceSyncAsync()` | Request a forced checkpoint for dirty state captured by the sync task. |
 | `forceSync()` | Run a blocking forced checkpoint for captured dirty state that touches flash in the caller context. |
-| `storageInfo()` | Return LittleFS total, used, and free bytes. |
+| `storageInfo()` | Return convenience storage identity, state, capacity, and native diagnostics. |
+| `storageInfo(result)` | Query storage information with a `FreshResult` that reports capacity-query failures. |
+| `storage()` | Return the active backend while Fresh is running for same-filesystem application files. |
 | `diagnostics()` | Return model load diagnostics collected during `init()`. |
 
 `FreshDeinitOptions` controls explicit shutdown:
@@ -101,13 +105,19 @@ String helper methods:
 
 ## Storage info
 
-`FreshStorageInfo` is returned by `Fresh::storageInfo()`.
+`FreshStorageInfo` is returned by `Fresh::storageInfo()`. Prefer `FreshResult storageInfo(FreshStorageInfo&)` when a failed capacity query must be distinguished from zero capacity. See [`storage.md`](storage.md) for backend and custom-storage APIs.
 
 | Field | Meaning |
 | --- | --- |
-| `totalBytes` | Total LittleFS bytes reported by the filesystem. |
-| `usedBytes` | Used LittleFS bytes reported by the filesystem. |
-| `freeBytes` | Calculated free bytes. |
+| `type` | `LittleFS`, `SD`, or `Custom`. |
+| `state` | Current storage lifecycle state. |
+| `name` | Backend-provided display name. |
+| `mountPath` | VFS mount path when applicable. |
+| `nativeError` | Backend-native error code captured by the latest backend operation. |
+| `openFileCount` | Active `FreshFile` handles tracked by the backend. |
+| `totalBytes` | Total bytes reported by the backend. |
+| `usedBytes` | Used bytes reported by the backend. |
+| `freeBytes` | Free bytes reported or calculated by the backend. |
 
 ## Diagnostics
 

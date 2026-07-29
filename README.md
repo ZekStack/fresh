@@ -1,6 +1,6 @@
 # Fresh
 
-Fresh is a RAM-first document database for ESP32 with async LittleFS persistence.
+Fresh is a RAM-first document database for ESP32 with pluggable asynchronous storage.
 
 Fresh helps you keep small document collections and append-style logs in Arduino ESP32 projects without writing to flash from normal public write calls. It is designed for embedded applications that need predictable RAM-first behavior, background persistence, and simple result-based error handling.
 
@@ -11,7 +11,7 @@ Fresh helps you keep small document collections and append-style logs in Arduino
 ## Why use Fresh?
 
 * **RAM-first writes** - public create, update, delete, and append calls accept data into memory before background persistence.
-* **ESP32-friendly storage** - dirty-only LittleFS sync reduces unnecessary flash work.
+* **Pluggable storage** - use Fresh-managed LittleFS, SDSPI, SDMMC, or a custom backend without changing database semantics.
 * **Document and stream models** - use general JSON document models or append-style stream models.
 * **Clear API** - operations return `FreshResult` instead of throwing exceptions.
 * **Production-minded** - FreeRTOS mutex protection, bindable callbacks, storage reporting, and explicit limitations.
@@ -105,7 +105,7 @@ void loop() {
 > Fresh accepts normal public writes into RAM first. A successful `create`, `update`, `delete`, or `append` result means the change was accepted in memory, not necessarily persisted to flash yet.
 
 * Flash persistence happens later in the sync task. Power loss before sync can lose recently accepted changes.
-* Sync captures dirty RAM state under a short database lock, then performs LittleFS writes without holding the global database mutex.
+* Sync captures dirty RAM state under a short database lock, then writes through the selected storage backend without holding the global database mutex.
 * `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts.
 * `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context.
 * `flush()` synchronously persists captured pending journal operations without forcing a checkpoint snapshot. Use it as a durability barrier before a controlled reboot.
@@ -116,10 +116,10 @@ void loop() {
 * After `startBackup()`, keep calling `readBackup()` until backup finishes or call `cancelBackup()`. An undrained backup can occupy the sync task and delay normal persistence.
 * `backupStatus()` returns `FreshBackupStatus`: use `state` as the stable `FreshBackupState` lifecycle signal and `result` for detailed success/failure diagnostics.
 * Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
-* Fresh enforces configurable document, journal, snapshot, and LittleFS reserve limits. Oversized payloads return `FreshStatus::SizeLimitExceeded`; sync preflight space failures return `FreshStatus::StorageFull`.
+* Fresh enforces configurable document, journal, snapshot, and backend reserve limits. Oversized payloads return `FreshStatus::SizeLimitExceeded`; sync preflight space failures return `FreshStatus::StorageFull`.
 * Callbacks are notification hooks. Do not call `deinit()`, `flush()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
 * The current storage and backup formats use ArduinoJson MessagePack. Manifest and snapshot files use two durable slot files with checksummed binary headers. Formats are not stable compatibility contracts yet, and Fresh does not migrate older single-file `manifest.msgpack` / `snapshot.msgpack` storage into the durable-slot format.
-* Fresh `0.1.0` uses manifest/snapshot payload v3 and journal v3. Manifest entries map logical names to immutable storage IDs, so rename never moves model directories. The release intentionally rejects earlier pre-release storage formats; erase the development database when upgrading.
+* Fresh `0.2.0` keeps one journal, snapshot, manifest, and backup format across LittleFS, SD, and custom backends. Manifest entries map logical names to immutable storage IDs, so rename never moves model directories.
 
 ## When not to use Fresh
 
@@ -148,6 +148,10 @@ The repository includes topic-focused Arduino sketches in the `examples/` folder
 | `ValidatorsAndCallbacks` | Bool/result validators, `std::bind`, event/sync callbacks, and custom time. |
 | `BackupStream` | Backup callbacks, `startBackup`, chunked `readBackup`, status checks, and `backupImport`. |
 | `ModelManagement` | Create, rename, drop, drop selected, and drop all models. |
+| `SDSPIStorage` | Configure Fresh-managed SD storage over SPI. |
+| `SDMMCStorage` | Configure Fresh-managed SDMMC storage. |
+| `SameFilesystemBackup` | Store a backup archive beside the database on the active backend. |
+| `CustomStorage` | Implement and reload data through a caller-owned in-memory custom backend. |
 | `SelfTest` | Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior. It uses `/fresh_selftest`, `/fresh_selftest_src`, and `/fresh_selftest_dst`, touches internal storage files, and should only be run on a test device or test partition. |
 | `ReleaseHardeningTest` | Focused v0.1.0 validation for immutable storage IDs, rename persistence, configuration ceilings, synchronized metadata access, and repeatable shutdown. |
 
@@ -174,6 +178,7 @@ Detailed documentation is available in the `docs/` folder.
 | --- | --- |
 | [`docs/getting-started.md`](docs/getting-started.md) | Step-by-step setup and first document flow. |
 | [`docs/configuration.md`](docs/configuration.md) | `FreshConfig` options and defaults. |
+| [`docs/storage.md`](docs/storage.md) | Built-in storage, custom backends, ownership, and durability contracts. |
 | [`docs/api.md`](docs/api.md) | Public classes, result types, callbacks, and backup API. |
 | [`docs/examples.md`](docs/examples.md) | Explanation of all included examples. |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common issues and solutions. |
@@ -211,12 +216,12 @@ For the full API, see [`docs/api.md`](docs/api.md).
 | Framework | Arduino ESP32 |
 | Platform | `espressif32` |
 | Language | C++20 |
-| Filesystem | LittleFS |
+| Storage | LittleFS, SDSPI, SDMMC, or custom `FreshStorage` |
 | Persistence format | ArduinoJson MessagePack |
 | PSRAM | Used when available for internal allocations |
 | Dependencies | `bblanchon/ArduinoJson >= 7.0.0` |
 | Exceptions | Not used |
-| Status | Early-stage `0.1.0` |
+| Status | `0.2.0` development |
 
 ## Configuration
 

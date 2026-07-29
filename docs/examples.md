@@ -110,6 +110,30 @@ Demonstrates model lifecycle helpers:
 
 Use this for setup tools, reset flows, and maintenance screens.
 
+## SDSPIStorage
+
+Path: [`../examples/SDSPIStorage/SDSPIStorage.ino`](../examples/SDSPIStorage/SDSPIStorage.ino)
+
+Configures Fresh-managed SD storage over SPI, including bus ownership, pins, mount path, frequency, and result-aware capacity reporting.
+
+## SDMMCStorage
+
+Path: [`../examples/SDMMCStorage/SDMMCStorage.ino`](../examples/SDMMCStorage/SDMMCStorage.ino)
+
+Configures Fresh-managed SDMMC storage using target-default routing. See `storage.md` for custom GPIO-matrix routing.
+
+## SameFilesystemBackup
+
+Path: [`../examples/SameFilesystemBackup/SameFilesystemBackup.ino`](../examples/SameFilesystemBackup/SameFilesystemBackup.ino)
+
+Streams a Fresh backup into `/backups/configuration.fresh` through the active backend, then explicitly synchronizes and closes the archive.
+
+## CustomStorage
+
+Path: [`../examples/CustomStorage/CustomStorage.ino`](../examples/CustomStorage/CustomStorage.ino)
+
+Implements a non-VFS in-memory `FreshStorage` and `FreshFileBackend`, attaches it as caller-owned storage, persists a document, deinitializes, reinitializes, and verifies the document reloads.
+
 ## SelfTest
 
 Path: [`../examples/SelfTest/SelfTest.ino`](../examples/SelfTest/SelfTest.ino)
