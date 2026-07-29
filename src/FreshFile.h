@@ -49,7 +49,7 @@ class FreshFile final : public Stream {
 
 	int available() override;
 	int read() override;
-	int read(uint8_t *buffer, size_t size) override;
+	int read(uint8_t *buffer, size_t size);
 	int peek() override;
 
 	size_t write(uint8_t byte) override;
