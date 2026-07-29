@@ -21,7 +21,7 @@ class FreshSDStorage final : public FreshStorage {
 	FreshResult unmount() override;
 	FreshResult mountSPI();
 	FreshResult mountSDMMC();
-	void releaseManagedSPIBus();
+	FreshResult releaseManagedSPIBus();
 
 	FreshSDConfig _config;
 #if defined(ESP32)
