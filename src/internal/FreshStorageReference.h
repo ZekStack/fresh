@@ -2,6 +2,8 @@
 
 #include "../FreshStorage.h"
 
+#include <new>
+
 class FreshStorageReference final : public FreshStorage {
   public:
 	explicit FreshStorageReference(FreshStorage &target);
