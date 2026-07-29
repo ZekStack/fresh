@@ -12,7 +12,7 @@ class FreshSDStorage final : public FreshStorage {
 
 	const char *name() const override;
 	FreshStorageInfo info() const override;
-	int nativeError() const {
+	int nativeError() const override {
 		return _nativeError;
 	}
 
