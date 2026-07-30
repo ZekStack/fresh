@@ -255,23 +255,27 @@ Custom backends should enforce equivalent path isolation.
 
 ## Application files and backup archives
 
-`Fresh::storage()` exposes the active mounted backend while the database is running:
+Use `Fresh::withStorage()` for short storage operations such as creating a directory or opening a file:
 
 ```cpp
-FreshStorage* storage = database.storage();
-if (storage == nullptr) {
-    return;
-}
-
-storage->createDirectory("/backups");
-
 FreshFile archive;
-FreshResult opened = storage->open(
-    "/backups/configuration.fresh",
-    FreshOpenMode::Write,
-    archive
+FreshResult opened = database.withStorage(
+    [&](FreshStorage& storage) -> FreshResult {
+        FreshResult directory = storage.createDirectory("/backups");
+        if (!directory) return directory;
+
+        return storage.open(
+            "/backups/configuration.fresh",
+            FreshOpenMode::Write,
+            archive
+        );
+    }
 );
 ```
+
+`withStorage()` holds the Fresh lifecycle lock while the callback runs. This prevents `deinit()` from detaching or destroying the backend between storage lookup and file open. Keep the callback short and do not call database methods from inside it.
+
+Once a `FreshFile` is open, the callback may return. The backend tracks the file handle, and `deinit()` returns `FreshStatus::Busy` until the file is closed.
 
 Recommended layout:
 
@@ -280,11 +284,11 @@ Recommended layout:
 /backups/     application-owned backup archives
 ```
 
-Backup archives and the database therefore remain on the same selected filesystem, as required for Fresh 0.2.0.
+Fresh rejects application operations targeting the configured database root or any child below it. Internal persistence operations run through a scoped internal storage context and remain authorized.
 
-Do not modify files below the configured database root through `Fresh::storage()`. Those files are controlled by the persistence engine.
+The raw `Fresh::storage()` pointer remains deprecated for source compatibility. New code must use `withStorage()` because a raw pointer cannot provide a lifetime guarantee across concurrent shutdown.
 
-Close every `FreshFile` before calling `deinit()`. Fresh tracks active handles and returns `FreshStatus::Busy` without stopping the sync task when files remain open.
+Close every `FreshFile` before calling `deinit()`. Use `syncAndClose()` when the application file is a durability boundary.
 
 ## Storage information
 
@@ -357,7 +361,7 @@ Fresh does not automatically fall back from SD to LittleFS because doing so coul
 - Fresh never changes from one storage backend to another after initialization.
 - Fresh 0.2.0 does not migrate databases between filesystems.
 
-## Conformance example
+## Conformance examples
 
 `examples/CustomStorage` contains an in-memory non-VFS backend that verifies:
 
@@ -365,8 +369,13 @@ Fresh does not automatically fall back from SD to LittleFS because doing so coul
 - directory and file primitives,
 - model creation,
 - durable synchronization,
+- result-query error propagation,
+- database-root protection,
+- open-file shutdown blocking,
 - deinitialization,
 - reinitialization against the same storage instance, and
 - persisted document reload.
 
-Use it as the minimum structural reference for custom backend implementations. Production backends also need failure-path and power-loss testing appropriate to their storage medium.
+`examples/StorageLifecycleRegressionTest` exercises the same lifecycle rules using the built-in LittleFS backend.
+
+Production backends also need failure-path and power-loss testing appropriate to their storage medium.
