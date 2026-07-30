@@ -1,8 +1,7 @@
 #include "FreshLittleFSStorage.h"
 
 #include "../Fresh.h"
-
-#include <LittleFS.h>
+#include "../internal/FreshArduinoLittleFSBridge.h"
 
 #if defined(ESP32)
 extern "C" {
@@ -54,16 +53,11 @@ FreshResult FreshLittleFSStorage::mount() {
 
 	setState(FreshStorageState::Mounting);
 
-	// Mount through Arduino's LittleFS wrapper instead of registering the VFS
-	// directly. Fresh still performs its file operations through POSIX/VFS, but
-	// LittleFS.begin() also binds the global Arduino LittleFS instance to the
-	// mountpoint. Fresh 0.1.x provided that process-wide side effect and existing
-	// applications may legitimately use LittleFS outside the database after Fresh
-	// initialization.
-	//
-	// Arduino-ESP32 currently enables grow-on-mount internally and ignores its
-	// maxOpenFiles argument. Fresh enforces the configured handle limit itself.
-	const bool mounted = LittleFS.begin(
+	// Fresh performs file operations through POSIX/VFS, but the isolated bridge
+	// also binds Arduino's global LittleFS wrapper to the managed mountpoint.
+	// Fresh 0.1.x provided that process-wide side effect, and existing applications
+	// may use LittleFS outside the database after Fresh initialization.
+	const bool mounted = FreshArduinoLittleFSMount(
 	    _config.formatOnMountFailure,
 	    mountPath(),
 	    static_cast<uint8_t>(_config.maxOpenFiles),
@@ -75,9 +69,9 @@ FreshResult FreshLittleFSStorage::mount() {
 		return FreshResult::failure(FreshStatus::StorageUnavailable, "failed to mount LittleFS storage");
 	}
 
-	const char *arduinoMountPath = LittleFS.mountpoint();
+	const char *arduinoMountPath = FreshArduinoLittleFSMountPath();
 	if (arduinoMountPath == nullptr || strcmp(arduinoMountPath, mountPath()) != 0) {
-		LittleFS.end();
+		FreshArduinoLittleFSUnmount();
 		_nativeError = ESP_ERR_INVALID_STATE;
 		setState(FreshStorageState::Error);
 		return FreshResult::failure(
@@ -106,7 +100,7 @@ FreshResult FreshLittleFSStorage::unmount() {
 	return FreshResult::failure(FreshStatus::UnsupportedOperation, "LittleFS backend requires ESP32");
 #else
 	setState(FreshStorageState::Unmounting);
-	LittleFS.end();
+	FreshArduinoLittleFSUnmount();
 	if (esp_littlefs_mounted(_partitionLabel.c_str())) {
 		_nativeError = ESP_FAIL;
 		setState(FreshStorageState::Error);
