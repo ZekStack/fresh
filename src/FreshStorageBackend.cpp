@@ -2,12 +2,14 @@
 
 #include "Fresh.h"
 #include "FreshFile.h"
-#include "internal/FreshVFSFile.h"
+#include "internal/FreshFileState.h"
 #include "internal/FreshStorageContext.h"
+#include "internal/FreshVFSFile.h"
 
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
+#include <new>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -15,49 +17,112 @@ namespace {
 
 constexpr size_t FreshMaxLogicalPathLength = 384;
 
-bool FreshPathContainsTraversal(const char *path) {
-	const char *segment = path;
-	while (*segment != '\0') {
-		while (*segment == '/') ++segment;
-		const char *end = segment;
-		while (*end != '\0' && *end != '/') ++end;
-		const size_t length = static_cast<size_t>(end - segment);
-		if ((length == 1 && segment[0] == '.') ||
-		    (length == 2 && segment[0] == '.' && segment[1] == '.')) {
-			return true;
-		}
-		segment = end;
+void FreshDecrementCounter(std::atomic<size_t> &counter) {
+	size_t current = counter.load();
+	while (current != 0 && !counter.compare_exchange_weak(current, current - 1)) {
 	}
-	return false;
 }
 
 } // namespace
 
-FreshStorage::FreshStorage(FreshStorageType type, const char *mountPath)
-    : _type(type), _mountPath(mountPath != nullptr ? mountPath : "") {
+FreshStorage::FreshStorage(
+    FreshStorageType type,
+    const char *mountPath,
+    size_t maxOpenFiles
+)
+    : _type(type),
+      _mountPath(mountPath != nullptr ? mountPath : ""),
+      _fileRegistry(new (std::nothrow) FreshStorageFileRegistry(maxOpenFiles)) {
 	while (_mountPath.size() > 1 && _mountPath.back() == '/') _mountPath.pop_back();
 }
 
-void FreshStorage::setProtectedPath(const std::string &path) {
-	_protectedPath = path;
-	while (_protectedPath.size() > 1 && _protectedPath.back() == '/') {
-		_protectedPath.pop_back();
-	}
+FreshStorage::~FreshStorage() = default;
+
+size_t FreshStorage::openFileCount() const {
+	return _fileRegistry ? _fileRegistry->totalOpenFiles.load() : 0;
 }
 
-FreshResult FreshStorage::validatePathAccess(const char *path) const {
+size_t FreshStorage::applicationOpenFileCount() const {
+	return _fileRegistry ? _fileRegistry->applicationOpenFiles.load() : 0;
+}
+
+size_t FreshStorage::internalOpenFileCount() const {
+	return _fileRegistry ? _fileRegistry->internalOpenFiles.load() : 0;
+}
+
+size_t FreshStorage::maxOpenFiles() const {
+	return _fileRegistry ? _fileRegistry->maxOpenFiles : 0;
+}
+
+FreshResult FreshStorage::normalizeLogicalPath(
+    const char *path,
+    std::string &normalized
+) const {
+	normalized.clear();
 	if (path == nullptr || *path == '\0') {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "storage path is required");
 	}
+	if (path[0] != '/') {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "storage path must be absolute");
+	}
+
+	const size_t length = strlen(path);
+	if (length > FreshMaxLogicalPathLength) {
+		return FreshResult::failure(FreshStatus::SizeLimitExceeded, "storage path is too long");
+	}
+	if (strchr(path, '\\') != nullptr) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "storage path contains a backslash");
+	}
+
+	normalized.reserve(length);
+	const char *segment = path + 1;
+	for (size_t index = 0; index < length; ++index) {
+		const char value = path[index];
+		if (value == '/' && index > 0 && path[index - 1] == '/') {
+			normalized.clear();
+			return FreshResult::failure(
+			    FreshStatus::InvalidArgument,
+			    "storage path contains repeated separators"
+			);
+		}
+		normalized.push_back(value);
+
+		if (value == '/' || index + 1 == length) {
+			const char *end = value == '/' ? path + index : path + index + 1;
+			const size_t segmentLength = static_cast<size_t>(end - segment);
+			if ((segmentLength == 1 && segment[0] == '.') ||
+			    (segmentLength == 2 && segment[0] == '.' && segment[1] == '.')) {
+				normalized.clear();
+				return FreshResult::failure(
+				    FreshStatus::InvalidArgument,
+				    "storage path contains invalid traversal"
+				);
+			}
+			segment = path + index + 1;
+		}
+	}
+
+	while (normalized.size() > 1 && normalized.back() == '/') normalized.pop_back();
+	return FreshResult::success("storage path normalized");
+}
+
+FreshResult FreshStorage::setProtectedPath(const std::string &path) {
+	std::string normalized;
+	FreshResult result = normalizeLogicalPath(path.c_str(), normalized);
+	if (!result) return result;
+	_protectedPath = std::move(normalized);
+	return FreshResult::success("protected storage path configured");
+}
+
+FreshResult FreshStorage::validatePathAccess(const std::string &path) const {
 	if (_protectedPath.empty() || FreshHasInternalStorageAccess(this)) {
 		return FreshResult::success("storage path allowed");
 	}
-	const std::string logicalPath(path);
-	const bool exact = logicalPath == _protectedPath;
+	const bool exact = path == _protectedPath;
 	const bool child = _protectedPath == "/" ||
-	                   (logicalPath.size() > _protectedPath.size() &&
-	                    logicalPath.compare(0, _protectedPath.size(), _protectedPath) == 0 &&
-	                    logicalPath[_protectedPath.size()] == '/');
+	                   (path.size() > _protectedPath.size() &&
+	                    path.compare(0, _protectedPath.size(), _protectedPath) == 0 &&
+	                    path[_protectedPath.size()] == '/');
 	if (exact || child) {
 		return FreshResult::failure(
 		    FreshStatus::UnsupportedOperation,
@@ -78,24 +143,130 @@ FreshResult FreshStorage::resolvePath(const char *logicalPath, std::string &reso
 		    "storage backend does not provide default VFS path operations"
 		);
 	}
-	if (logicalPath == nullptr || *logicalPath == '\0' || logicalPath[0] != '/') {
-		return FreshResult::failure(FreshStatus::InvalidArgument, "storage path must be absolute");
-	}
-	const size_t logicalLength = strlen(logicalPath);
-	if (logicalLength > FreshMaxLogicalPathLength) {
-		return FreshResult::failure(FreshStatus::SizeLimitExceeded, "storage path is too long");
-	}
-	if (strchr(logicalPath, '\\') != nullptr || FreshPathContainsTraversal(logicalPath)) {
-		return FreshResult::failure(FreshStatus::InvalidArgument, "storage path contains invalid traversal");
-	}
 
+	std::string normalized;
+	FreshResult normalizedResult = normalizeLogicalPath(logicalPath, normalized);
+	if (!normalizedResult) return normalizedResult;
 	resolvedPath = _mountPath;
-	if (strcmp(logicalPath, "/") != 0) resolvedPath += logicalPath;
+	if (normalized != "/") resolvedPath += normalized;
 	return FreshResult::success("storage path resolved");
 }
 
+FreshResult FreshStorage::reserveFileHandle(FreshFileOrigin origin) {
+	if (!_fileRegistry) {
+		return FreshResult::failure(FreshStatus::OutOfMemory, "storage file registry is unavailable");
+	}
+	FreshLock lock(_fileRegistry->mutex);
+	if (!lock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage file registry");
+	}
+	if (origin == FreshFileOrigin::Application &&
+	    !_fileRegistry->acceptApplicationFiles.load()) {
+		return FreshResult::failure(FreshStatus::Busy, "storage is shutting down");
+	}
+	const size_t total = _fileRegistry->totalOpenFiles.load();
+	if (total >= _fileRegistry->maxOpenFiles) {
+		return FreshResult::failure(
+		    FreshStatus::Busy,
+		    "storage open file limit reached",
+		    total
+		);
+	}
+	_fileRegistry->totalOpenFiles.store(total + 1);
+	if (origin == FreshFileOrigin::Internal) {
+		_fileRegistry->internalOpenFiles.fetch_add(1);
+	} else {
+		_fileRegistry->applicationOpenFiles.fetch_add(1);
+	}
+	return FreshResult::success("storage file handle reserved");
+}
+
+void FreshStorage::releaseReservedFileHandle(FreshFileOrigin origin) {
+	if (!_fileRegistry) return;
+	FreshDecrementCounter(_fileRegistry->totalOpenFiles);
+	if (origin == FreshFileOrigin::Internal) {
+		FreshDecrementCounter(_fileRegistry->internalOpenFiles);
+	} else {
+		FreshDecrementCounter(_fileRegistry->applicationOpenFiles);
+	}
+}
+
+FreshResult FreshStorage::registerFileState(
+    const std::shared_ptr<FreshFileState> &state
+) {
+	if (!_fileRegistry || !state) {
+		return FreshResult::failure(FreshStatus::InternalError, "invalid storage file state");
+	}
+	FreshLock lock(_fileRegistry->mutex);
+	if (!lock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage file registry");
+	}
+	for (auto iterator = _fileRegistry->files.begin(); iterator != _fileRegistry->files.end();) {
+		if (iterator->expired()) {
+			iterator = _fileRegistry->files.erase(iterator);
+		} else {
+			++iterator;
+		}
+	}
+	_fileRegistry->files.push_back(state);
+	return FreshResult::success("storage file state registered");
+}
+
+void FreshStorage::setApplicationFileAcceptance(bool accepted) {
+	if (_fileRegistry) _fileRegistry->acceptApplicationFiles.store(accepted);
+}
+
+FreshResult FreshStorage::closeApplicationFiles(bool syncBeforeClose) {
+	if (!_fileRegistry) return FreshResult::success("storage file registry is empty");
+	std::vector<std::shared_ptr<FreshFileState>> files;
+	{
+		FreshLock lock(_fileRegistry->mutex);
+		if (!lock) {
+			return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage file registry");
+		}
+		for (const std::weak_ptr<FreshFileState> &weak : _fileRegistry->files) {
+			std::shared_ptr<FreshFileState> state = weak.lock();
+			if (state && state->origin == FreshFileOrigin::Application) {
+				files.push_back(std::move(state));
+			}
+		}
+	}
+
+	FreshResult firstFailure = FreshResult::success("application files closed");
+	for (const std::shared_ptr<FreshFileState> &state : files) {
+		FreshResult closed = FreshCloseFileState(state, syncBeforeClose);
+		if (!closed && firstFailure) firstFailure = closed;
+	}
+	return firstFailure;
+}
+
+FreshResult FreshStorage::closeAllFiles(bool syncBeforeClose) {
+	if (!_fileRegistry) return FreshResult::success("storage file registry is empty");
+	std::vector<std::shared_ptr<FreshFileState>> files;
+	{
+		FreshLock lock(_fileRegistry->mutex);
+		if (!lock) {
+			return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage file registry");
+		}
+		for (const std::weak_ptr<FreshFileState> &weak : _fileRegistry->files) {
+			std::shared_ptr<FreshFileState> state = weak.lock();
+			if (state) files.push_back(std::move(state));
+		}
+	}
+
+	FreshResult firstFailure = FreshResult::success("storage files closed");
+	for (const std::shared_ptr<FreshFileState> &state : files) {
+		FreshResult closed = FreshCloseFileState(state, syncBeforeClose);
+		if (!closed && firstFailure) firstFailure = closed;
+	}
+	return firstFailure;
+}
+
 FreshResult FreshStorage::open(const char *path, FreshOpenMode mode, FreshFile &file) {
-	FreshResult accessResult = validatePathAccess(path);
+	std::string normalized;
+	FreshResult pathResult = normalizeLogicalPath(path, normalized);
+	if (!pathResult) return pathResult;
+	FreshResult accessResult = validatePathAccess(normalized);
 	if (!accessResult) return accessResult;
 	if (!isMounted()) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
@@ -103,59 +274,112 @@ FreshResult FreshStorage::open(const char *path, FreshOpenMode mode, FreshFile &
 	if (file) {
 		return FreshResult::failure(FreshStatus::Busy, "destination file is already open");
 	}
+
+	const FreshFileOrigin origin = FreshHasInternalStorageAccess(this)
+	                                   ? FreshFileOrigin::Internal
+	                                   : FreshFileOrigin::Application;
+	FreshResult reserved = reserveFileHandle(origin);
+	if (!reserved) return reserved;
+
 	std::unique_ptr<FreshFileBackend> backend;
-	FreshResult result = openBackend(path, mode, backend);
-	if (!result) return result;
+	FreshResult result = openBackend(normalized.c_str(), mode, backend);
+	if (!result) {
+		releaseReservedFileHandle(origin);
+		return result;
+	}
 	if (!backend || !backend->isOpen()) {
+		releaseReservedFileHandle(origin);
 		return FreshResult::failure(FreshStatus::InternalError, "storage backend returned an invalid file");
 	}
-	_openFileCount.fetch_add(1);
-	file.attach(std::move(backend), this);
+
+	std::shared_ptr<FreshFileState> state(new (std::nothrow) FreshFileState());
+	if (!state) {
+		backend->close();
+		releaseReservedFileHandle(origin);
+		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate storage file state");
+	}
+	state->backend = std::move(backend);
+	state->registry = _fileRegistry;
+	state->origin = origin;
+	state->registered = true;
+	FreshResult registered = registerFileState(state);
+	if (!registered) {
+		state->registered = false;
+		state->backend->close();
+		state->backend.reset();
+		releaseReservedFileHandle(origin);
+		return registered;
+	}
+	file.attach(std::move(state));
 	return FreshResult::success("storage file opened");
 }
 
 FreshResult FreshStorage::exists(const char *path, bool &result) const {
-	FreshResult accessResult = validatePathAccess(path);
-	if (!accessResult) return accessResult;
+	std::string normalized;
+	FreshResult pathResult = normalizeLogicalPath(path, normalized);
+	if (!pathResult) {
+		result = false;
+		return pathResult;
+	}
+	FreshResult accessResult = validatePathAccess(normalized);
+	if (!accessResult) {
+		result = false;
+		return accessResult;
+	}
 	if (!isMounted()) {
 		result = false;
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
 	}
-	return existsBackend(path, result);
+	return existsBackend(normalized.c_str(), result);
 }
 
 FreshResult FreshStorage::createDirectory(const char *path) {
-	FreshResult accessResult = validatePathAccess(path);
+	std::string normalized;
+	FreshResult pathResult = normalizeLogicalPath(path, normalized);
+	if (!pathResult) return pathResult;
+	FreshResult accessResult = validatePathAccess(normalized);
 	if (!accessResult) return accessResult;
 	if (!isMounted()) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
 	}
-	return createDirectoryBackend(path);
+	return createDirectoryBackend(normalized.c_str());
 }
 
 FreshResult FreshStorage::removeFile(const char *path) {
-	FreshResult accessResult = validatePathAccess(path);
+	std::string normalized;
+	FreshResult pathResult = normalizeLogicalPath(path, normalized);
+	if (!pathResult) return pathResult;
+	FreshResult accessResult = validatePathAccess(normalized);
 	if (!accessResult) return accessResult;
 	if (!isMounted()) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
 	}
-	return removeFileBackend(path);
+	return removeFileBackend(normalized.c_str());
 }
 
 FreshResult FreshStorage::removeDirectory(const char *path) {
-	FreshResult accessResult = validatePathAccess(path);
+	std::string normalized;
+	FreshResult pathResult = normalizeLogicalPath(path, normalized);
+	if (!pathResult) return pathResult;
+	FreshResult accessResult = validatePathAccess(normalized);
 	if (!accessResult) return accessResult;
 	if (!isMounted()) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
 	}
-	return removeDirectoryBackend(path);
+	return removeDirectoryBackend(normalized.c_str());
 }
 
 FreshResult FreshStorage::listDirectory(
     const char *path,
     std::vector<FreshDirectoryEntry> &entries
 ) const {
-	FreshResult accessResult = validatePathAccess(path);
+	std::string normalized;
+	FreshResult pathResult = normalizeLogicalPath(path, normalized);
+	if (!pathResult) {
+		entries.clear();
+		return pathResult;
+	}
+	FreshResult accessResult = validatePathAccess(normalized);
 	if (!accessResult) {
 		entries.clear();
 		return accessResult;
@@ -164,7 +388,7 @@ FreshResult FreshStorage::listDirectory(
 		entries.clear();
 		return FreshResult::failure(FreshStatus::NotInitialized, "storage is not mounted");
 	}
-	return listDirectoryBackend(path, entries);
+	return listDirectoryBackend(normalized.c_str(), entries);
 }
 
 FreshResult FreshStorage::openBackend(
@@ -277,6 +501,9 @@ FreshResult FreshStorage::readInfo(FreshStorageInfo &result) const {
 		result.mountPath = mountPath() != nullptr ? mountPath() : "";
 		result.nativeError = nativeError();
 		result.openFileCount = openFileCount();
+		result.applicationOpenFileCount = applicationOpenFileCount();
+		result.internalOpenFileCount = internalOpenFileCount();
+		result.maxOpenFiles = maxOpenFiles();
 		return FreshResult::failure(FreshStatus::StorageUnavailable, "storage is not mounted");
 	}
 	FreshResult infoResult = readInfoBackend(result);
@@ -286,6 +513,9 @@ FreshResult FreshStorage::readInfo(FreshStorageInfo &result) const {
 	result.mountPath = mountPath() != nullptr ? mountPath() : "";
 	result.nativeError = nativeError();
 	result.openFileCount = openFileCount();
+	result.applicationOpenFileCount = applicationOpenFileCount();
+	result.internalOpenFileCount = internalOpenFileCount();
+	result.maxOpenFiles = maxOpenFiles();
 	return infoResult;
 }
 
@@ -299,10 +529,4 @@ FreshResult FreshStorage::validateCanUnmount() const {
 		return FreshResult::failure(FreshStatus::Busy, "storage still has open files", openFileCount());
 	}
 	return FreshResult::success("storage can unmount");
-}
-
-void FreshStorage::releaseFileHandle() {
-	size_t current = _openFileCount.load();
-	while (current != 0 && !_openFileCount.compare_exchange_weak(current, current - 1)) {
-	}
 }
