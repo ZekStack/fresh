@@ -16,6 +16,9 @@
 
 struct FreshResult;
 struct FreshStorageInfo;
+struct FreshFileState;
+struct FreshStorageFileRegistry;
+enum class FreshFileOrigin : uint8_t;
 class Fresh;
 class FreshFile;
 class FreshFileBackend;
@@ -54,6 +57,7 @@ struct FreshLittleFSConfig {
 	const char *partitionLabel = "spiffs";
 	// Keep the Arduino LittleFS default mount point for 0.1.x compatibility.
 	const char *mountPath = "/littlefs";
+	// Maximum concurrent files opened through this Fresh storage instance.
 	size_t maxOpenFiles = 10;
 	bool formatOnMountFailure = false;
 	bool growOnMount = true;
@@ -101,6 +105,7 @@ struct FreshSDMMCConfig {
 struct FreshSDConfig {
 	FreshSDInterface interface = FreshSDInterface::SPI;
 	const char *mountPath = "/fresh-sd";
+	// Maximum concurrent files opened through this Fresh storage instance.
 	size_t maxOpenFiles = 8;
 	size_t allocationUnitSize = 16 * 1024;
 	bool formatOnMountFailure = false;
@@ -119,7 +124,7 @@ struct FreshDirectoryEntry {
 // Backends that mount into ESP-IDF VFS can inherit the default implementations.
 class FreshStorage {
   public:
-	virtual ~FreshStorage() = default;
+	virtual ~FreshStorage();
 
 	FreshStorage(const FreshStorage &) = delete;
 	FreshStorage &operator=(const FreshStorage &) = delete;
@@ -140,9 +145,10 @@ class FreshStorage {
 		return _mountPath.c_str();
 	}
 
-	size_t openFileCount() const {
-		return _openFileCount.load();
-	}
+	size_t openFileCount() const;
+	size_t applicationOpenFileCount() const;
+	size_t internalOpenFileCount() const;
+	size_t maxOpenFiles() const;
 
 	FreshResult open(const char *path, FreshOpenMode mode, FreshFile &file);
 	FreshResult exists(const char *path, bool &result) const;
@@ -160,9 +166,12 @@ class FreshStorage {
 
   protected:
 	friend class Fresh;
-	friend class FreshFile;
 
-	explicit FreshStorage(FreshStorageType type, const char *mountPath = nullptr);
+	explicit FreshStorage(
+	    FreshStorageType type,
+	    const char *mountPath = nullptr,
+	    size_t maxOpenFiles = SIZE_MAX
+	);
 
 	virtual FreshResult mount() = 0;
 	virtual FreshResult unmount() = 0;
@@ -192,13 +201,19 @@ class FreshStorage {
 	}
 
   private:
-	void releaseFileHandle();
-	void setProtectedPath(const std::string &path);
-	FreshResult validatePathAccess(const char *path) const;
+	FreshResult normalizeLogicalPath(const char *path, std::string &normalized) const;
+	FreshResult setProtectedPath(const std::string &path);
+	FreshResult validatePathAccess(const std::string &path) const;
+	FreshResult reserveFileHandle(FreshFileOrigin origin);
+	void releaseReservedFileHandle(FreshFileOrigin origin);
+	FreshResult registerFileState(const std::shared_ptr<FreshFileState> &state);
+	void setApplicationFileAcceptance(bool accepted);
+	FreshResult closeApplicationFiles(bool syncBeforeClose);
+	FreshResult closeAllFiles(bool syncBeforeClose);
 
 	FreshStorageType _type;
 	FreshStorageState _state = FreshStorageState::Uninitialized;
 	std::string _mountPath;
 	std::string _protectedPath;
-	std::atomic<size_t> _openFileCount{0};
+	std::shared_ptr<FreshStorageFileRegistry> _fileRegistry;
 };
