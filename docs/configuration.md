@@ -36,12 +36,12 @@ FreshResult result = db.init("/fresh_app", config);
 | `storageType` | `FreshStorageType::LittleFS` | Built-in managed storage selected by the normal `init(path, config)` overload. |
 | `littleFS.partitionLabel` | `"spiffs"` | ESP partition label used for LittleFS. |
 | `littleFS.mountPath` | `"/littlefs"` | ESP-IDF VFS mount point for LittleFS. |
-| `littleFS.maxOpenFiles` | `10` | Maximum LittleFS file handles registered with VFS. |
+| `littleFS.maxOpenFiles` | `10` | Maximum concurrent files opened through this Fresh storage instance. |
 | `littleFS.formatOnMountFailure` | `false` | Whether Fresh may format LittleFS after a mount failure. |
 | `littleFS.growOnMount` | `true` | Allow LittleFS to grow to the partition boundary when supported. |
 | `sd.interface` | `FreshSDInterface::SPI` | Select SDSPI or SDMMC. |
 | `sd.mountPath` | `"/fresh-sd"` | ESP-IDF FATFS VFS mount point. |
-| `sd.maxOpenFiles` | `8` | Maximum FATFS file handles registered with VFS. |
+| `sd.maxOpenFiles` | `8` | Maximum concurrent files opened through this Fresh storage instance and FATFS mount. |
 | `sd.allocationUnitSize` | `16 * 1024` | FAT allocation unit requested if explicit formatting is enabled. |
 | `sd.formatOnMountFailure` | `false` | Whether Fresh may format the SD filesystem after a mount failure. |
 | `sd.spi.host` | `SPI2_HOST` | SPI host used by SDSPI. |
@@ -191,13 +191,15 @@ Lower thresholds compact more often and may reduce startup replay work. Higher t
 
 ## Storage limits
 
-Fresh checks document, journal record, snapshot, and backend free-space limits before accepting large writes or starting sync writes.
+Fresh checks document, journal record, snapshot, backend free-space, and concurrent file-handle limits.
+
+`littleFS.maxOpenFiles` and `sd.maxOpenFiles` include files opened internally for journals, snapshots, manifests, restore staging, and backups as well as application files opened through `withStorage()`. When the limit is reached, another open returns `FreshStatus::Busy`. Closing a file immediately releases its slot.
 
 `maxDocumentBytes` is measured after Fresh applies stored metadata such as `_id`, `createdAt`, and `updatedAt`. `maxJournalRecordBytes` applies to the serialized journal payload. `maxSnapshotBytes` applies to the serialized snapshot payload. Fresh accounts for fixed journal and durable-slot headers separately during free-space preflight.
 
 `minFreeBytes` prevents Fresh from intentionally filling the selected backend. A sync fails with `FreshStatus::StorageFull` when the required bytes plus this reserve exceed reported free space.
 
-Capacity lookup is result-aware. A backend query failure is returned as a storage or filesystem error instead of being interpreted as zero free space.
+Capacity lookup is result-aware. A backend query failure is returned as a storage or filesystem error instead of being interpreted as zero free space. A failed existence probe used while allocating model storage also aborts the current sync rather than being treated as an indefinitely occupied identifier.
 
 Manifest, snapshot, and journal payloads have an absolute 1 MiB ceiling. The configured limits must be nonzero and no greater than this ceiling; the journal limit must exceed the document limit, and the snapshot limit must be at least the document limit. `backupBufferSize` must be between 1 byte and 1 MiB.
 
