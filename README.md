@@ -2,7 +2,7 @@
 
 Fresh is a RAM-first document database for ESP32 with pluggable asynchronous storage.
 
-Fresh helps you keep small document collections and append-style logs in Arduino ESP32 projects without writing to flash from normal public write calls. It is designed for embedded applications that need predictable RAM-first behavior, background persistence, and simple result-based error handling.
+Fresh helps you keep small document collections and append-style logs in Arduino ESP32 projects without writing to storage from normal public write calls. It is designed for embedded applications that need predictable RAM-first behavior, background persistence, and simple result-based error handling.
 
 [![CI](https://github.com/ZekStack/fresh/actions/workflows/ci.yml/badge.svg)](https://github.com/ZekStack/fresh/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ZekStack/fresh?sort=semver)](https://github.com/ZekStack/fresh/releases)
@@ -102,32 +102,34 @@ void loop() {
 ## Important notes
 
 > [!IMPORTANT]
-> Fresh accepts normal public writes into RAM first. A successful `create`, `update`, `delete`, or `append` result means the change was accepted in memory, not necessarily persisted to flash yet.
+> Fresh accepts normal public writes into RAM first. A successful `create`, `update`, `delete`, or `append` result means the change was accepted in memory, not necessarily persisted to storage yet.
 
-* Flash persistence happens later in the sync task. Power loss before sync can lose recently accepted changes.
+* Persistence happens later in the sync task. Power loss before sync can lose recently accepted changes.
 * Sync captures dirty RAM state under a short database lock, then writes through the selected storage backend without holding the global database mutex.
 * `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts.
-* `forceSync()` runs the same forced captured-state checkpoint synchronously and touches flash in the caller context.
+* `forceSync()` runs the same forced captured-state checkpoint synchronously and touches storage in the caller context.
 * `flush()` synchronously persists captured pending journal operations without forcing a checkpoint snapshot. Use it as a durability barrier before a controlled reboot.
 * `deinit()` waits for the sync task to exit before owned state is destroyed. By default it performs a final forced checkpoint; pass `{.sync = false}` to stop without final persistence.
 * A bounded explicit `deinit()` may return `FreshStatus::Timeout`; the object remains in a stopping state and a later `deinit()` can finish waiting. The destructor uses an unbounded task-exit barrier because owned state cannot be destroyed while the sync task may still access it. Production code should still call `FreshResult result = db.deinit();` manually when it needs to observe final-sync failures.
+* Use `withStorage()` for short application file operations. The raw `storage()` pointer is deprecated because it cannot guarantee backend lifetime during concurrent shutdown.
+* Fresh rejects application access below the configured database root. Store backup archives and other application files in sibling paths such as `/backups`.
+* Open `FreshFile` handles cause `deinit()` to return `FreshStatus::Busy` before the sync task stops. Close them explicitly; use `syncAndClose()` for durable application files.
 * `diagnostics()` reports model load recovery after `init()`, including corrupt snapshots or recovered journals.
 * `create()` intentionally mutates the input `JsonDocument` by adding `_id`, `createdAt`, and `updatedAt`.
 * After `startBackup()`, keep calling `readBackup()` until backup finishes or call `cancelBackup()`. An undrained backup can occupy the sync task and delay normal persistence.
 * `backupStatus()` returns `FreshBackupStatus`: use `state` as the stable `FreshBackupState` lifecycle signal and `result` for detailed success/failure diagnostics.
 * Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
 * Fresh enforces configurable document, journal, snapshot, and backend reserve limits. Oversized payloads return `FreshStatus::SizeLimitExceeded`; sync preflight space failures return `FreshStatus::StorageFull`.
-* Callbacks are notification hooks. Do not call `deinit()`, `flush()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
-* The current storage and backup formats use ArduinoJson MessagePack. Manifest and snapshot files use two durable slot files with checksummed binary headers. Formats are not stable compatibility contracts yet, and Fresh does not migrate older single-file `manifest.msgpack` / `snapshot.msgpack` storage into the durable-slot format.
+* Callbacks are notification hooks. Do not call `deinit()`, `flush()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, `withStorage()`, or long-blocking code from callbacks. Post work to another task instead.
 * Fresh `0.2.0` keeps one journal, snapshot, manifest, and backup format across LittleFS, SD, and custom backends. Manifest entries map logical names to immutable storage IDs, so rename never moves model directories.
 
 ## When not to use Fresh
 
-Fresh is not intended for large datasets, high-frequency telemetry, SQL-like querying, multi-device concurrency, or data that must be flash-durable immediately after every write.
+Fresh is not intended for large datasets, high-frequency telemetry, SQL-like querying, multi-device concurrency, or data that must be storage-durable immediately after every write.
 
 ## Persistence guarantees
 
-| Operation | RAM updated | Flash updated before return |
+| Operation | RAM updated | Storage updated before return |
 | --- | --- | --- |
 | `create()` / `update()` / `delete()` / `append()` | yes | no |
 | `flush()` | yes | yes, for the captured pending journal operations |
@@ -148,14 +150,17 @@ The repository includes topic-focused Arduino sketches in the `examples/` folder
 | `ValidatorsAndCallbacks` | Bool/result validators, `std::bind`, event/sync callbacks, and custom time. |
 | `BackupStream` | Backup callbacks, `startBackup`, chunked `readBackup`, status checks, and `backupImport`. |
 | `ModelManagement` | Create, rename, drop, drop selected, and drop all models. |
+| `LittleFSStorage` | Configure the managed LittleFS backend explicitly. |
 | `SDSPIStorage` | Configure Fresh-managed SD storage over SPI. |
 | `SDMMCStorage` | Configure Fresh-managed SDMMC storage. |
-| `SameFilesystemBackup` | Store a backup archive beside the database on the active backend. |
+| `SameFilesystemBackup` | Store a backup archive beside the database through `withStorage()`. |
 | `CustomStorage` | Implement and reload data through a caller-owned in-memory custom backend. |
-| `SelfTest` | Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior. It uses `/fresh_selftest`, `/fresh_selftest_src`, and `/fresh_selftest_dst`, touches internal storage files, and should only be run on a test device or test partition. |
-| `ReleaseHardeningTest` | Focused v0.1.0 validation for immutable storage IDs, rename persistence, configuration ceilings, synchronized metadata access, and repeatable shutdown. |
+| `StorageLifecycleRegressionTest` | Validate database-root protection, open-file shutdown blocking, and repeated initialization. |
+| `StorageFailureRegressionTest` | Inject short-write, sync, close, and unavailable-read failures into a custom backend. |
+| `SelfTest` | Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior. |
+| `ReleaseHardeningTest` | Focused validation for immutable storage IDs, rename persistence, configuration ceilings, synchronized metadata access, and repeatable shutdown. |
 
-`SelfTest` and `ReleaseHardeningTest` are compiled by CI through the examples build loop, but they are not executed in CI. Run both manually on ESP32 hardware. A successful run ends like this:
+Regression sketches are compiled by CI but are not executed in CI. Run them manually on representative ESP32 hardware. A successful `SelfTest` run ends like this:
 
 ```txt
 Fresh SelfTest starting
@@ -179,10 +184,12 @@ Detailed documentation is available in the `docs/` folder.
 | [`docs/getting-started.md`](docs/getting-started.md) | Step-by-step setup and first document flow. |
 | [`docs/configuration.md`](docs/configuration.md) | `FreshConfig` options and defaults. |
 | [`docs/storage.md`](docs/storage.md) | Built-in storage, custom backends, ownership, and durability contracts. |
+| [`docs/migration-0.2.0.md`](docs/migration-0.2.0.md) | Upgrade, storage selection, and manual migration guidance. |
+| [`docs/release-notes-0.2.0.md`](docs/release-notes-0.2.0.md) | Fresh 0.2.0 feature and compatibility summary. |
 | [`docs/api.md`](docs/api.md) | Public classes, result types, callbacks, and backup API. |
 | [`docs/examples.md`](docs/examples.md) | Explanation of all included examples. |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common issues and solutions. |
-| [`docs/release-hardening.md`](docs/release-hardening.md) | v0.1.0 persistence, synchronization, shutdown, allocation, and validation invariants. |
+| [`docs/release-hardening.md`](docs/release-hardening.md) | Persistence, synchronization, shutdown, allocation, and validation invariants. |
 
 ## API overview
 
@@ -221,7 +228,7 @@ For the full API, see [`docs/api.md`](docs/api.md).
 | PSRAM | Used when available for internal allocations |
 | Dependencies | `bblanchon/ArduinoJson >= 7.0.0` |
 | Exceptions | Not used |
-| Status | `0.2.0` development |
+| Status | `0.2.0` pre-release |
 
 ## Configuration
 
@@ -272,9 +279,9 @@ fresh/
 
 ## Status
 
-Fresh is currently early-stage software at `0.1.0`.
+Fresh 0.2.0 is a pre-release. The complete source, lint, hardening, Arduino CLI, and PIOArduino compile matrix passes on ESP32, ESP32-C3, ESP32-S3, and ESP32-P4.
 
-The public API, storage format, and backup format may still change before a stable release. Fresh does not currently migrate older single-file `manifest.msgpack` / `snapshot.msgpack` storage into the durable-slot format. Data written by early versions may require export/import, manual migration, or a storage reset after format changes. Test it on your target ESP32 board before using it in production.
+Before production deployment, run the runtime regression sketches and validate the selected storage transport on the actual board, wiring, filesystem, and power-loss conditions used by the product. Automatic cross-filesystem migration and SD hot-swap recovery are intentionally not included.
 
 ## License
 
