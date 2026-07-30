@@ -2,6 +2,7 @@
 
 #include "../Fresh.h"
 
+#include <cctype>
 #include <cstring>
 
 namespace {
@@ -24,6 +25,18 @@ bool FreshModeToOpenMode(const char *mode, FreshOpenMode &openMode) {
 		return true;
 	}
 	return false;
+}
+
+bool FreshLooksLikeModelStorageDirectory(const char *path) {
+	if (path == nullptr) return false;
+	const char *models = strstr(path, "/models/");
+	if (models == nullptr) return false;
+	const char *identifier = models + strlen("/models/");
+	if (strlen(identifier) != 16) return false;
+	for (const char *cursor = identifier; *cursor != '\0'; ++cursor) {
+		if (!isxdigit(static_cast<unsigned char>(*cursor))) return false;
+	}
+	return true;
 }
 
 } // namespace
@@ -61,13 +74,27 @@ FreshFile FreshStorageFileSystem::open(const char *path, const char *mode) const
 	return file;
 }
 
+FreshResult FreshStorageFileSystem::exists(const char *path, bool &result) const {
+	result = false;
+	if (FreshActiveStorage == nullptr) {
+		return FreshResult::failure(FreshStatus::StorageUnavailable, "storage is unavailable");
+	}
+	return FreshActiveStorage->exists(path, result);
+}
+
 bool FreshStorageFileSystem::exists(const char *path) const {
-	if (FreshActiveStorage == nullptr) return true;
 	bool result = false;
-	FreshResult existsResult = FreshActiveStorage->exists(path, result);
-	// Existing persistence code treats false as proven absence. On backend
-	// failure, conservatively report present so the following open/read fails
-	// instead of creating an empty database or deleting uncertain storage.
+	FreshResult existsResult = exists(path, result);
+	if (!existsResult && FreshLooksLikeModelStorageDirectory(path)) {
+		// Storage-id allocation probes model directories in a loop. Reporting a
+		// failed probe as present would spin forever while the backend is absent.
+		// Returning false lets the following create/open operation surface the
+		// real storage failure while the model remains dirty for a later retry.
+		return false;
+	}
+	// Existing persistence reads treat false as proven absence. Everywhere
+	// else, conservatively report present so a following open/read returns the
+	// backend failure instead of creating an empty database or deleting data.
 	return !existsResult || result;
 }
 
