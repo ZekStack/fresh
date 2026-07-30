@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Fresh.h>
+#include <FreshFile.h>
 #include <LittleFS.h>
 
 #include <atomic>
@@ -18,6 +19,7 @@ constexpr const char *StorageId = "0123456789abcdef";
 constexpr const char *ModelPath = "/fresh_legacy_p4/models/0123456789abcdef";
 constexpr const char *ManifestPath = "/fresh_legacy_p4/manifest.b.msgpack";
 constexpr const char *JournalPath = "/fresh_legacy_p4/models/0123456789abcdef/journal.log";
+constexpr const char *SizeCachePath = "/fresh_vfs_size_cache.bin";
 constexpr const char *ModelName = "Items";
 constexpr size_t RecordCount = 2048;
 
@@ -34,6 +36,7 @@ constexpr uint64_t LegacyManifestGeneration = 1;
 Fresh database;
 std::atomic<bool> replayFinished{false};
 std::atomic<bool> replayPassed{false};
+std::atomic<uint32_t> cpu0ProbeRuns{0};
 
 uint32_t checksum(const uint8_t *data, size_t length) {
 	uint32_t hash = 2166136261u;
@@ -223,6 +226,71 @@ bool verifyReplayedRecords() {
 	return true;
 }
 
+FreshResult openApplicationFile(const char *path, FreshOpenMode mode, FreshFile &file) {
+	return database.withStorage([&](FreshStorage &storage) {
+		return storage.open(path, mode, file);
+	});
+}
+
+bool verifyVFSSizeCache() {
+	const uint8_t first[] = {1, 2, 3, 4};
+	const uint8_t second[] = {5, 6};
+
+	FreshFile file;
+	FreshResult opened = openApplicationFile(SizeCachePath, FreshOpenMode::Write, file);
+	if (!opened || file.write(first, sizeof(first)) != sizeof(first) || file.size() != sizeof(first)) {
+		Serial.println("VFS size cache did not track initial writes");
+		file.close();
+		return false;
+	}
+	if (!file.close()) {
+		Serial.println("failed to close initial VFS size-cache file");
+		return false;
+	}
+
+	opened = openApplicationFile(SizeCachePath, FreshOpenMode::Append, file);
+	if (!opened || file.size() != sizeof(first) ||
+	    file.write(second, sizeof(second)) != sizeof(second) ||
+	    file.size() != sizeof(first) + sizeof(second)) {
+		Serial.println("VFS size cache did not initialize or grow during append");
+		file.close();
+		return false;
+	}
+	if (!file.close()) {
+		Serial.println("failed to close appended VFS size-cache file");
+		return false;
+	}
+
+	opened = openApplicationFile(SizeCachePath, FreshOpenMode::Read, file);
+	if (!opened || file.size() != sizeof(first) + sizeof(second) ||
+	    file.available() != static_cast<int>(sizeof(first) + sizeof(second))) {
+		Serial.println("VFS size cache did not restore the open-time file size");
+		file.close();
+		return false;
+	}
+	if (!file.close()) {
+		Serial.println("failed to close read VFS size-cache file");
+		return false;
+	}
+
+	FreshResult removed = database.withStorage([](FreshStorage &storage) {
+		return storage.removeFile(SizeCachePath);
+	});
+	if (!removed) {
+		Serial.println("failed to remove VFS size-cache test file");
+		return false;
+	}
+	return true;
+}
+
+void cpu0ProbeTask(void *) {
+	while (!replayFinished.load()) {
+		cpu0ProbeRuns.fetch_add(1);
+		vTaskDelay(1);
+	}
+	vTaskDelete(nullptr);
+}
+
 void replayTask(void *) {
 	FreshConfig config;
 	config.syncIntervalMS = 60000;
@@ -230,9 +298,11 @@ void replayTask(void *) {
 	config.snapshotRecordThreshold = UINT32_MAX;
 	config.snapshotBytesThreshold = SIZE_MAX;
 
+	const uint32_t probeBefore = cpu0ProbeRuns.load();
 	const uint32_t startedAt = millis();
 	FreshResult initialized = database.init(DatabasePath, config);
 	const uint32_t replayDurationMS = millis() - startedAt;
+	const uint32_t probeRunsDuringReplay = cpu0ProbeRuns.load() - probeBefore;
 	if (!initialized) {
 		Serial.printf(
 		    "Fresh initialization failed: %s (%s)\n",
@@ -246,17 +316,25 @@ void replayTask(void *) {
 	}
 
 	Serial.printf(
-	    "Fresh 0.1.1 journal replay completed on CPU%d in %u ms\n",
+	    "Fresh 0.1.1 journal replay completed on CPU%d in %u ms; CPU0 probe ran %u times\n",
 	    xPortGetCoreID(),
-	    static_cast<unsigned>(replayDurationMS)
+	    static_cast<unsigned>(replayDurationMS),
+	    static_cast<unsigned>(probeRunsDuringReplay)
 	);
-	const bool verified = verifyReplayedRecords();
+	const bool cooperative = probeRunsDuringReplay > 0;
+	if (!cooperative) {
+		Serial.println("journal replay did not yield to the CPU0 cooperative probe");
+	}
+	const bool recordsVerified = verifyReplayedRecords();
+	const bool sizeCacheVerified = verifyVFSSizeCache();
 	FreshResult stopped = database.deinit(FreshDeinitOptions{.sync = false, .timeoutMS = 5000});
 	if (!stopped) {
 		Serial.printf("Fresh shutdown failed: %s\n", stopped.message.c_str());
 	}
 
-	replayPassed.store(verified && static_cast<bool>(stopped));
+	replayPassed.store(
+	    cooperative && recordsVerified && sizeCacheVerified && static_cast<bool>(stopped)
+	);
 	replayFinished.store(true);
 	vTaskDelete(nullptr);
 }
@@ -296,17 +374,28 @@ void setup() {
 	LittleFS.end();
 	delay(50);
 
-	BaseType_t created = xTaskCreatePinnedToCore(
+	BaseType_t probeCreated = xTaskCreatePinnedToCore(
+	    cpu0ProbeTask,
+	    "fresh-cpu0-probe",
+	    3 * 1024,
+	    nullptr,
+	    0,
+	    nullptr,
+	    0
+	);
+	BaseType_t replayCreated = xTaskCreatePinnedToCore(
 	    replayTask,
 	    "fresh-legacy-replay",
 	    24 * 1024,
 	    nullptr,
 	    5,
 	    nullptr,
+	    nullptr,
 	    0
 	);
-	if (created != pdPASS) {
-		Serial.println("failed to create CPU0 replay task");
+	if (probeCreated != pdPASS || replayCreated != pdPASS) {
+		Serial.println("failed to create CPU0 regression tasks");
+		replayFinished.store(true);
 	}
 #endif
 }
@@ -317,7 +406,7 @@ void loop() {
 	if (!reported && replayFinished.load()) {
 		reported = true;
 		Serial.println(replayPassed.load()
-		                   ? "PASS: all legacy records replayed without starving CPU0 idle"
+		                   ? "PASS: legacy replay recovered every record and yielded on CPU0"
 		                   : "FAIL: legacy database replay regression");
 	}
 #endif
