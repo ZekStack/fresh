@@ -60,7 +60,29 @@ Fresh::Fresh()
 }
 
 Fresh::~Fresh() {
-	deinit(FreshDeinitOptions{.sync = true, .timeoutMS = UINT32_MAX});
+	if (_storage) {
+		_storage->setApplicationFileAcceptance(false);
+		_storage->closeApplicationFiles(true);
+	}
+
+	FreshResult shutdown = deinit(FreshDeinitOptions{.sync = true, .timeoutMS = UINT32_MAX});
+	if (!shutdown) {
+		// A failed final sync must not leave the task running while member state is
+		// destroyed. Stop without another durability attempt, then invalidate any
+		// remaining handles before releasing the storage object.
+		if (_storage) {
+			_storage->setApplicationFileAcceptance(false);
+			_storage->closeApplicationFiles(false);
+		}
+		deinit(FreshDeinitOptions{.sync = false, .timeoutMS = UINT32_MAX});
+	}
+
+	if (_storage) {
+		_storage->setApplicationFileAcceptance(false);
+		_storage->closeAllFiles(false);
+		_storage->unmount();
+		_storage.reset();
+	}
 	if (_syncTaskExited != nullptr) {
 		vSemaphoreDelete(_syncTaskExited);
 		_syncTaskExited = nullptr;
@@ -187,6 +209,8 @@ FreshResult Fresh::initWithStorage(
 
 	auto resetInitState = [this]() {
 		if (_storage) {
+			_storage->setApplicationFileAcceptance(false);
+			_storage->closeAllFiles(false);
 			_storage->unmount();
 			_storage.reset();
 		}
@@ -253,6 +277,7 @@ FreshResult Fresh::initWithStorage(
 		resetInitState();
 		return storageMounted;
 	}
+	_storage->setApplicationFileAcceptance(true);
 	FreshStorageScope storageScope(_storage.get());
 
 	const size_t backupBytes = std::max<size_t>(_config.backupBufferSize, 512);
@@ -275,7 +300,11 @@ FreshResult Fresh::initWithStorage(
 
 	_rootPath = dbPath;
 	if (_rootPath.back() == '/' && _rootPath.size() > 1) _rootPath.pop_back();
-	_storage->setProtectedPath(_rootPath);
+	FreshResult protectedPath = _storage->setProtectedPath(_rootPath);
+	if (!protectedPath) {
+		resetInitState();
+		return protectedPath;
+	}
 
 	FreshResult dirResult = ensureDir(_rootPath);
 	if (!dirResult) {
@@ -379,22 +408,27 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 			}
 			return FreshResult::success("database not initialized");
 		}
-		if (_storage && _storage->openFileCount() != 0) {
+		if (_storage && _storage->applicationOpenFileCount() != 0) {
 			return FreshResult::failure(
 			    FreshStatus::Busy,
-			    "storage still has open files",
-			    _storage->openFileCount()
+			    "storage still has open application files",
+			    _storage->applicationOpenFileCount()
 			);
 		}
+		if (_storage) _storage->setApplicationFileAcceptance(false);
 		if (_lifecycle == Lifecycle::Running) {
-			_lifecycle = Lifecycle::FinalSync;
 			_stopping = true;
-			performFinalSync = options.sync;
+			if (options.sync) {
+				_lifecycle = Lifecycle::FinalSync;
+				performFinalSync = true;
+			} else {
+				_lifecycle = Lifecycle::StopRequested;
+			}
 		} else if (_lifecycle == Lifecycle::FinalSync) {
-			// A previous bounded call timed out before stop was committed. Preserve
-			// the pending final-sync decision so the retry cannot discard dirty RAM.
+			// Once a shutdown has entered FinalSync, a bounded retry cannot
+			// downgrade the original durability decision with sync=false.
 			_stopping = true;
-			performFinalSync = options.sync;
+			performFinalSync = true;
 		}
 		handle = _syncTaskHandle;
 		taskStarted = _syncTaskStarted;
@@ -406,8 +440,6 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		    FreshRemainingTicks(startedAt, options.timeoutMS, expired)
 		);
 		if (expired || !backupLock) {
-			// FinalSync intentionally remains pending. A later deinit() retries
-			// cancellation and final sync instead of proceeding directly to stop.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out cancelling backup");
 		}
 		_backup->requested = false;
@@ -424,7 +456,6 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		    FreshRemainingTicks(startedAt, options.timeoutMS, expired)
 		);
 		if (expired || !syncLock) {
-			// Keep FinalSync pending; the next bounded call retries safely.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out waiting for sync");
 		}
 		FreshResult finalSyncResult = syncDirty(true);
@@ -432,13 +463,13 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 			FreshLock lock(*_mutex);
 			_lifecycle = Lifecycle::Running;
 			_stopping = false;
+			if (_storage) _storage->setApplicationFileAcceptance(true);
 			return finalSyncResult;
 		}
 		FreshRemainingTicks(startedAt, options.timeoutMS, expired);
 		if (expired) {
-			FreshLock lock(*_mutex);
-			_lifecycle = Lifecycle::Running;
-			_stopping = false;
+			// Keep FinalSync pending. A retry may safely repeat a forced sync,
+			// while skipping it could discard data created before the first call.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit deadline expired during final sync");
 		}
 	}
@@ -446,11 +477,10 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 	{
 		FreshLock lock(*_mutex, FreshRemainingTicks(startedAt, options.timeoutMS, expired));
 		if (expired || !lock) {
-			// Stop has not been committed. FinalSync remains pending and is safe
-			// to repeat on the next call.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out requesting stop");
 		}
-		if (_lifecycle == Lifecycle::FinalSync || _lifecycle == Lifecycle::Running) {
+		if (_lifecycle == Lifecycle::FinalSync || _lifecycle == Lifecycle::Running ||
+		    _lifecycle == Lifecycle::StopRequested) {
 			_lifecycle = Lifecycle::StopRequested;
 			_stopTask = true;
 		}
@@ -472,6 +502,9 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		// for a semaphore that cannot be signalled again.
 	}
 
+	if (_storage && _storage->internalOpenFileCount() != 0) {
+		_storage->closeAllFiles(false);
+	}
 	FreshResult storageUnmounted = FreshResult::success("storage not configured");
 	if (_storage) storageUnmounted = _storage->unmount();
 
