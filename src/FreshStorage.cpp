@@ -1006,13 +1006,36 @@ FreshResult Fresh::syncDirty(bool force) {
 				usedStorageIds.insert(entry.second->storageId);
 			}
 		}
+		constexpr size_t maxStorageIdAttempts = 64;
 		for (const auto &entry : _models) {
 			const auto &state = entry.second;
 			if (!state->dropped && state->storageId.empty()) {
-				do {
-					state->storageId = FreshMakeId();
-				} while (usedStorageIds.find(state->storageId) != usedStorageIds.end() ||
-				         FreshFS.exists(modelPath(state->storageId).c_str()));
+				std::string selectedStorageId;
+				bool selected = false;
+				for (size_t attempt = 0; attempt < maxStorageIdAttempts; ++attempt) {
+					std::string candidate = FreshMakeId();
+					if (usedStorageIds.find(candidate) != usedStorageIds.end()) continue;
+
+					bool pathExists = false;
+					FreshResult existsResult = FreshFS.exists(
+					    modelPath(candidate).c_str(),
+					    pathExists
+					);
+					if (!existsResult) return existsResult;
+					if (!pathExists) {
+						selectedStorageId = std::move(candidate);
+						selected = true;
+						break;
+					}
+				}
+				if (!selected) {
+					return FreshResult::failure(
+					    FreshStatus::InternalError,
+					    "failed to allocate unique model storage id"
+					);
+				}
+
+				state->storageId = std::move(selectedStorageId);
 				usedStorageIds.insert(state->storageId);
 				state->storageEpoch++;
 				state->dirty = true;
