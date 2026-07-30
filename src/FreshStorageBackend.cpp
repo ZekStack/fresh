@@ -12,6 +12,7 @@
 #include <new>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 
 namespace {
 
@@ -183,6 +184,8 @@ FreshResult FreshStorage::reserveFileHandle(FreshFileOrigin origin) {
 
 void FreshStorage::releaseReservedFileHandle(FreshFileOrigin origin) {
 	if (!_fileRegistry) return;
+	FreshLock lock(_fileRegistry->mutex);
+	if (!lock) return;
 	FreshDecrementCounter(_fileRegistry->totalOpenFiles);
 	if (origin == FreshFileOrigin::Internal) {
 		FreshDecrementCounter(_fileRegistry->internalOpenFiles);
