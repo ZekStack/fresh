@@ -243,6 +243,9 @@ struct FreshStorageInfo {
 	std::string mountPath;
 	int nativeError = 0;
 	size_t openFileCount = 0;
+	size_t applicationOpenFileCount = 0;
+	size_t internalOpenFileCount = 0;
+	size_t maxOpenFiles = 0;
 	size_t totalBytes = 0;
 	size_t usedBytes = 0;
 	size_t freeBytes = 0;
