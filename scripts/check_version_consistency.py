@@ -7,6 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+ARDUINO_FILESYSTEM_BRIDGES = {
+    Path("src/internal/FreshArduinoLittleFSBridge.cpp"),
+}
 
 with (ROOT / "library.json").open(encoding="utf-8") as handle:
     json_version = json.load(handle)["version"]
@@ -32,14 +35,17 @@ if len(unique) != 1:
 for path in SRC.rglob("*"):
     if not path.is_file() or path.suffix not in {".h", ".hpp", ".c", ".cc", ".cpp"}:
         continue
+    relative_path = path.relative_to(ROOT)
+    if relative_path in ARDUINO_FILESYSTEM_BRIDGES:
+        continue
     text = path.read_text(encoding="utf-8", errors="replace")
     if re.search(r'#include\s*[<"](?:LittleFS|SD|SD_MMC)\.h[>"]', text):
         raise SystemExit(
-            f"{path.relative_to(ROOT)} directly includes an Arduino filesystem singleton"
+            f"{relative_path} directly includes an Arduino filesystem singleton"
         )
     if re.search(r"(?:^|[^A-Za-z0-9_])LittleFS\s*\.", text, re.MULTILINE):
         raise SystemExit(
-            f"{path.relative_to(ROOT)} directly accesses the Arduino LittleFS singleton"
+            f"{relative_path} directly accesses the Arduino LittleFS singleton"
         )
 
 print(f"version metadata is consistent: {json_version}")
