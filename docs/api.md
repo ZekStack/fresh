@@ -77,11 +77,35 @@ Common methods:
 | `renameModel(oldName, newName)` | Rename a model. |
 | `flush()` | Block until captured pending operations are journaled, without forcing a checkpoint snapshot. |
 | `forceSyncAsync()` | Request a forced checkpoint for dirty state captured by the sync task. |
-| `forceSync()` | Run a blocking forced checkpoint for captured dirty state that touches flash in the caller context. |
+| `forceSync()` | Run a blocking forced checkpoint for captured dirty state that touches storage in the caller context. |
 | `storageInfo()` | Return convenience storage identity, state, capacity, and native diagnostics. |
 | `storageInfo(result)` | Query storage information with a `FreshResult` that reports capacity-query failures. |
-| `storage()` | Return the active backend while Fresh is running for same-filesystem application files. |
+| `withStorage(callback)` | Run a short application storage operation under the Fresh lifecycle lock. |
 | `diagnostics()` | Return model load diagnostics collected during `init()`. |
+
+The legacy raw `storage()` pointer remains deprecated for source compatibility. New code should use `withStorage()` because the callback prevents backend lookup from racing with `deinit()`.
+
+### Guarded application storage access
+
+Use `withStorage()` to create directories or open files outside the Fresh database root:
+
+```cpp
+FreshFile archive;
+FreshResult opened = db.withStorage(
+    [&](FreshStorage& storage) -> FreshResult {
+        FreshResult directory = storage.createDirectory("/backups");
+        if (!directory) return directory;
+
+        return storage.open(
+            "/backups/configuration.fresh",
+            FreshOpenMode::Write,
+            archive
+        );
+    }
+);
+```
+
+The callback executes while Fresh holds its lifecycle mutex. Keep it short and do not call other database methods from inside it. Once a file is open, the callback may return; backend handle tracking causes `deinit()` to return `FreshStatus::Busy` until the file closes.
 
 `FreshDeinitOptions` controls explicit shutdown:
 
@@ -238,7 +262,7 @@ Callbacks use `std::function`, so lambdas and `std::bind` both work.
 
 `FreshEventType` values include model lifecycle events, document events, stream append, sync events, and backup events.
 
-Callbacks are notification hooks. Do not call `deinit()`, `flush()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, or long-blocking code from callbacks. Post work to another task instead.
+Callbacks are notification hooks. Do not call `deinit()`, `flush()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, `withStorage()`, or long-blocking code from callbacks. Post work to another task instead.
 
 ## Backup
 
