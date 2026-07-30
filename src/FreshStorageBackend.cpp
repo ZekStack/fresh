@@ -74,6 +74,10 @@ FreshResult FreshStorage::normalizeLogicalPath(
 	if (strchr(path, '\\') != nullptr) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "storage path contains a backslash");
 	}
+	if (length == 1) {
+		normalized = "/";
+		return FreshResult::success("storage path normalized");
+	}
 
 	normalized.reserve(length);
 	const char *segment = path + 1;
@@ -88,7 +92,7 @@ FreshResult FreshStorage::normalizeLogicalPath(
 		}
 		normalized.push_back(value);
 
-		if (value == '/' || index + 1 == length) {
+		if ((value == '/' && index > 0) || index + 1 == length) {
 			const char *end = value == '/' ? path + index : path + index + 1;
 			const size_t segmentLength = static_cast<size_t>(end - segment);
 			if ((segmentLength == 1 && segment[0] == '.') ||
