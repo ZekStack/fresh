@@ -19,6 +19,7 @@ struct FaultState {
     bool syncFailure = false;
     bool closeFailure = false;
     bool readFailure = false;
+    bool existsFailure = false;
 };
 
 class FaultFileBackend final : public FreshFileBackend {
@@ -152,7 +153,8 @@ class FaultFileBackend final : public FreshFileBackend {
 
 class FaultStorage final : public FreshStorage {
   public:
-    FaultStorage() : FreshStorage(FreshStorageType::Custom) {
+    explicit FaultStorage(size_t maxOpenFiles = SIZE_MAX)
+        : FreshStorage(FreshStorageType::Custom, nullptr, maxOpenFiles) {
         _directories.insert("/");
     }
 
@@ -182,6 +184,10 @@ class FaultStorage final : public FreshStorage {
 
     void failNextRead() {
         _faults.readFailure = true;
+    }
+
+    void failNextExists() {
+        _faults.existsFailure = true;
     }
 
     const char* name() const override {
@@ -263,6 +269,13 @@ class FaultStorage final : public FreshStorage {
 
     FreshResult existsBackend(const char* path, bool& exists) const override {
         exists = false;
+        if (_faults.existsFailure) {
+            _faults.existsFailure = false;
+            return FreshResult::failure(
+                FreshStatus::FileSystemError,
+                "injected exists failure"
+            );
+        }
         if (!validPath(path)) {
             return FreshResult::failure(
                 FreshStatus::InvalidArgument,
@@ -354,7 +367,7 @@ class FaultStorage final : public FreshStorage {
         return FreshResult::success("fault storage directory listed");
     }
 
-    FaultState _faults;
+    mutable FaultState _faults;
     std::map<std::string, std::vector<uint8_t>> _files;
     std::set<std::string> _directories;
 };
@@ -372,12 +385,60 @@ void check(bool condition, const char* label) {
 void setup() {
     Serial.begin(115200);
 
+    {
+        FaultStorage limited(2);
+        check(static_cast<bool>(limited.attach()), "attach limited storage");
+        check(
+            static_cast<bool>(limited.createDirectory("/tests")),
+            "create limited storage directory"
+        );
+        FreshFile first;
+        FreshFile second;
+        FreshFile third;
+        check(
+            static_cast<bool>(limited.open(
+                "/tests/first.bin",
+                FreshOpenMode::Write,
+                first
+            )) &&
+                static_cast<bool>(limited.open(
+                    "/tests/second.bin",
+                    FreshOpenMode::Write,
+                    second
+                )),
+            "open files up to configured limit"
+        );
+        FreshResult limitedOpen = limited.open(
+            "/tests/third.bin",
+            FreshOpenMode::Write,
+            third
+        );
+        check(
+            !limitedOpen && limitedOpen.status == FreshStatus::Busy,
+            "reject file beyond configured limit"
+        );
+        first.close();
+        check(
+            static_cast<bool>(limited.open(
+                "/tests/third.bin",
+                FreshOpenMode::Write,
+                third
+            )),
+            "reuse released file slot"
+        );
+        second.close();
+        third.close();
+        check(static_cast<bool>(limited.detach()), "detach limited storage");
+    }
+
     FaultStorage storage;
     check(static_cast<bool>(storage.attach()), "attach fault storage");
 
     Fresh database;
+    FreshConfig config;
+    config.syncIntervalMS = 60'000;
     check(
-        static_cast<bool>(database.init("/fresh_failure", storage)),
+        static_cast<bool>(database.init("/fresh_failure", storage, config)),
         "initialize Fresh on custom fault storage"
     );
 
@@ -407,6 +468,24 @@ void setup() {
         shortFile.write(payload, sizeof(payload)) != sizeof(payload) &&
             shortFile.getWriteError() != 0,
         "propagate short write"
+    );
+    shortFile.close();
+
+    check(
+        static_cast<bool>(database.withStorage(
+            [&](FreshStorage& activeStorage) {
+                return activeStorage.open(
+                    "/tests/reused.bin",
+                    FreshOpenMode::Write,
+                    shortFile
+                );
+            }
+        )) && shortFile.getWriteError() == 0,
+        "clear stale Print error when FreshFile is reused"
+    );
+    check(
+        shortFile.write(payload, sizeof(payload)) == sizeof(payload),
+        "write succeeds after FreshFile reuse"
     );
     shortFile.close();
 
@@ -472,6 +551,27 @@ void setup() {
         "propagate unavailable read"
     );
     readFile.close();
+
+    FreshModelResult created = database.createModel("exists_failure");
+    check(static_cast<bool>(created), "create model for exists failure");
+    JsonDocument document;
+    document["value"] = 1;
+    check(
+        static_cast<bool>(created.model.create(document)),
+        "create dirty document for exists failure"
+    );
+    storage.failNextExists();
+    const uint32_t syncStartedAt = millis();
+    FreshResult existsFailure = database.forceSync();
+    check(
+        !existsFailure && existsFailure.status == FreshStatus::FileSystemError &&
+            millis() - syncStartedAt < 1000,
+        "abort sync promptly when storage existence query fails"
+    );
+    check(
+        static_cast<bool>(database.forceSync()),
+        "retry dirty sync after exists failure"
+    );
 
     check(static_cast<bool>(database.deinit()), "deinitialize database");
     check(static_cast<bool>(storage.detach()), "detach fault storage");
