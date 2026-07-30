@@ -14,7 +14,7 @@
 #include <limits>
 
 FreshSDStorage::FreshSDStorage(const FreshSDConfig &config)
-    : FreshStorage(FreshStorageType::SD, config.mountPath), _config(config) {
+    : FreshStorage(FreshStorageType::SD, config.mountPath, config.maxOpenFiles), _config(config) {
 }
 
 const char *FreshSDStorage::name() const {
