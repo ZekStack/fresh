@@ -35,6 +35,8 @@ FreshResult initialized = database.init("/fresh", config);
 
 Fresh mounts the partition during `init()` and unmounts it after the sync task exits during `deinit()`.
 
+`maxOpenFiles` is enforced by Fresh for every file opened through this storage instance, including internal persistence files and application files. It is not presented as a runtime LittleFS VFS registration option.
+
 `formatOnMountFailure` is disabled by default. Enabling it allows Fresh to erase and format the selected LittleFS partition after a mount failure.
 
 The deprecated `FreshConfig::eraseOnFileSystemFailure` field remains as a compatibility alias for `littleFS.formatOnMountFailure` during the 0.2.0 transition.
@@ -206,6 +208,12 @@ private:
 
 A VFS-mounted custom backend may inherit the default file and directory implementations by supplying a mount path to the `FreshStorage` constructor. A non-VFS backend overrides the primitives and returns its own `FreshFileBackend` implementation.
 
+Custom backends may pass a third constructor argument to enforce a backend-independent concurrent file limit:
+
+```cpp
+FreshStorage(FreshStorageType::Custom, nullptr, 8)
+```
+
 ### File backend contract
 
 `FreshFileBackend` must implement:
@@ -229,7 +237,7 @@ Fresh performs the following sequence for durable journals, snapshots, and manif
 4. call `close()`, and
 5. reopen and verify durable slot data where the format requires verification.
 
-A custom backend must return failures honestly. It must not convert unavailable media, short writes, failed synchronization, or failed close operations into success.
+A custom backend must return failures honestly. It must not convert unavailable media, failed existence queries, short writes, failed synchronization, or failed close operations into success.
 
 ## Logical paths
 
@@ -244,14 +252,15 @@ Fresh passes storage-root-relative logical paths beginning with `/`:
 
 Built-in VFS backends prepend their configured mount point internally. Applications and custom backends must not expose the VFS mount point as part of logical paths.
 
-The default backend rejects:
+Every public storage operation canonicalizes and validates its logical path before access control or backend dispatch. Fresh rejects:
 
 - paths without a leading `/`,
+- repeated separators such as `//fresh`,
 - `.` and `..` traversal segments,
 - backslashes, and
-- paths beyond the configured implementation limit.
+- paths beyond the implementation limit.
 
-Custom backends should enforce equivalent path isolation.
+A trailing separator is normalized away except for `/`. The configured database root is normalized through the same path boundary before it is protected. Custom backends receive the already validated logical path and should preserve equivalent path isolation for any backend-specific aliases such as case folding.
 
 ## Application files and backup archives
 
@@ -275,7 +284,7 @@ FreshResult opened = database.withStorage(
 
 `withStorage()` holds the Fresh lifecycle lock while the callback runs. This prevents `deinit()` from detaching or destroying the backend between storage lookup and file open. Keep the callback short and do not call database methods from inside it.
 
-Once a `FreshFile` is open, the callback may return. The backend tracks the file handle, and `deinit()` returns `FreshStatus::Busy` until the file is closed.
+Once a `FreshFile` is open, the callback may return. The file owns a shared state object rather than a raw pointer back to `FreshStorage`. Explicit `deinit()` returns `FreshStatus::Busy` until every application file is closed.
 
 Recommended layout:
 
@@ -289,6 +298,10 @@ Fresh rejects application operations targeting the configured database root or a
 The raw `Fresh::storage()` pointer remains deprecated for source compatibility. New code must use `withStorage()` because a raw pointer cannot provide a lifetime guarantee across concurrent shutdown.
 
 Close every `FreshFile` before calling `deinit()`. Use `syncAndClose()` when the application file is a durability boundary.
+
+When a `Fresh` object is destroyed with an application file still alive, destruction performs best-effort file synchronization, closes and invalidates the shared file state, completes the database shutdown barrier, and then releases storage. The surviving `FreshFile` object is safe to inspect or close but behaves as a closed file. This emergency cleanup prevents use-after-free; it is not a replacement for an explicit application durability boundary.
+
+A `FreshFile` reused for a later successful open starts with a cleared inherited `Print` write-error state. Moving a file transfers its current write-error state to the destination and clears the moved-from object.
 
 ## Storage information
 
@@ -317,7 +330,10 @@ The result-aware form distinguishes a real zero-capacity value from a failed cap
 - backend name,
 - mount path,
 - backend-native error code,
-- active Fresh file count,
+- total active Fresh file count,
+- application file count,
+- internal persistence file count,
+- configured concurrent file limit,
 - total bytes,
 - used bytes, and
 - free bytes.
@@ -326,18 +342,37 @@ Custom backends may override result-aware information retrieval when capacity qu
 
 ## Shutdown and open handles
 
-`deinit()` performs:
+Explicit `deinit()` performs:
 
-1. reject new database operations,
-2. reject shutdown if application files remain open,
+1. reject shutdown with `FreshStatus::Busy` if application files remain open,
+2. reject new application file opens,
 3. cancel or finish backup activity,
 4. perform the requested final sync,
 5. stop and join the sync task,
-6. verify that no Fresh files remain open,
+6. verify or invalidate any remaining internal handle,
 7. unmount or detach storage according to ownership mode, and
 8. destroy Fresh-owned backend state.
 
-A bounded `deinit()` failure leaves the object in a retryable lifecycle state where possible. Call `deinit()` again after resolving the reported condition.
+Application and internal files are counted separately. A transient internal persistence handle no longer causes explicit shutdown to return `Busy`; shutdown waits for the sync boundary instead.
+
+A bounded `deinit()` failure leaves the object in a retryable lifecycle state where possible. Once a call enters final-sync mode, later retries cannot weaken that pending durability decision by passing `sync = false`; the final sync is retried before stop is committed.
+
+The destructor is an unbounded lifetime barrier. It first stops accepting new application files, closes surviving application file states, and then performs normal shutdown. If the durability attempt itself fails, it still stops the task and invalidates remaining handles before member state is destroyed.
+
+## Open-file limits
+
+`littleFS.maxOpenFiles`, `sd.maxOpenFiles`, and the optional custom-storage constructor limit are enforced at `FreshStorage::open()` before the backend is invoked.
+
+The limit includes:
+
+- application files opened through `withStorage()`,
+- journals,
+- snapshots,
+- manifests,
+- restore staging files, and
+- backup archives opened through the same storage instance.
+
+When the limit is reached, `open()` returns `FreshStatus::Busy`. A successful or failed close releases the reserved slot exactly once. `FreshStorageInfo` exposes the current total, application, and internal counts to help diagnose constrained devices.
 
 ## SD card removal
 
@@ -346,6 +381,7 @@ Automatic hot-swap recovery is not included in 0.2.0.
 If SD media disappears during operation:
 
 - the current operation returns a storage or filesystem error,
+- failed existence probes abort the current sync instead of spinning during model-ID allocation,
 - dirty RAM state remains dirty,
 - unverified writes are not marked committed,
 - restore staging is retained when manifest commit state is uncertain, and
@@ -376,6 +412,8 @@ Fresh does not automatically fall back from SD to LittleFS because doing so coul
 - reinitialization against the same storage instance, and
 - persisted document reload.
 
-`examples/StorageLifecycleRegressionTest` exercises the same lifecycle rules using the built-in LittleFS backend.
+`examples/StorageLifecycleRegressionTest` exercises path authorization, per-origin handle accounting, explicit Busy shutdown, leaked-file destructor cleanup, and repeated LittleFS lifecycle behavior.
+
+`examples/StorageFailureRegressionTest` exercises configured handle limits, failed existence probes, short writes, read/sync/close failures, and `FreshFile` reuse after a write error.
 
 Production backends also need failure-path and power-loss testing appropriate to their storage medium.
