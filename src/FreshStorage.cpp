@@ -486,9 +486,10 @@ std::string Fresh::modelFile(const std::string &storageId, const char *fileName)
 }
 
 FreshResult Fresh::ensureDir(const std::string &path) {
-	if (FreshFS.exists(path.c_str())) {
-		return FreshResult::success();
-	}
+	bool exists = false;
+	FreshResult existsResult = FreshFS.exists(path.c_str(), exists);
+	if (!existsResult) return existsResult;
+	if (exists) return FreshResult::success();
 	if (!FreshFS.mkdir(path.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create directory");
 	}
