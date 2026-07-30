@@ -7,6 +7,7 @@
 #include <internal/FreshMemory.h>
 #endif
 
+#include <atomic>
 #include <string>
 
 namespace {
@@ -158,6 +159,72 @@ bool testFailedFinalSyncIsRetryable() {
 	return preserved && expectResult(forcedClose, "retry deinit without sync");
 }
 
+bool testTimedOutFinalSyncIntentIsPreserved() {
+	removeTree(TestPath);
+	Fresh db;
+	FreshModelResult items = prepareModel(db);
+	if (!items) return false;
+	if (!expectResult(db.forceSync(), "persist shutdown timeout baseline")) return false;
+
+	std::atomic<bool> blockFirstSync{true};
+	std::atomic<bool> callbackEntered{false};
+	std::atomic<bool> releaseCallback{false};
+	db.onSync([&](FreshResult) {
+		if (!blockFirstSync.exchange(false)) return;
+		callbackEntered.store(true);
+		while (!releaseCallback.load()) delay(1);
+	});
+
+	JsonDocument firstPatch;
+	firstPatch["value"] = 2;
+	if (!expectResult(items.model.updateById("item-1", firstPatch), "prepare first async sync batch")) {
+		return false;
+	}
+	if (!expectResult(db.forceSyncAsync(), "start blocked background sync")) return false;
+
+	const uint32_t callbackDeadline = millis() + 2000;
+	while (!callbackEntered.load() && static_cast<int32_t>(callbackDeadline - millis()) > 0) {
+		delay(1);
+	}
+	if (!expect(callbackEntered.load(), "background sync callback did not start")) {
+		releaseCallback.store(true);
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	JsonDocument secondPatch;
+	secondPatch["value"] = 3;
+	if (!expectResult(items.model.updateById("item-1", secondPatch), "create data after sync batch capture")) {
+		releaseCallback.store(true);
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	FreshResult timedOut = db.deinit(FreshDeinitOptions{.sync = true, .timeoutMS = 50});
+	const bool timeoutObserved = expect(
+	    !timedOut && timedOut.status == FreshStatus::Timeout,
+	    "final-sync shutdown did not time out at the sync barrier"
+	);
+	releaseCallback.store(true);
+
+	FreshResult retry = db.deinit(FreshDeinitOptions{.sync = false, .timeoutMS = 5000});
+	const bool retrySucceeded = expectResult(
+	    retry,
+	    "sync=false retry did not preserve pending final sync"
+	);
+	if (!timeoutObserved || !retrySucceeded) return false;
+
+	FreshConfig config;
+	config.syncIntervalMS = 60000;
+	if (!expectResult(db.init(TestPath, config), "reinitialize after timed-out final sync")) return false;
+	FreshResult found = db.model("Items").findById("item-1");
+	const bool persisted = expectResult(found, "reload data after timed-out final sync") &&
+	                       expect((found.doc["value"] | 0) == 3,
+	                              "sync=false retry discarded the pending final sync");
+	db.deinit(FreshDeinitOptions{.sync = false});
+	return persisted;
+}
+
 #if defined(FRESH_TESTING)
 bool testAllocationFailureIsRetryable() {
 	removeTree(TestPath);
@@ -214,6 +281,7 @@ void setup() {
 	runTest("invalid patch is atomic", testInvalidPatchIsAtomic);
 	runTest("predicate reentrancy returns busy", testPredicateReentrancyReturnsBusy);
 	runTest("failed final sync is retryable", testFailedFinalSyncIsRetryable);
+	runTest("timed-out final sync intent is preserved", testTimedOutFinalSyncIntentIsPreserved);
 #if defined(FRESH_TESTING)
 	runTest("allocation failure is retryable", testAllocationFailureIsRetryable);
 #endif
