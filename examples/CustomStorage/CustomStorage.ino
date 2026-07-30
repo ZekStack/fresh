@@ -325,25 +325,32 @@ void setup() {
 		);
 		require(database.storageInfo(storageInfo), "retry custom storage information");
 
-		FreshStorage *activeStorage = database.storage();
-		require(activeStorage != nullptr, "resolve custom storage view");
-		FreshFile forbidden;
-		FreshResult forbiddenOpen = activeStorage->open(
-		    "/fresh/forbidden.bin",
-		    FreshOpenMode::Write,
-		    forbidden
-		);
-		require(
-		    !forbiddenOpen && forbiddenOpen.status == FreshStatus::UnsupportedOperation,
-		    "protect custom database root"
-		);
-
-		require(activeStorage->createDirectory("/backups"), "create custom backup directory");
 		FreshFile archive;
-		require(
-		    activeStorage->open("/backups/custom.bin", FreshOpenMode::Write, archive),
-		    "open custom application file"
+		FreshResult opened = database.withStorage(
+		    [&](FreshStorage &activeStorage) -> FreshResult {
+			    FreshFile forbidden;
+			    FreshResult forbiddenOpen = activeStorage.open(
+			        "/fresh/forbidden.bin",
+			        FreshOpenMode::Write,
+			        forbidden
+			    );
+			    require(
+			        !forbiddenOpen &&
+			            forbiddenOpen.status == FreshStatus::UnsupportedOperation,
+			        "protect custom database root"
+			    );
+
+			    FreshResult directory = activeStorage.createDirectory("/backups");
+			    if (!directory) return directory;
+			    return activeStorage.open(
+			        "/backups/custom.bin",
+			        FreshOpenMode::Write,
+			        archive
+			    );
+		    }
 		);
+		require(opened, "open custom application file");
+
 		const uint8_t marker[] = {0x46, 0x52, 0x45, 0x53, 0x48};
 		require(archive.write(marker, sizeof(marker)) == sizeof(marker), "write custom application file");
 
