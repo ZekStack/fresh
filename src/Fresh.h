@@ -310,6 +310,7 @@ using FreshEventCallback = std::function<void(FreshEvent)>;
 using FreshSyncCallback = std::function<void(FreshResult)>;
 using FreshBackupCallback = std::function<void(FreshBackupInfo)>;
 using FreshTimeCallback = std::function<uint64_t()>;
+using FreshStorageCallback = std::function<FreshResult(FreshStorage &)>;
 
 class FreshModel {
   public:
@@ -438,8 +439,9 @@ class Fresh {
 
 	FreshStorageInfo storageInfo() const;
 	FreshResult storageInfo(FreshStorageInfo &result) const;
-	FreshStorage *storage();
-	const FreshStorage *storage() const;
+	FreshResult withStorage(FreshStorageCallback callback);
+	[[deprecated("Use withStorage() to avoid storage lifecycle races")]] FreshStorage *storage();
+	[[deprecated("Use storageInfo() for inspection")]] const FreshStorage *storage() const;
 	FreshDiagnostics diagnostics() const;
 	FreshResult collectGarbage(FreshGarbageCollectionResult &result);
 
