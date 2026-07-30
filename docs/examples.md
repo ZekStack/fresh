@@ -47,7 +47,7 @@ Demonstrates RAM-first writes and background persistence:
 * `storageInfo()`
 * `model(name)` lookup
 
-Use this when tuning persistence timing or explaining why an accepted write may not immediately appear in flash usage.
+Use this when tuning persistence timing or explaining why an accepted write may not immediately appear in storage usage.
 
 ## StreamModel
 
@@ -110,6 +110,12 @@ Demonstrates model lifecycle helpers:
 
 Use this for setup tools, reset flows, and maintenance screens.
 
+## LittleFSStorage
+
+Path: [`../examples/LittleFSStorage/LittleFSStorage.ino`](../examples/LittleFSStorage/LittleFSStorage.ino)
+
+Configures the managed LittleFS backend explicitly, including partition label, VFS mount path, open-file limit, formatting policy, grow-on-mount behavior, and result-aware capacity reporting.
+
 ## SDSPIStorage
 
 Path: [`../examples/SDSPIStorage/SDSPIStorage.ino`](../examples/SDSPIStorage/SDSPIStorage.ino)
@@ -126,13 +132,36 @@ Configures Fresh-managed SDMMC storage using target-default routing. See `storag
 
 Path: [`../examples/SameFilesystemBackup/SameFilesystemBackup.ino`](../examples/SameFilesystemBackup/SameFilesystemBackup.ino)
 
-Streams a Fresh backup into `/backups/configuration.fresh` through the active backend, then explicitly synchronizes and closes the archive.
+Streams a Fresh backup into `/backups/configuration.fresh` through lifecycle-safe `withStorage()` access, then explicitly synchronizes and closes the archive.
 
 ## CustomStorage
 
 Path: [`../examples/CustomStorage/CustomStorage.ino`](../examples/CustomStorage/CustomStorage.ino)
 
-Implements a non-VFS in-memory `FreshStorage` and `FreshFileBackend`, attaches it as caller-owned storage, persists a document, deinitializes, reinitializes, and verifies the document reloads.
+Implements a non-VFS in-memory `FreshStorage` and `FreshFileBackend`, attaches it as caller-owned storage, persists a document, deinitializes, reinitializes, verifies the document reloads, propagates a storage-information failure, protects the database root, and blocks shutdown while an application file remains open.
+
+## StorageLifecycleRegressionTest
+
+Path: [`../examples/StorageLifecycleRegressionTest/StorageLifecycleRegressionTest.ino`](../examples/StorageLifecycleRegressionTest/StorageLifecycleRegressionTest.ino)
+
+Uses the built-in LittleFS backend to verify:
+
+* application access below the database root is rejected
+* sibling application directories remain available
+* `deinit()` returns `FreshStatus::Busy` while a file is open
+* shutdown succeeds after `syncAndClose()`
+* repeated init/deinit remains valid
+
+## StorageFailureRegressionTest
+
+Path: [`../examples/StorageFailureRegressionTest/StorageFailureRegressionTest.ino`](../examples/StorageFailureRegressionTest/StorageFailureRegressionTest.ino)
+
+Implements a custom fault-injecting backend and verifies that `FreshFile` propagates:
+
+* short writes and `Print` write errors
+* synchronization failures
+* close failures
+* unavailable reads and native error values
 
 ## SelfTest
 
@@ -142,7 +171,7 @@ Destructive Fresh development self-test for persistence, recovery, backup, and s
 
 It uses `/fresh_selftest`, `/fresh_selftest_src`, and `/fresh_selftest_dst`, touches internal storage files, and should only be run on a test device or test partition. SelfTest intentionally depends on the current Fresh storage layout and may need updates when the storage format changes.
 
-SelfTest is compiled by CI through the examples build loop, but it is not executed in CI. Run it manually on ESP32 hardware. A successful run ends like this:
+SelfTest and the regression sketches are compiled by CI, but they are not executed in CI. Run them manually on ESP32 hardware. A successful SelfTest run ends like this:
 
 ```txt
 Fresh SelfTest starting
