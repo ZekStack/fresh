@@ -163,6 +163,14 @@ Implements a custom fault-injecting backend and verifies that `FreshFile` propag
 * close failures
 * unavailable reads and native error values
 
+## LegacyDatabaseP4RegressionTest
+
+Path: [`../examples/LegacyDatabaseP4RegressionTest/LegacyDatabaseP4RegressionTest.ino`](../examples/LegacyDatabaseP4RegressionTest/LegacyDatabaseP4RegressionTest.ino)
+
+ESP32-P4 two-boot runtime regression for Fresh 0.1.1 database compatibility. The first boot writes a byte-compatible legacy manifest and a 2,048-record `journal.log` through Arduino LittleFS, then restarts. The second boot mounts the existing partition through Fresh 0.2.0, replays on a CPU0-pinned task, verifies every record, checks that a priority-zero CPU0 probe ran during replay, and validates cached VFS file-size growth across write, append, and read opens.
+
+Run this sketch with the five-second CPU0 idle-task watchdog used by the target application. CI compiles the sketch for ESP32-P4 but cannot execute the two-boot hardware test.
+
 ## SelfTest
 
 Path: [`../examples/SelfTest/SelfTest.ino`](../examples/SelfTest/SelfTest.ino)

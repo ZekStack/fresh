@@ -390,7 +390,6 @@ void setup() {
 	    nullptr,
 	    5,
 	    nullptr,
-	    nullptr,
 	    0
 	);
 	if (probeCreated != pdPASS || replayCreated != pdPASS) {
