@@ -16,7 +16,8 @@ namespace {
 
 class FreshVFSFileBackend final : public FreshFileBackend {
   public:
-	explicit FreshVFSFileBackend(FILE *file) : _file(file) {
+	FreshVFSFileBackend(FILE *file, size_t initialSize)
+	    : _file(file), _size(initialSize) {
 	}
 
 	~FreshVFSFileBackend() override {
@@ -75,6 +76,13 @@ class FreshVFSFileBackend final : public FreshFileBackend {
 	size_t write(const uint8_t *buffer, size_t length) override {
 		if (_file == nullptr || buffer == nullptr || length == 0) return 0;
 		const size_t written = fwrite(buffer, 1, length, _file);
+		if (written > 0) {
+			const long current = ftell(_file);
+			if (current >= 0) {
+				const size_t end = static_cast<size_t>(current);
+				if (end > _size) _size = end;
+			}
+		}
 		if (written != length) _lastError = errno == 0 ? EIO : errno;
 		return written;
 	}
@@ -95,11 +103,7 @@ class FreshVFSFileBackend final : public FreshFileBackend {
 	}
 
 	size_t size() const override {
-		if (_file == nullptr) return 0;
-		struct stat status {};
-		const int descriptor = fileno(_file);
-		if (descriptor < 0 || fstat(descriptor, &status) != 0 || status.st_size < 0) return 0;
-		return static_cast<size_t>(status.st_size);
+		return _file != nullptr ? _size : 0;
 	}
 
 	FreshResult sync() override {
@@ -139,6 +143,7 @@ class FreshVFSFileBackend final : public FreshFileBackend {
 
   private:
 	FILE *_file = nullptr;
+	size_t _size = 0;
 	int _lastError = 0;
 };
 
@@ -191,7 +196,15 @@ FreshResult FreshOpenVFSFile(
 	if (file == nullptr) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open storage file");
 	}
-	backend.reset(new (std::nothrow) FreshVFSFileBackend(file));
+
+	struct stat status {};
+	const int descriptor = fileno(file);
+	if (descriptor < 0 || fstat(descriptor, &status) != 0 || status.st_size < 0) {
+		fclose(file);
+		return FreshResult::failure(FreshStatus::FileSystemError, "failed to inspect storage file");
+	}
+	const size_t initialSize = static_cast<size_t>(status.st_size);
+	backend.reset(new (std::nothrow) FreshVFSFileBackend(file, initialSize));
 	if (!backend) {
 		fclose(file);
 		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate file backend");

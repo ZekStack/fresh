@@ -768,7 +768,23 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 
 	bool journalRecovered = false;
 	bool journalCleanupNeeded = false;
+	constexpr size_t replayRecordYieldBudget = 32;
+	constexpr uint32_t replayTimeYieldBudgetMS = 10;
+	uint32_t lastReplayYieldAt = millis();
+	size_t replayRecordsSinceYield = 0;
+	auto cooperativeReplayYield = [&](bool recordCompleted) {
+		if (recordCompleted) replayRecordsSinceYield++;
+		const uint32_t now = millis();
+		if (replayRecordsSinceYield < replayRecordYieldBudget &&
+		    static_cast<uint32_t>(now - lastReplayYieldAt) < replayTimeYieldBudgetMS) {
+			return;
+		}
+		delay(1);
+		lastReplayYieldAt = millis();
+		replayRecordsSinceYield = 0;
+	};
 	while (file.available() > 0) {
+		cooperativeReplayYield(false);
 		uint32_t magic = 0;
 		uint16_t version = 0;
 		uint8_t opByte = 0;
@@ -827,6 +843,7 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 			journalRecovered = true;
 			break;
 		}
+		cooperativeReplayYield(false);
 		if (FreshChecksum(payload.data(), payload.size()) != expectedChecksum) {
 			state->degraded = true;
 			journalRecovered = true;
@@ -865,6 +882,7 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 		_nextPendingSequence = std::max(_nextPendingSequence, record.sequence + 1);
 		if (record.sequence <= state->checkpointSequence) {
 			journalCleanupNeeded = true;
+			cooperativeReplayYield(true);
 			continue;
 		}
 		if (record.sequence <= state->lastSequence) {
@@ -897,6 +915,7 @@ FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) 
 			return FreshResult::failure(FreshStatus::CorruptData, "journal byte counter overflow");
 		}
 		state->bytesSinceSnapshot += payloadSize;
+		cooperativeReplayYield(true);
 	}
 	file.close();
 	if (journalRecovered || journalCleanupNeeded) {
