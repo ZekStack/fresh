@@ -12,7 +12,7 @@ extern "C" {
 #include <limits>
 
 FreshLittleFSStorage::FreshLittleFSStorage(const FreshLittleFSConfig &config)
-    : FreshStorage(FreshStorageType::LittleFS, config.mountPath),
+    : FreshStorage(FreshStorageType::LittleFS, config.mountPath, config.maxOpenFiles),
       _config(config),
       _partitionLabel(config.partitionLabel != nullptr ? config.partitionLabel : "") {
 }
