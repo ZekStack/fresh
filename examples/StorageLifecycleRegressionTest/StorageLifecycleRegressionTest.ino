@@ -38,52 +38,51 @@ void setup() {
         "initialize database"
     );
 
-    FreshStorage* storage = database.storage();
-    check(storage != nullptr, "resolve active storage");
+    FreshFile archive;
+    FreshResult opened = database.withStorage(
+        [&](FreshStorage& storage) -> FreshResult {
+            FreshFile forbidden;
+            FreshResult forbiddenOpen = storage.open(
+                "/fresh_storage_lifecycle/forbidden.bin",
+                FreshOpenMode::Write,
+                forbidden
+            );
+            check(
+                !forbiddenOpen &&
+                    forbiddenOpen.status == FreshStatus::UnsupportedOperation,
+                "reject application access to database root"
+            );
 
-    if (storage != nullptr) {
-        FreshFile forbidden;
-        FreshResult forbiddenOpen = storage->open(
-            "/fresh_storage_lifecycle/forbidden.bin",
-            FreshOpenMode::Write,
-            forbidden
-        );
-        check(
-            !forbiddenOpen &&
-                forbiddenOpen.status == FreshStatus::UnsupportedOperation,
-            "reject application access to database root"
-        );
+            FreshResult directory = storage.createDirectory("/backups");
+            if (!directory) return directory;
 
-        checkResult(
-            storage->createDirectory("/backups"),
-            "create application backup directory"
-        );
-
-        FreshFile archive;
-        checkResult(
-            storage->open(
+            return storage.open(
                 "/backups/lifecycle.bin",
                 FreshOpenMode::Write,
                 archive
-            ),
-            "open application file"
-        );
+            );
+        }
+    );
+    checkResult(opened, "open application file through guarded access");
 
-        const uint8_t payload[] = {0x46, 0x52, 0x45, 0x53, 0x48};
-        check(
-            archive.write(payload, sizeof(payload)) == sizeof(payload),
-            "write application file"
-        );
+    const uint8_t payload[] = {0x46, 0x52, 0x45, 0x53, 0x48};
+    check(
+        archive.write(payload, sizeof(payload)) == sizeof(payload),
+        "write application file"
+    );
 
-        FreshResult busy = database.deinit();
-        check(
-            !busy && busy.status == FreshStatus::Busy,
-            "deinit rejects open application file"
-        );
-        check(database.storage() != nullptr, "database remains running after busy deinit");
+    FreshResult busy = database.deinit();
+    check(
+        !busy && busy.status == FreshStatus::Busy,
+        "deinit rejects open application file"
+    );
 
-        checkResult(archive.syncAndClose(), "sync and close application file");
-    }
+    FreshStorageInfo runningInfo;
+    checkResult(
+        database.storageInfo(runningInfo),
+        "database remains running after busy deinit"
+    );
+    checkResult(archive.syncAndClose(), "sync and close application file");
 
     checkResult(database.deinit(), "deinitialize after closing files");
     checkResult(
