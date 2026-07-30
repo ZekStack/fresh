@@ -37,6 +37,12 @@ FreshResult FreshValidateLittleFSConfig(const FreshLittleFSConfig &config) {
 	    config.maxOpenFiles > std::numeric_limits<uint8_t>::max()) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "LittleFS max open files is out of range");
 	}
+	if (!config.growOnMount) {
+		return FreshResult::failure(
+		    FreshStatus::UnsupportedOperation,
+		    "managed LittleFS requires growOnMount while Arduino LittleFS interoperability is enabled"
+		);
+	}
 	return FreshResult::success("LittleFS configuration valid");
 }
 
