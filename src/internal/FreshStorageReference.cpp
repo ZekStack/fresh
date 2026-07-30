@@ -72,7 +72,12 @@ class FreshForwardFileBackend final : public FreshFileBackend {
 } // namespace
 
 FreshStorageReference::FreshStorageReference(FreshStorage &target)
-    : FreshStorage(FreshStorageType::Custom, target.mountPath()), _target(target) {
+    : FreshStorage(
+          FreshStorageType::Custom,
+          target.mountPath(),
+          target.maxOpenFiles()
+      ),
+      _target(target) {
 }
 
 const char *FreshStorageReference::name() const {
