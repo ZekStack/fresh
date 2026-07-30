@@ -1,0 +1,215 @@
+name: Apply journal replay compatibility fix
+
+on:
+  push:
+    branches:
+      - feature/pluggable-storage-0.2.0
+    paths:
+      - .github/workflows/apply-journal-replay-compat-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/pluggable-storage-0.2.0
+          fetch-depth: 0
+
+      - name: Apply watchdog-safe legacy replay fix
+        shell: python
+        run: |
+          from pathlib import Path
+
+          file_path = Path("src/FreshFile.cpp")
+          source = file_path.read_text()
+
+          replacements = [
+              (
+                  '''\texplicit FreshVFSFileBackend(FILE *file) : _file(file) {
+          \t}
+          ''',
+                  '''\tFreshVFSFileBackend(FILE *file, size_t initialSize)
+          \t    : _file(file), _size(initialSize) {
+          \t}
+          ''',
+              ),
+              (
+                  '''\tsize_t write(const uint8_t *buffer, size_t length) override {
+          \t\tif (_file == nullptr || buffer == nullptr || length == 0) return 0;
+          \t\tconst size_t written = fwrite(buffer, 1, length, _file);
+          \t\tif (written != length) _lastError = errno == 0 ? EIO : errno;
+          \t\treturn written;
+          \t}
+          ''',
+                  '''\tsize_t write(const uint8_t *buffer, size_t length) override {
+          \t\tif (_file == nullptr || buffer == nullptr || length == 0) return 0;
+          \t\tconst size_t written = fwrite(buffer, 1, length, _file);
+          \t\tif (written > 0) {
+          \t\t\tconst long current = ftell(_file);
+          \t\t\tif (current >= 0) {
+          \t\t\t\tconst size_t end = static_cast<size_t>(current);
+          \t\t\t\tif (end > _size) _size = end;
+          \t\t\t}
+          \t\t}
+          \t\tif (written != length) _lastError = errno == 0 ? EIO : errno;
+          \t\treturn written;
+          \t}
+          ''',
+              ),
+              (
+                  '''\tsize_t size() const override {
+          \t\tif (_file == nullptr) return 0;
+          \t\tstruct stat status {};
+          \t\tconst int descriptor = fileno(_file);
+          \t\tif (descriptor < 0 || fstat(descriptor, &status) != 0 || status.st_size < 0) return 0;
+          \t\treturn static_cast<size_t>(status.st_size);
+          \t}
+          ''',
+                  '''\tsize_t size() const override {
+          \t\treturn _file != nullptr ? _size : 0;
+          \t}
+          ''',
+              ),
+              (
+                  '''  private:
+          \tFILE *_file = nullptr;
+          \tint _lastError = 0;
+          };
+          ''',
+                  '''  private:
+          \tFILE *_file = nullptr;
+          \tsize_t _size = 0;
+          \tint _lastError = 0;
+          };
+          ''',
+              ),
+              (
+                  '''\tFILE *file = fopen(resolvedPath, modeString);
+          \tif (file == nullptr) {
+          \t\treturn FreshResult::failure(FreshStatus::FileSystemError, "failed to open storage file");
+          \t}
+          \tbackend.reset(new (std::nothrow) FreshVFSFileBackend(file));
+          ''',
+                  '''\tFILE *file = fopen(resolvedPath, modeString);
+          \tif (file == nullptr) {
+          \t\treturn FreshResult::failure(FreshStatus::FileSystemError, "failed to open storage file");
+          \t}
+
+          \tstruct stat status {};
+          \tconst int descriptor = fileno(file);
+          \tif (descriptor < 0 || fstat(descriptor, &status) != 0 || status.st_size < 0) {
+          \t\tfclose(file);
+          \t\treturn FreshResult::failure(FreshStatus::FileSystemError, "failed to inspect storage file");
+          \t}
+          \tconst size_t initialSize = static_cast<size_t>(status.st_size);
+          \tbackend.reset(new (std::nothrow) FreshVFSFileBackend(file, initialSize));
+          ''',
+              ),
+          ]
+
+          for old, new in replacements:
+              if source.count(old) != 1:
+                  raise SystemExit(f"FreshFile.cpp replacement did not match exactly once:\n{old}")
+              source = source.replace(old, new)
+
+          if source.count("fstat(") != 1:
+              raise SystemExit("FreshFile.cpp must contain exactly one open-time fstat call")
+          file_path.write_text(source)
+
+          storage_path = Path("src/FreshStorage.cpp")
+          storage = storage_path.read_text()
+          old = '''\tbool journalRecovered = false;
+          \tbool journalCleanupNeeded = false;
+          \twhile (file.available() > 0) {
+          '''
+          new = '''\tbool journalRecovered = false;
+          \tbool journalCleanupNeeded = false;
+          \tconstexpr size_t replayRecordYieldBudget = 32;
+          \tconstexpr uint32_t replayTimeYieldBudgetMS = 10;
+          \tuint32_t lastReplayYieldAt = millis();
+          \tsize_t replayRecordsSinceYield = 0;
+          \tauto cooperativeReplayYield = [&](bool recordCompleted) {
+          \t\tif (recordCompleted) replayRecordsSinceYield++;
+          \t\tconst uint32_t now = millis();
+          \t\tif (replayRecordsSinceYield < replayRecordYieldBudget &&
+          \t\t    static_cast<uint32_t>(now - lastReplayYieldAt) < replayTimeYieldBudgetMS) {
+          \t\t\treturn;
+          \t\t}
+          \t\tdelay(1);
+          \t\tlastReplayYieldAt = millis();
+          \t\treplayRecordsSinceYield = 0;
+          \t};
+          \twhile (file.available() > 0) {
+          \t\tcooperativeReplayYield(false);
+          '''
+          if storage.count(old) != 1:
+              raise SystemExit("journal replay preamble did not match exactly once")
+          storage = storage.replace(old, new)
+
+          old = '''\t\tif (file.read(payload.data(), payloadSize) != static_cast<int>(payloadSize)) {
+          \t\t\tstate->degraded = true;
+          \t\t\tjournalRecovered = true;
+          \t\t\tbreak;
+          \t\t}
+          \t\tif (FreshChecksum(payload.data(), payload.size()) != expectedChecksum) {
+          '''
+          new = '''\t\tif (file.read(payload.data(), payloadSize) != static_cast<int>(payloadSize)) {
+          \t\t\tstate->degraded = true;
+          \t\t\tjournalRecovered = true;
+          \t\t\tbreak;
+          \t\t}
+          \t\tcooperativeReplayYield(false);
+          \t\tif (FreshChecksum(payload.data(), payload.size()) != expectedChecksum) {
+          '''
+          if storage.count(old) != 1:
+              raise SystemExit("journal payload checkpoint did not match exactly once")
+          storage = storage.replace(old, new)
+
+          old = '''\t\tif (record.sequence <= state->checkpointSequence) {
+          \t\t\tjournalCleanupNeeded = true;
+          \t\t\tcontinue;
+          \t\t}
+          '''
+          new = '''\t\tif (record.sequence <= state->checkpointSequence) {
+          \t\t\tjournalCleanupNeeded = true;
+          \t\t\tcooperativeReplayYield(true);
+          \t\t\tcontinue;
+          \t\t}
+          '''
+          if storage.count(old) != 1:
+              raise SystemExit("journal checkpoint skip did not match exactly once")
+          storage = storage.replace(old, new)
+
+          old = '''\t\tstate->bytesSinceSnapshot += payloadSize;
+          \t}
+          \tfile.close();
+          '''
+          new = '''\t\tstate->bytesSinceSnapshot += payloadSize;
+          \t\tcooperativeReplayYield(true);
+          \t}
+          \tfile.close();
+          '''
+          if storage.count(old) != 1:
+              raise SystemExit("journal replay completion checkpoint did not match exactly once")
+          storage = storage.replace(old, new)
+          storage_path.write_text(storage)
+
+      - name: Validate patch
+        run: |
+          git diff --check
+          test "$(grep -c 'fstat(' src/FreshFile.cpp)" -eq 1
+          grep -q 'cooperativeReplayYield' src/FreshStorage.cpp
+
+      - name: Commit patch and remove helper workflow
+        run: |
+          rm .github/workflows/apply-journal-replay-compat-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/FreshFile.cpp src/FreshStorage.cpp .github/workflows/apply-journal-replay-compat-fix.yml
+          git commit -m "fix: make legacy journal replay watchdog safe"
+          git push origin HEAD:feature/pluggable-storage-0.2.0
