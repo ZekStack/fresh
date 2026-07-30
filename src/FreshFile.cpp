@@ -1,7 +1,7 @@
 #include "FreshFile.h"
 
 #include "Fresh.h"
-#include "FreshStorage.h"
+#include "internal/FreshFileState.h"
 #include "internal/FreshVFSFile.h"
 
 #include <cerrno>
@@ -10,6 +10,7 @@
 #include <new>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 
 namespace {
 
@@ -150,6 +151,25 @@ const char *FreshVFSOpenMode(FreshOpenMode mode) {
 	return nullptr;
 }
 
+void FreshDecrement(std::atomic<size_t> &counter) {
+	size_t current = counter.load();
+	while (current != 0 && !counter.compare_exchange_weak(current, current - 1)) {
+	}
+}
+
+void FreshReleaseFileRegistration(const std::shared_ptr<FreshFileState> &state) {
+	if (!state || !state->registered) return;
+	state->registered = false;
+	std::shared_ptr<FreshStorageFileRegistry> registry = state->registry.lock();
+	if (!registry) return;
+	FreshDecrement(registry->totalOpenFiles);
+	if (state->origin == FreshFileOrigin::Internal) {
+		FreshDecrement(registry->internalOpenFiles);
+	} else {
+		FreshDecrement(registry->applicationOpenFiles);
+	}
+}
+
 } // namespace
 
 FreshResult FreshOpenVFSFile(
@@ -174,58 +194,121 @@ FreshResult FreshOpenVFSFile(
 	return FreshResult::success("storage file opened");
 }
 
+FreshResult FreshCloseFileState(
+    const std::shared_ptr<FreshFileState> &state,
+    bool syncBeforeClose
+) {
+	if (!state) return FreshResult::success("file already closed");
+	FreshLock lock(state->mutex);
+	if (!lock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock file state");
+	}
+
+	FreshResult syncResult = FreshResult::success("file sync not requested");
+	FreshResult closeResult = FreshResult::success("file already closed");
+	if (state->backend) {
+		if (syncBeforeClose && state->backend->isOpen()) {
+			syncResult = state->backend->sync();
+		}
+		closeResult = state->backend->close();
+		state->lastError = state->backend->error();
+		state->backend.reset();
+	}
+	FreshReleaseFileRegistration(state);
+	return syncResult ? closeResult : syncResult;
+}
+
 FreshFile::~FreshFile() {
 	close();
 }
 
-FreshFile::FreshFile(FreshFile &&other) noexcept
-    : _backend(std::move(other._backend)), _storage(other._storage) {
-	other._storage = nullptr;
+FreshFile::FreshFile(FreshFile &&other) noexcept : _state(std::move(other._state)) {
+	const int writeError = other.getWriteError();
+	clearWriteError();
+	if (writeError != 0) setWriteError(writeError);
+	other.clearWriteError();
 }
 
 FreshFile &FreshFile::operator=(FreshFile &&other) noexcept {
 	if (this == &other) return *this;
 	close();
-	_backend = std::move(other._backend);
-	_storage = other._storage;
-	other._storage = nullptr;
+	const int writeError = other.getWriteError();
+	_state = std::move(other._state);
+	clearWriteError();
+	if (writeError != 0) setWriteError(writeError);
+	other.clearWriteError();
 	return *this;
 }
 
 FreshFile::operator bool() const {
-	return _backend != nullptr && _backend->isOpen();
+	if (!_state) return false;
+	FreshLock lock(_state->mutex);
+	return lock && _state->backend != nullptr && _state->backend->isOpen();
 }
 
-void FreshFile::attach(std::unique_ptr<FreshFileBackend> backend, FreshStorage *storage) {
-	_backend = std::move(backend);
-	_storage = storage;
+void FreshFile::attach(std::shared_ptr<FreshFileState> state) {
+	if (_state) close();
+	_state = std::move(state);
+	clearWriteError();
 }
 
 int FreshFile::available() {
-	return _backend != nullptr ? _backend->available() : 0;
+	if (!_state) return 0;
+	FreshLock lock(_state->mutex);
+	return lock && _state->backend != nullptr ? _state->backend->available() : 0;
 }
 
 int FreshFile::read() {
-	return _backend != nullptr ? _backend->read() : -1;
+	if (!_state) return -1;
+	FreshLock lock(_state->mutex);
+	return lock && _state->backend != nullptr ? _state->backend->read() : -1;
 }
 
 int FreshFile::read(uint8_t *buffer, size_t length) {
-	return _backend != nullptr ? _backend->read(buffer, length) : -1;
+	if (!_state) return -1;
+	FreshLock lock(_state->mutex);
+	return lock && _state->backend != nullptr ? _state->backend->read(buffer, length) : -1;
 }
 
 int FreshFile::peek() {
-	return _backend != nullptr ? _backend->peek() : -1;
+	if (!_state) return -1;
+	FreshLock lock(_state->mutex);
+	return lock && _state->backend != nullptr ? _state->backend->peek() : -1;
 }
 
 size_t FreshFile::write(uint8_t byte) {
-	const size_t written = _backend != nullptr ? _backend->write(byte) : 0;
-	if (written != 1) setWriteError(error() == 0 ? EIO : error());
+	if (!_state) {
+		setWriteError(EBADF);
+		return 0;
+	}
+	FreshLock lock(_state->mutex);
+	if (!lock || _state->backend == nullptr) {
+		setWriteError(EBADF);
+		return 0;
+	}
+	const size_t written = _state->backend->write(byte);
+	if (written != 1) {
+		const int backendError = _state->backend->error();
+		setWriteError(backendError == 0 ? EIO : backendError);
+	}
 	return written;
 }
 
 size_t FreshFile::write(const uint8_t *buffer, size_t length) {
-	const size_t written = _backend != nullptr ? _backend->write(buffer, length) : 0;
-	if (written != length) setWriteError(error() == 0 ? EIO : error());
+	if (!_state) {
+		if (length != 0) setWriteError(EBADF);
+		return 0;
+	}
+	FreshLock lock(_state->mutex);
+	if (!lock || _state->backend == nullptr) {
+		if (length != 0) setWriteError(EBADF);
+		return 0;
+	}
+	const size_t written = _state->backend->write(buffer, length);
+	if (written != length) {
+		const int backendError = _state->backend->error();
+		setWriteError(backendError == 0 ? EIO : backendError);
+	}
 	return written;
 }
 
@@ -235,44 +318,56 @@ void FreshFile::flush() {
 }
 
 bool FreshFile::seek(size_t target) {
-	return _backend != nullptr && _backend->seek(target);
+	if (!_state) return false;
+	FreshLock lock(_state->mutex);
+	return lock && _state->backend != nullptr && _state->backend->seek(target);
 }
 
 size_t FreshFile::position() const {
-	return _backend != nullptr ? _backend->position() : 0;
+	if (!_state) return 0;
+	FreshLock lock(_state->mutex);
+	return lock && _state->backend != nullptr ? _state->backend->position() : 0;
 }
 
 size_t FreshFile::size() const {
-	return _backend != nullptr ? _backend->size() : 0;
+	if (!_state) return 0;
+	FreshLock lock(_state->mutex);
+	return lock && _state->backend != nullptr ? _state->backend->size() : 0;
 }
 
 int FreshFile::error() const {
-	return _backend != nullptr ? _backend->error() : 0;
+	if (!_state) return 0;
+	FreshLock lock(_state->mutex);
+	if (!lock) return EBUSY;
+	return _state->backend != nullptr ? _state->backend->error() : _state->lastError;
 }
 
 FreshResult FreshFile::sync() {
-	if (_backend == nullptr) {
+	if (!_state) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "file is not open");
 	}
-	return _backend->sync();
+	FreshLock lock(_state->mutex);
+	if (!lock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock file state");
+	}
+	if (_state->backend == nullptr) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "file is not open");
+	}
+	return _state->backend->sync();
 }
 
 FreshResult FreshFile::close() {
-	if (_backend == nullptr) {
-		_storage = nullptr;
-		return FreshResult::success("file already closed");
-	}
-
-	FreshStorage *storage = _storage;
-	FreshResult result = _backend->close();
-	_backend.reset();
-	_storage = nullptr;
-	if (storage != nullptr) storage->releaseFileHandle();
+	if (!_state) return FreshResult::success("file already closed");
+	FreshResult result = FreshCloseFileState(_state, false);
+	_state.reset();
 	return result;
 }
 
 FreshResult FreshFile::syncAndClose() {
-	FreshResult syncResult = sync();
-	FreshResult closeResult = close();
-	return syncResult ? closeResult : syncResult;
+	if (!_state) {
+		return FreshResult::failure(FreshStatus::NotInitialized, "file is not open");
+	}
+	FreshResult result = FreshCloseFileState(_state, true);
+	_state.reset();
+	return result;
 }
