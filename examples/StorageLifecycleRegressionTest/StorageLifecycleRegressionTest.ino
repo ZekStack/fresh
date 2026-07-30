@@ -2,6 +2,7 @@
 #include <Fresh.h>
 #include <FreshFile.h>
 #include <FreshStorage.h>
+#include <LittleFS.h>
 
 namespace {
 
@@ -36,6 +37,15 @@ void setup() {
     checkResult(
         database.init("/fresh_storage_lifecycle"),
         "initialize database"
+    );
+    check(
+        LittleFS.mountpoint() != nullptr,
+        "bind Arduino LittleFS wrapper during Fresh mount"
+    );
+    check(
+        LittleFS.exists("/fresh_storage_lifecycle") &&
+            LittleFS.exists("/fresh_storage_lifecycle/models"),
+        "allow Arduino LittleFS access after Fresh initialization"
     );
 
     FreshFile archive;
@@ -113,6 +123,10 @@ void setup() {
     checkResult(archive.syncAndClose(), "sync and close application file");
 
     checkResult(database.deinit(), "deinitialize after closing files");
+    check(
+        LittleFS.mountpoint() == nullptr,
+        "clear Arduino LittleFS wrapper during Fresh unmount"
+    );
 
     FreshFile leaked;
     {
@@ -120,6 +134,10 @@ void setup() {
         checkResult(
             scoped.init("/fresh_storage_destructor"),
             "initialize destructor lifecycle database"
+        );
+        check(
+            LittleFS.mountpoint() != nullptr && LittleFS.exists("/fresh_storage_destructor"),
+            "bind Arduino LittleFS wrapper for scoped Fresh"
         );
         checkResult(
             scoped.withStorage(
@@ -143,6 +161,10 @@ void setup() {
 
     check(!leaked, "destructor invalidates surviving FreshFile");
     check(
+        LittleFS.mountpoint() == nullptr,
+        "destructor clears Arduino LittleFS wrapper"
+    );
+    check(
         leaked.write(payload, sizeof(payload)) == 0 &&
             leaked.getWriteError() != 0,
         "surviving FreshFile fails closed after destruction"
@@ -153,7 +175,15 @@ void setup() {
         database.init("/fresh_storage_lifecycle"),
         "reinitialize same storage after destructor cleanup"
     );
+    check(
+        LittleFS.mountpoint() != nullptr && LittleFS.exists("/fresh_storage_lifecycle"),
+        "rebind Arduino LittleFS wrapper after reinitialization"
+    );
     checkResult(database.deinit(), "repeat deinitialize");
+    check(
+        LittleFS.mountpoint() == nullptr,
+        "clear Arduino LittleFS wrapper after repeated deinit"
+    );
 
     Serial.printf(
         "Storage lifecycle regression complete: %u passed, %u failed\n",
