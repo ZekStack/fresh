@@ -7,6 +7,7 @@
 #include <memory>
 
 struct FreshResult;
+struct FreshFileState;
 class FreshStorage;
 
 class FreshFileBackend {
@@ -68,8 +69,7 @@ class FreshFile final : public Stream {
   private:
 	friend class FreshStorage;
 
-	void attach(std::unique_ptr<FreshFileBackend> backend, FreshStorage *storage);
+	void attach(std::shared_ptr<FreshFileState> state);
 
-	std::unique_ptr<FreshFileBackend> _backend;
-	FreshStorage *_storage = nullptr;
+	std::shared_ptr<FreshFileState> _state;
 };
