@@ -159,9 +159,14 @@ void FreshDecrement(std::atomic<size_t> &counter) {
 
 void FreshReleaseFileRegistration(const std::shared_ptr<FreshFileState> &state) {
 	if (!state || !state->registered) return;
-	state->registered = false;
 	std::shared_ptr<FreshStorageFileRegistry> registry = state->registry.lock();
-	if (!registry) return;
+	if (!registry) {
+		state->registered = false;
+		return;
+	}
+	FreshLock registryLock(registry->mutex);
+	if (!registryLock || !state->registered) return;
+	state->registered = false;
 	FreshDecrement(registry->totalOpenFiles);
 	if (state->origin == FreshFileOrigin::Internal) {
 		FreshDecrement(registry->internalOpenFiles);
