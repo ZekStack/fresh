@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include <Fresh.h>
 
+#if defined(ESP32)
+#include <driver/sdmmc_host.h>
+#endif
+
 Fresh database;
 
 void setup() {
