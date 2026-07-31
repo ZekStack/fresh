@@ -1,22 +1,18 @@
 #include <Arduino.h>
 #include <Fresh.h>
 #include <FreshFile.h>
-#include <FreshStorage.h>
 
 Fresh database;
 
 FreshResult writeBackupArchive(const char* archivePath) {
+    FreshResult directory = database.storage().ensureDirectory("/backups");
+    if (!directory) return directory;
+
     FreshFile archive;
-    FreshResult opened = database.withStorage(
-        [&](FreshStorage& storage) -> FreshResult {
-            FreshResult directory = storage.createDirectory("/backups");
-            if (!directory) return directory;
-            return storage.open(
-                archivePath,
-                FreshOpenMode::Write,
-                archive
-            );
-        }
+    FreshResult opened = database.storage().open(
+        archivePath,
+        FreshOpenMode::Write,
+        archive
     );
     if (!opened) return opened;
 

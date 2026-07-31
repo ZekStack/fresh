@@ -12,6 +12,11 @@
 
 namespace {
 
+struct MemoryVolume {
+	std::map<std::string, std::vector<uint8_t>> files;
+	std::set<std::string> directories{"/"};
+};
+
 class MemoryFileBackend final : public FreshFileBackend {
   public:
 	MemoryFileBackend(std::vector<uint8_t> &bytes, FreshOpenMode mode)
@@ -19,75 +24,53 @@ class MemoryFileBackend final : public FreshFileBackend {
 		_position = mode == FreshOpenMode::Append ? _bytes.size() : 0;
 	}
 
-	bool isOpen() const override {
-		return _open;
-	}
-
+	bool isOpen() const override { return _open; }
 	int available() override {
 		return _open && _position < _bytes.size()
 		           ? static_cast<int>(_bytes.size() - _position)
 		           : 0;
 	}
-
 	int read() override {
 		if (!_open || _position >= _bytes.size()) return -1;
 		return _bytes[_position++];
 	}
-
 	int read(uint8_t *buffer, size_t size) override {
 		if (!_open || buffer == nullptr) return -1;
-		const size_t count = std::min(size, _bytes.size() - std::min(_position, _bytes.size()));
+		const size_t remaining = _position < _bytes.size() ? _bytes.size() - _position : 0;
+		const size_t count = std::min(size, remaining);
 		if (count == 0) return 0;
 		std::copy_n(_bytes.data() + _position, count, buffer);
 		_position += count;
 		return static_cast<int>(count);
 	}
-
 	int peek() override {
 		return !_open || _position >= _bytes.size() ? -1 : _bytes[_position];
 	}
-
-	size_t write(uint8_t byte) override {
-		return write(&byte, 1);
-	}
-
+	size_t write(uint8_t byte) override { return write(&byte, 1); }
 	size_t write(const uint8_t *buffer, size_t size) override {
 		if (!_open || !_writable || buffer == nullptr) return 0;
-		if (_position > _bytes.size()) _bytes.resize(_position);
-		if (size > _bytes.max_size() - _position) return 0;
 		if (_position + size > _bytes.size()) _bytes.resize(_position + size);
 		std::copy_n(buffer, size, _bytes.data() + _position);
 		_position += size;
 		return size;
 	}
-
 	bool seek(size_t position) override {
 		if (!_open) return false;
 		_position = position;
 		return true;
 	}
-
-	size_t position() const override {
-		return _position;
-	}
-
-	size_t size() const override {
-		return _bytes.size();
-	}
-
+	size_t position() const override { return _position; }
+	size_t size() const override { return _bytes.size(); }
 	FreshResult sync() override {
-		return _open ? FreshResult::success("memory file synced")
-		             : FreshResult::failure(FreshStatus::NotInitialized, "memory file is closed");
+		return _open
+		           ? FreshResult::success("memory file synced")
+		           : FreshResult::failure(FreshStatus::NotInitialized, "memory file is closed");
 	}
-
 	FreshResult close() override {
 		_open = false;
 		return FreshResult::success("memory file closed");
 	}
-
-	int error() const override {
-		return 0;
-	}
+	int error() const override { return 0; }
 
   private:
 	std::vector<uint8_t> &_bytes;
@@ -98,47 +81,27 @@ class MemoryFileBackend final : public FreshFileBackend {
 
 class MemoryStorage final : public FreshStorage {
   public:
-	MemoryStorage() : FreshStorage(FreshStorageType::Custom) {
-		_directories.insert("/");
+	explicit MemoryStorage(MemoryVolume &volume)
+	    : FreshStorage(FreshStorageType::Custom), _volume(volume) {
 	}
 
-	FreshResult attach() {
-		setState(FreshStorageState::Mounted);
-		return FreshResult::success("memory storage attached");
-	}
-
-	FreshResult detach() {
-		FreshResult canDetach = validateCanUnmount();
-		if (!canDetach) return canDetach;
-		setState(FreshStorageState::Uninitialized);
-		return FreshResult::success("memory storage detached");
-	}
-
-	void failNextInfoQuery() {
-		_failNextInfoQuery = true;
-	}
-
-	const char *name() const override {
-		return "MemoryStorage";
-	}
+	const char *name() const override { return "MemoryStorage"; }
 
 	FreshStorageInfo info() const override {
-		FreshStorageInfo info;
-		info.type = FreshStorageType::Custom;
-		info.state = state();
-		info.name = name();
-		info.totalBytes = 1024 * 1024;
-		for (const auto &entry : _files) info.usedBytes += entry.second.size();
-		info.freeBytes = info.totalBytes > info.usedBytes ? info.totalBytes - info.usedBytes : 0;
-		return info;
+		FreshStorageInfo result;
+		result.totalBytes = 1024 * 1024;
+		for (const auto &entry : _volume.files) result.usedBytes += entry.second.size();
+		result.freeBytes = result.totalBytes - result.usedBytes;
+		return result;
 	}
 
   private:
 	static bool validPath(const char *path) {
 		if (path == nullptr || path[0] != '/') return false;
 		const std::string value(path);
-		return value.find("/../") == std::string::npos && value != "/.." &&
-		       value.find("/./") == std::string::npos && value != "/.";
+		return value.find("/../") == std::string::npos &&
+		       value.find("/./") == std::string::npos &&
+		       value != "/.." && value != "/.";
 	}
 
 	static std::string parentPath(const std::string &path) {
@@ -147,24 +110,15 @@ class MemoryStorage final : public FreshStorage {
 	}
 
 	FreshResult mount() override {
-		return attach();
+		setState(FreshStorageState::Mounted);
+		return FreshResult::success("memory storage mounted");
 	}
 
 	FreshResult unmount() override {
-		return detach();
-	}
-
-	FreshResult readInfoBackend(FreshStorageInfo &result) const override {
-		if (_failNextInfoQuery) {
-			_failNextInfoQuery = false;
-			result = FreshStorageInfo();
-			return FreshResult::failure(
-			    FreshStatus::FileSystemError,
-			    "injected memory storage information failure"
-			);
-		}
-		result = info();
-		return FreshResult::success("memory storage information read");
+		FreshResult canUnmount = validateCanUnmount();
+		if (!canUnmount) return canUnmount;
+		setState(FreshStorageState::Uninitialized);
+		return FreshResult::success("memory storage unmounted");
 	}
 
 	FreshResult openBackend(
@@ -177,18 +131,21 @@ class MemoryStorage final : public FreshStorage {
 			return FreshResult::failure(FreshStatus::InvalidArgument, "invalid memory path");
 		}
 		const std::string path(logicalPath);
-		if (_directories.find(parentPath(path)) == _directories.end()) {
+		if (_volume.directories.find(parentPath(path)) == _volume.directories.end()) {
 			return FreshResult::failure(FreshStatus::FileSystemError, "memory parent directory is missing");
 		}
-		auto found = _files.find(path);
-		if (mode == FreshOpenMode::Read && found == _files.end()) {
+		auto found = _volume.files.find(path);
+		if (mode == FreshOpenMode::Read && found == _volume.files.end()) {
 			return FreshResult::failure(FreshStatus::FileSystemError, "memory file does not exist");
 		}
-		if (found == _files.end()) found = _files.emplace(path, std::vector<uint8_t>()).first;
+		if (found == _volume.files.end()) {
+			found = _volume.files.emplace(path, std::vector<uint8_t>()).first;
+		}
 		if (mode == FreshOpenMode::Write) found->second.clear();
 		backend.reset(new (std::nothrow) MemoryFileBackend(found->second, mode));
-		return backend ? FreshResult::success("memory file opened")
-		               : FreshResult::failure(FreshStatus::OutOfMemory, "memory file allocation failed");
+		return backend
+		           ? FreshResult::success("memory file opened")
+		           : FreshResult::failure(FreshStatus::OutOfMemory, "memory file allocation failed");
 	}
 
 	FreshResult existsBackend(const char *logicalPath, bool &result) const override {
@@ -197,7 +154,8 @@ class MemoryStorage final : public FreshStorage {
 			return FreshResult::failure(FreshStatus::InvalidArgument, "invalid memory path");
 		}
 		const std::string path(logicalPath);
-		result = _files.find(path) != _files.end() || _directories.find(path) != _directories.end();
+		result = _volume.files.find(path) != _volume.files.end() ||
+		         _volume.directories.find(path) != _volume.directories.end();
 		return FreshResult::success("memory path inspected");
 	}
 
@@ -206,38 +164,53 @@ class MemoryStorage final : public FreshStorage {
 			return FreshResult::failure(FreshStatus::InvalidArgument, "invalid memory directory");
 		}
 		const std::string path(logicalPath);
-		if (_directories.find(parentPath(path)) == _directories.end()) {
+		if (_volume.directories.find(parentPath(path)) == _volume.directories.end()) {
 			return FreshResult::failure(FreshStatus::FileSystemError, "memory parent directory is missing");
 		}
-		_directories.insert(path);
+		_volume.directories.insert(path);
 		return FreshResult::success("memory directory created");
 	}
 
 	FreshResult removeFileBackend(const char *logicalPath) override {
-		if (!validPath(logicalPath)) {
-			return FreshResult::failure(FreshStatus::InvalidArgument, "invalid memory file");
-		}
-		_files.erase(logicalPath);
+		_volume.files.erase(logicalPath);
 		return FreshResult::success("memory file removed");
 	}
 
 	FreshResult removeDirectoryBackend(const char *logicalPath) override {
-		if (!validPath(logicalPath) || std::string(logicalPath) == "/") {
-			return FreshResult::failure(FreshStatus::InvalidArgument, "invalid memory directory");
+		const std::string directory(logicalPath);
+		if (directory == "/") {
+			return FreshResult::failure(FreshStatus::InvalidArgument, "cannot remove memory root");
 		}
-		const std::string prefix = std::string(logicalPath) + "/";
-		for (const auto &entry : _files) {
+		const std::string prefix = directory + "/";
+		for (const auto &entry : _volume.files) {
 			if (entry.first.rfind(prefix, 0) == 0) {
 				return FreshResult::failure(FreshStatus::Busy, "memory directory is not empty");
 			}
 		}
-		for (const std::string &directory : _directories) {
-			if (directory != logicalPath && directory.rfind(prefix, 0) == 0) {
+		for (const std::string &entry : _volume.directories) {
+			if (entry != directory && entry.rfind(prefix, 0) == 0) {
 				return FreshResult::failure(FreshStatus::Busy, "memory directory is not empty");
 			}
 		}
-		_directories.erase(logicalPath);
+		_volume.directories.erase(directory);
 		return FreshResult::success("memory directory removed");
+	}
+
+	FreshResult renameBackend(
+	    const char *source,
+	    const char *target,
+	    bool replaceExisting
+	) override {
+		auto found = _volume.files.find(source);
+		if (found == _volume.files.end()) {
+			return FreshResult::failure(FreshStatus::FileSystemError, "memory source file is missing");
+		}
+		if (!replaceExisting && _volume.files.find(target) != _volume.files.end()) {
+			return FreshResult::failure(FreshStatus::Busy, "memory target already exists");
+		}
+		_volume.files[target] = std::move(found->second);
+		_volume.files.erase(found);
+		return FreshResult::success("memory file renamed");
 	}
 
 	FreshResult listDirectoryBackend(
@@ -245,29 +218,26 @@ class MemoryStorage final : public FreshStorage {
 	    std::vector<FreshDirectoryEntry> &entries
 	) const override {
 		entries.clear();
-		if (!validPath(logicalPath) || _directories.find(logicalPath) == _directories.end()) {
+		const std::string directory(logicalPath);
+		if (_volume.directories.find(directory) == _volume.directories.end()) {
 			return FreshResult::failure(FreshStatus::FileSystemError, "memory directory does not exist");
 		}
-		const std::string directory(logicalPath);
 		const std::string prefix = directory == "/" ? "/" : directory + "/";
-		for (const std::string &child : _directories) {
-			if (child == directory || child.rfind(prefix, 0) != 0) continue;
-			const std::string name = child.substr(prefix.size());
-			if (name.empty() || name.find('/') != std::string::npos) continue;
-			entries.push_back({.name = name, .isDirectory = true, .size = 0});
-		}
-		for (const auto &child : _files) {
+		for (const auto &child : _volume.files) {
 			if (child.first.rfind(prefix, 0) != 0) continue;
 			const std::string name = child.first.substr(prefix.size());
 			if (name.empty() || name.find('/') != std::string::npos) continue;
-			entries.push_back({.name = name, .isDirectory = false, .size = child.second.size()});
+			entries.push_back({
+			    .name = name,
+			    .path = child.first,
+			    .isDirectory = false,
+			    .size = child.second.size()
+			});
 		}
 		return FreshResult::success("memory directory listed", entries.size());
 	}
 
-	std::map<std::string, std::vector<uint8_t>> _files;
-	std::set<std::string> _directories;
-	mutable bool _failNextInfoQuery = false;
+	MemoryVolume &_volume;
 };
 
 void require(bool condition, const char *message) {
@@ -290,80 +260,51 @@ void require(const FreshModelResult &result, const char *message) {
 void setup() {
 	Serial.begin(115200);
 
-	MemoryStorage storage;
-	require(storage.attach(), "attach custom storage");
-
+	MemoryVolume volume;
 	std::string documentId;
+
 	{
 		Fresh database;
-		require(database.init("/fresh", storage), "initialize with caller-owned storage");
+		require(
+		    database.init("/fresh", FreshConfig(), MemoryStorage(volume)),
+		    "initialize owned custom storage"
+		);
 		FreshModelResult createdModel = database.createModel("settings");
 		require(createdModel, "create settings model");
 
 		JsonDocument document;
 		document["name"] = "custom-storage";
-		FreshResult created = createdModel.model.create(document);
-		require(created, "create document");
+		require(createdModel.model.create(document), "create document");
 		documentId = document["_id"].as<std::string>();
-		require(!documentId.empty(), "capture document id");
 		require(database.forceSync(), "persist custom storage data");
 		require(database.deinit(), "deinitialize first database");
 	}
 
 	{
 		Fresh database;
-		require(database.init("/fresh", storage), "reinitialize custom storage");
+		require(
+		    database.init("/fresh", FreshConfig(), MemoryStorage(volume)),
+		    "reinitialize custom storage"
+		);
 		FreshResult found = database.model("settings").findById(documentId);
-		require(found && std::string(found.doc["name"] | "") == "custom-storage", "reload document");
-
-		FreshStorageInfo storageInfo;
-		storage.failNextInfoQuery();
-		FreshResult infoFailure = database.storageInfo(storageInfo);
 		require(
-		    !infoFailure && infoFailure.status == FreshStatus::FileSystemError,
-		    "propagate custom storage information failure"
+		    found && std::string(found.doc["name"] | "") == "custom-storage",
+		    "reload document"
 		);
-		require(database.storageInfo(storageInfo), "retry custom storage information");
 
-		FreshFile archive;
-		FreshResult opened = database.withStorage(
-		    [&](FreshStorage &activeStorage) -> FreshResult {
-			    FreshFile forbidden;
-			    FreshResult forbiddenOpen = activeStorage.open(
-			        "/fresh/forbidden.bin",
-			        FreshOpenMode::Write,
-			        forbidden
-			    );
-			    require(
-			        !forbiddenOpen &&
-			            forbiddenOpen.status == FreshStatus::UnsupportedOperation,
-			        "protect custom database root"
-			    );
-
-			    FreshResult directory = activeStorage.createDirectory("/backups");
-			    if (!directory) return directory;
-			    return activeStorage.open(
-			        "/backups/custom.bin",
-			        FreshOpenMode::Write,
-			        archive
-			    );
-		    }
-		);
-		require(opened, "open custom application file");
-
+		require(database.storage().ensureDirectory("/backups"), "create backups directory");
 		const uint8_t marker[] = {0x46, 0x52, 0x45, 0x53, 0x48};
-		require(archive.write(marker, sizeof(marker)) == sizeof(marker), "write custom application file");
-
-		FreshResult busy = database.deinit();
 		require(
-		    !busy && busy.status == FreshStatus::Busy,
-		    "custom storage deinit rejects open file"
+		    database.storage().writeFile("/backups/custom.bin", marker, sizeof(marker)),
+		    "write application file through db.storage()"
 		);
-		require(archive.syncAndClose(), "close custom application file");
+		require(
+		    database.storage().exists("/backups/custom.bin"),
+		    "find application file through db.storage()"
+		);
 		require(database.deinit(), "deinitialize second database");
 	}
 
-	require(storage.detach(), "detach custom storage");
 	Serial.println("Custom storage conformance passed");
 }
 

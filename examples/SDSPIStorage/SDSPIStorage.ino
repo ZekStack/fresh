@@ -7,23 +7,28 @@ void setup() {
     Serial.begin(115200);
 
     FreshConfig config;
-    config.storageType = FreshStorageType::SD;
-    config.sd.interface = FreshSDInterface::SPI;
-    config.sd.mountPath = "/fresh-sd";
-    config.sd.maxOpenFiles = 8;
-    config.sd.allocationUnitSize = 16 * 1024;
-    config.sd.formatOnMountFailure = false;
+
+    FreshSDConfig storageConfig;
+    storageConfig.interface = FreshSDInterface::SPI;
+    storageConfig.mountPath = "/fresh-sd";
+    storageConfig.maxOpenFiles = 8;
+    storageConfig.allocationUnitSize = 16 * 1024;
+    storageConfig.formatOnMountFailure = false;
 
     // Replace these values with the wiring for the target board.
-    config.sd.spi.host = SPI2_HOST;
-    config.sd.spi.chipSelectPin = GPIO_NUM_10;
-    config.sd.spi.clockPin = GPIO_NUM_12;
-    config.sd.spi.mosiPin = GPIO_NUM_11;
-    config.sd.spi.misoPin = GPIO_NUM_13;
-    config.sd.spi.frequencyHz = 20'000'000;
-    config.sd.spi.busOwnership = FreshSPIBusOwnership::Managed;
+    storageConfig.spi.host = SPI2_HOST;
+    storageConfig.spi.chipSelectPin = GPIO_NUM_10;
+    storageConfig.spi.clockPin = GPIO_NUM_12;
+    storageConfig.spi.mosiPin = GPIO_NUM_11;
+    storageConfig.spi.misoPin = GPIO_NUM_13;
+    storageConfig.spi.frequencyHz = 10'000'000;
+    storageConfig.spi.busOwnership = FreshSPIBusOwnership::Managed;
 
-    FreshResult initialized = database.init("/fresh", config);
+    FreshInitResult initialized = database.init(
+        "/fresh",
+        config,
+        FreshSDStorage(storageConfig)
+    );
     if (!initialized) {
         Serial.printf("Fresh init failed: %s\n", initialized.message.c_str());
         return;
@@ -35,17 +40,14 @@ void setup() {
         return;
     }
 
-    FreshStorageInfo storage;
-    FreshResult queried = database.storageInfo(storage);
-    if (queried) {
-        Serial.printf(
-            "%s total=%u used=%u free=%u\n",
-            storage.name.c_str(),
-            static_cast<unsigned>(storage.totalBytes),
-            static_cast<unsigned>(storage.usedBytes),
-            static_cast<unsigned>(storage.freeBytes)
-        );
-    }
+    FreshStorageInfo storage = database.storage().info();
+    Serial.printf(
+        "%s total=%u used=%u free=%u\n",
+        storage.name.c_str(),
+        static_cast<unsigned>(storage.totalBytes),
+        static_cast<unsigned>(storage.usedBytes),
+        static_cast<unsigned>(storage.freeBytes)
+    );
 }
 
 void loop() {

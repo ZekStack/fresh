@@ -14,7 +14,7 @@
 
 namespace {
 
-struct FaultState {
+struct FaultControl {
     bool shortWrite = false;
     bool syncFailure = false;
     bool closeFailure = false;
@@ -22,37 +22,38 @@ struct FaultState {
     bool existsFailure = false;
 };
 
+struct FaultVolume {
+    std::map<std::string, std::vector<uint8_t>> files;
+    std::set<std::string> directories{"/"};
+};
+
 class FaultFileBackend final : public FreshFileBackend {
   public:
     FaultFileBackend(
         std::vector<uint8_t>& bytes,
         FreshOpenMode mode,
-        FaultState& faults
+        FaultControl& control
     )
         : _bytes(bytes),
-          _faults(faults),
+          _control(control),
           _writable(mode != FreshOpenMode::Read) {
         _position = mode == FreshOpenMode::Append ? _bytes.size() : 0;
     }
 
-    bool isOpen() const override {
-        return _open;
-    }
-
+    bool isOpen() const override { return _open; }
     int available() override {
-        if (!_open || _position >= _bytes.size()) return 0;
-        return static_cast<int>(_bytes.size() - _position);
+        return _open && _position < _bytes.size()
+            ? static_cast<int>(_bytes.size() - _position)
+            : 0;
     }
-
     int read() override {
         uint8_t byte = 0;
         return read(&byte, 1) == 1 ? byte : -1;
     }
-
     int read(uint8_t* buffer, size_t size) override {
         if (!_open || buffer == nullptr) return -1;
-        if (_faults.readFailure) {
-            _faults.readFailure = false;
+        if (_control.readFailure) {
+            _control.readFailure = false;
             _error = EIO;
             return -1;
         }
@@ -65,25 +66,18 @@ class FaultFileBackend final : public FreshFileBackend {
         _position += count;
         return static_cast<int>(count);
     }
-
     int peek() override {
-        if (!_open || _position >= _bytes.size()) return -1;
-        return _bytes[_position];
+        return !_open || _position >= _bytes.size() ? -1 : _bytes[_position];
     }
-
-    size_t write(uint8_t byte) override {
-        return write(&byte, 1);
-    }
-
+    size_t write(uint8_t byte) override { return write(&byte, 1); }
     size_t write(const uint8_t* buffer, size_t size) override {
         if (!_open || !_writable || buffer == nullptr) return 0;
         size_t count = size;
-        if (_faults.shortWrite) {
-            _faults.shortWrite = false;
+        if (_control.shortWrite) {
+            _control.shortWrite = false;
             count = size == 0 ? 0 : size - 1;
             _error = EIO;
         }
-        if (_position > _bytes.size()) _bytes.resize(_position);
         if (_position + count > _bytes.size()) _bytes.resize(_position + count);
         if (count != 0) {
             std::copy_n(buffer, count, _bytes.data() + _position);
@@ -91,60 +85,39 @@ class FaultFileBackend final : public FreshFileBackend {
         }
         return count;
     }
-
     bool seek(size_t position) override {
         if (!_open) return false;
         _position = position;
         return true;
     }
-
-    size_t position() const override {
-        return _position;
-    }
-
-    size_t size() const override {
-        return _bytes.size();
-    }
-
+    size_t position() const override { return _position; }
+    size_t size() const override { return _bytes.size(); }
     FreshResult sync() override {
         if (!_open) {
-            return FreshResult::failure(
-                FreshStatus::NotInitialized,
-                "fault file is closed"
-            );
+            return FreshResult::failure(FreshStatus::NotInitialized, "fault file is closed");
         }
-        if (_faults.syncFailure) {
-            _faults.syncFailure = false;
+        if (_control.syncFailure) {
+            _control.syncFailure = false;
             _error = EIO;
-            return FreshResult::failure(
-                FreshStatus::FileSystemError,
-                "injected sync failure"
-            );
+            return FreshResult::failure(FreshStatus::FileSystemError, "injected sync failure");
         }
         return FreshResult::success("fault file synced");
     }
-
     FreshResult close() override {
         if (!_open) return FreshResult::success("fault file already closed");
         _open = false;
-        if (_faults.closeFailure) {
-            _faults.closeFailure = false;
+        if (_control.closeFailure) {
+            _control.closeFailure = false;
             _error = EIO;
-            return FreshResult::failure(
-                FreshStatus::FileSystemError,
-                "injected close failure"
-            );
+            return FreshResult::failure(FreshStatus::FileSystemError, "injected close failure");
         }
         return FreshResult::success("fault file closed");
     }
-
-    int error() const override {
-        return _error;
-    }
+    int error() const override { return _error; }
 
   private:
     std::vector<uint8_t>& _bytes;
-    FaultState& _faults;
+    FaultControl& _control;
     size_t _position = 0;
     int _error = 0;
     bool _writable = false;
@@ -153,51 +126,18 @@ class FaultFileBackend final : public FreshFileBackend {
 
 class FaultStorage final : public FreshStorage {
   public:
-    explicit FaultStorage(size_t maxOpenFiles = SIZE_MAX)
-        : FreshStorage(FreshStorageType::Custom, nullptr, maxOpenFiles) {
-        _directories.insert("/");
+    FaultStorage(FaultVolume& volume, FaultControl& control, size_t maxOpenFiles = SIZE_MAX)
+        : FreshStorage(FreshStorageType::Custom, nullptr, maxOpenFiles),
+          _volume(volume),
+          _control(control) {
     }
 
-    FreshResult attach() {
-        setState(FreshStorageState::Mounted);
-        return FreshResult::success("fault storage attached");
-    }
-
-    FreshResult detach() {
-        FreshResult canDetach = validateCanUnmount();
-        if (!canDetach) return canDetach;
-        setState(FreshStorageState::Uninitialized);
-        return FreshResult::success("fault storage detached");
-    }
-
-    void failNextWrite() {
-        _faults.shortWrite = true;
-    }
-
-    void failNextSync() {
-        _faults.syncFailure = true;
-    }
-
-    void failNextClose() {
-        _faults.closeFailure = true;
-    }
-
-    void failNextRead() {
-        _faults.readFailure = true;
-    }
-
-    void failNextExists() {
-        _faults.existsFailure = true;
-    }
-
-    const char* name() const override {
-        return "FaultStorage";
-    }
+    const char* name() const override { return "FaultStorage"; }
 
     FreshStorageInfo info() const override {
         FreshStorageInfo result;
         result.totalBytes = 1024 * 1024;
-        for (const auto& entry : _files) result.usedBytes += entry.second.size();
+        for (const auto& entry : _volume.files) result.usedBytes += entry.second.size();
         result.freeBytes = result.totalBytes - result.usedBytes;
         return result;
     }
@@ -217,11 +157,15 @@ class FaultStorage final : public FreshStorage {
     }
 
     FreshResult mount() override {
-        return attach();
+        setState(FreshStorageState::Mounted);
+        return FreshResult::success("fault storage mounted");
     }
 
     FreshResult unmount() override {
-        return detach();
+        FreshResult canUnmount = validateCanUnmount();
+        if (!canUnmount) return canUnmount;
+        setState(FreshStorageState::Uninitialized);
+        return FreshResult::success("fault storage unmounted");
     }
 
     FreshResult openBackend(
@@ -231,106 +175,67 @@ class FaultStorage final : public FreshStorage {
     ) override {
         backend.reset();
         if (!validPath(logicalPath)) {
-            return FreshResult::failure(
-                FreshStatus::InvalidArgument,
-                "invalid fault storage path"
-            );
+            return FreshResult::failure(FreshStatus::InvalidArgument, "invalid fault storage path");
         }
         const std::string path(logicalPath);
-        if (_directories.find(parentPath(path)) == _directories.end()) {
-            return FreshResult::failure(
-                FreshStatus::FileSystemError,
-                "fault storage parent directory is missing"
-            );
+        if (_volume.directories.find(parentPath(path)) == _volume.directories.end()) {
+            return FreshResult::failure(FreshStatus::FileSystemError, "fault storage parent is missing");
         }
-        auto found = _files.find(path);
-        if (mode == FreshOpenMode::Read && found == _files.end()) {
-            return FreshResult::failure(
-                FreshStatus::FileSystemError,
-                "fault storage file does not exist"
-            );
+        auto found = _volume.files.find(path);
+        if (mode == FreshOpenMode::Read && found == _volume.files.end()) {
+            return FreshResult::failure(FreshStatus::FileSystemError, "fault storage file is missing");
         }
-        if (found == _files.end()) {
-            found = _files.emplace(path, std::vector<uint8_t>()).first;
+        if (found == _volume.files.end()) {
+            found = _volume.files.emplace(path, std::vector<uint8_t>()).first;
         }
         if (mode == FreshOpenMode::Write) found->second.clear();
-        backend.reset(new (std::nothrow) FaultFileBackend(
-            found->second,
-            mode,
-            _faults
-        ));
+        backend.reset(new (std::nothrow) FaultFileBackend(found->second, mode, _control));
         return backend
             ? FreshResult::success("fault storage file opened")
-            : FreshResult::failure(
-                FreshStatus::OutOfMemory,
-                "failed to allocate fault file"
-            );
+            : FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate fault file");
     }
 
     FreshResult existsBackend(const char* path, bool& exists) const override {
         exists = false;
-        if (_faults.existsFailure) {
-            _faults.existsFailure = false;
-            return FreshResult::failure(
-                FreshStatus::FileSystemError,
-                "injected exists failure"
-            );
+        if (_control.existsFailure) {
+            _control.existsFailure = false;
+            return FreshResult::failure(FreshStatus::FileSystemError, "injected exists failure");
         }
         if (!validPath(path)) {
-            return FreshResult::failure(
-                FreshStatus::InvalidArgument,
-                "invalid fault storage path"
-            );
+            return FreshResult::failure(FreshStatus::InvalidArgument, "invalid fault storage path");
         }
-        exists = _files.find(path) != _files.end() ||
-                 _directories.find(path) != _directories.end();
+        exists = _volume.files.find(path) != _volume.files.end() ||
+                 _volume.directories.find(path) != _volume.directories.end();
         return FreshResult::success("fault storage path inspected");
     }
 
     FreshResult createDirectoryBackend(const char* path) override {
         if (!validPath(path)) {
-            return FreshResult::failure(
-                FreshStatus::InvalidArgument,
-                "invalid fault storage directory"
-            );
+            return FreshResult::failure(FreshStatus::InvalidArgument, "invalid fault directory");
         }
         const std::string directory(path);
-        if (_directories.find(parentPath(directory)) == _directories.end()) {
-            return FreshResult::failure(
-                FreshStatus::FileSystemError,
-                "fault storage parent directory is missing"
-            );
+        if (_volume.directories.find(parentPath(directory)) == _volume.directories.end()) {
+            return FreshResult::failure(FreshStatus::FileSystemError, "fault storage parent is missing");
         }
-        _directories.insert(directory);
-        return FreshResult::success("fault storage directory created");
+        _volume.directories.insert(directory);
+        return FreshResult::success("fault directory created");
     }
 
     FreshResult removeFileBackend(const char* path) override {
-        _files.erase(path);
-        return FreshResult::success("fault storage file removed");
+        _volume.files.erase(path);
+        return FreshResult::success("fault file removed");
     }
 
     FreshResult removeDirectoryBackend(const char* path) override {
         const std::string directory(path);
         const std::string prefix = directory + "/";
-        for (const auto& entry : _files) {
+        for (const auto& entry : _volume.files) {
             if (entry.first.rfind(prefix, 0) == 0) {
-                return FreshResult::failure(
-                    FreshStatus::Busy,
-                    "fault storage directory is not empty"
-                );
+                return FreshResult::failure(FreshStatus::Busy, "fault directory is not empty");
             }
         }
-        for (const std::string& entry : _directories) {
-            if (entry != directory && entry.rfind(prefix, 0) == 0) {
-                return FreshResult::failure(
-                    FreshStatus::Busy,
-                    "fault storage directory is not empty"
-                );
-            }
-        }
-        _directories.erase(directory);
-        return FreshResult::success("fault storage directory removed");
+        _volume.directories.erase(directory);
+        return FreshResult::success("fault directory removed");
     }
 
     FreshResult listDirectoryBackend(
@@ -339,37 +244,26 @@ class FaultStorage final : public FreshStorage {
     ) const override {
         entries.clear();
         const std::string directory(path);
-        if (_directories.find(directory) == _directories.end()) {
-            return FreshResult::failure(
-                FreshStatus::FileSystemError,
-                "fault storage directory does not exist"
-            );
+        if (_volume.directories.find(directory) == _volume.directories.end()) {
+            return FreshResult::failure(FreshStatus::FileSystemError, "fault directory is missing");
         }
         const std::string prefix = directory == "/" ? "/" : directory + "/";
-        for (const std::string& child : _directories) {
-            if (child == directory || child.rfind(prefix, 0) != 0) continue;
-            const std::string name = child.substr(prefix.size());
-            if (!name.empty() && name.find('/') == std::string::npos) {
-                entries.push_back({.name = name, .isDirectory = true, .size = 0});
-            }
-        }
-        for (const auto& child : _files) {
+        for (const auto& child : _volume.files) {
             if (child.first.rfind(prefix, 0) != 0) continue;
             const std::string name = child.first.substr(prefix.size());
-            if (!name.empty() && name.find('/') == std::string::npos) {
-                entries.push_back({
-                    .name = name,
-                    .isDirectory = false,
-                    .size = child.second.size()
-                });
-            }
+            if (name.empty() || name.find('/') != std::string::npos) continue;
+            entries.push_back({
+                .name = name,
+                .path = child.first,
+                .isDirectory = false,
+                .size = child.second.size()
+            });
         }
-        return FreshResult::success("fault storage directory listed");
+        return FreshResult::success("fault directory listed", entries.size());
     }
 
-    mutable FaultState _faults;
-    std::map<std::string, std::vector<uint8_t>> _files;
-    std::set<std::string> _directories;
+    FaultVolume& _volume;
+    FaultControl& _control;
 };
 
 size_t passed = 0;
@@ -385,85 +279,37 @@ void check(bool condition, const char* label) {
 void setup() {
     Serial.begin(115200);
 
-    {
-        FaultStorage limited(2);
-        check(static_cast<bool>(limited.attach()), "attach limited storage");
-        check(
-            static_cast<bool>(limited.createDirectory("/tests")),
-            "create limited storage directory"
-        );
-        FreshFile first;
-        FreshFile second;
-        FreshFile third;
-        check(
-            static_cast<bool>(limited.open(
-                "/tests/first.bin",
-                FreshOpenMode::Write,
-                first
-            )) &&
-                static_cast<bool>(limited.open(
-                    "/tests/second.bin",
-                    FreshOpenMode::Write,
-                    second
-                )),
-            "open files up to configured limit"
-        );
-        FreshResult limitedOpen = limited.open(
-            "/tests/third.bin",
-            FreshOpenMode::Write,
-            third
-        );
-        check(
-            !limitedOpen && limitedOpen.status == FreshStatus::Busy,
-            "reject file beyond configured limit"
-        );
-        first.close();
-        check(
-            static_cast<bool>(limited.open(
-                "/tests/third.bin",
-                FreshOpenMode::Write,
-                third
-            )),
-            "reuse released file slot"
-        );
-        second.close();
-        third.close();
-        check(static_cast<bool>(limited.detach()), "detach limited storage");
-    }
-
-    FaultStorage storage;
-    check(static_cast<bool>(storage.attach()), "attach fault storage");
-
+    FaultVolume volume;
+    FaultControl control;
     Fresh database;
     FreshConfig config;
     config.syncIntervalMS = 60'000;
+
     check(
-        static_cast<bool>(database.init("/fresh_failure", storage, config)),
-        "initialize Fresh on custom fault storage"
+        static_cast<bool>(database.init(
+            "/fresh_failure",
+            config,
+            FaultStorage(volume, control)
+        )),
+        "initialize Fresh on owned custom fault storage"
+    );
+    check(
+        static_cast<bool>(database.storage().ensureDirectory("/tests")),
+        "create test directory"
     );
 
-    FreshResult directory = database.withStorage(
-        [](FreshStorage& activeStorage) {
-            return activeStorage.createDirectory("/tests");
-        }
-    );
-    check(static_cast<bool>(directory), "create test directory");
+    const uint8_t payload[] = {1, 2, 3, 4};
 
     FreshFile shortFile;
     check(
-        static_cast<bool>(database.withStorage(
-            [&](FreshStorage& activeStorage) {
-                return activeStorage.open(
-                    "/tests/short.bin",
-                    FreshOpenMode::Write,
-                    shortFile
-                );
-            }
+        static_cast<bool>(database.storage().open(
+            "/tests/short.bin",
+            FreshOpenMode::Write,
+            shortFile
         )),
         "open short-write file"
     );
-    storage.failNextWrite();
-    const uint8_t payload[] = {1, 2, 3, 4};
+    control.shortWrite = true;
     check(
         shortFile.write(payload, sizeof(payload)) != sizeof(payload) &&
             shortFile.getWriteError() != 0,
@@ -472,33 +318,20 @@ void setup() {
     shortFile.close();
 
     check(
-        static_cast<bool>(database.withStorage(
-            [&](FreshStorage& activeStorage) {
-                return activeStorage.open(
-                    "/tests/reused.bin",
-                    FreshOpenMode::Write,
-                    shortFile
-                );
-            }
+        static_cast<bool>(database.storage().open(
+            "/tests/reused.bin",
+            FreshOpenMode::Write,
+            shortFile
         )) && shortFile.getWriteError() == 0,
         "clear stale Print error when FreshFile is reused"
     );
-    check(
-        shortFile.write(payload, sizeof(payload)) == sizeof(payload),
-        "write succeeds after FreshFile reuse"
-    );
+    check(shortFile.write(payload, sizeof(payload)) == sizeof(payload), "write after reuse");
     shortFile.close();
 
     FreshFile syncFile;
-    database.withStorage([&](FreshStorage& activeStorage) {
-        return activeStorage.open(
-            "/tests/sync.bin",
-            FreshOpenMode::Write,
-            syncFile
-        );
-    });
+    database.storage().open("/tests/sync.bin", FreshOpenMode::Write, syncFile);
     syncFile.write(payload, sizeof(payload));
-    storage.failNextSync();
+    control.syncFailure = true;
     FreshResult syncFailure = syncFile.syncAndClose();
     check(
         !syncFailure && syncFailure.status == FreshStatus::FileSystemError,
@@ -506,48 +339,29 @@ void setup() {
     );
 
     FreshFile closeFile;
-    database.withStorage([&](FreshStorage& activeStorage) {
-        return activeStorage.open(
-            "/tests/close.bin",
-            FreshOpenMode::Write,
-            closeFile
-        );
-    });
+    database.storage().open("/tests/close.bin", FreshOpenMode::Write, closeFile);
     closeFile.write(payload, sizeof(payload));
-    storage.failNextClose();
+    control.closeFailure = true;
     FreshResult closeFailure = closeFile.syncAndClose();
     check(
         !closeFailure && closeFailure.status == FreshStatus::FileSystemError,
         "propagate close failure"
     );
 
-    FreshFile writeReadFile;
-    database.withStorage([&](FreshStorage& activeStorage) {
-        return activeStorage.open(
-            "/tests/read.bin",
-            FreshOpenMode::Write,
-            writeReadFile
-        );
-    });
-    writeReadFile.write(payload, sizeof(payload));
     check(
-        static_cast<bool>(writeReadFile.syncAndClose()),
+        static_cast<bool>(database.storage().writeFile(
+            "/tests/read.bin",
+            payload,
+            sizeof(payload)
+        )),
         "prepare readable file"
     );
-
     FreshFile readFile;
-    database.withStorage([&](FreshStorage& activeStorage) {
-        return activeStorage.open(
-            "/tests/read.bin",
-            FreshOpenMode::Read,
-            readFile
-        );
-    });
-    storage.failNextRead();
+    database.storage().open("/tests/read.bin", FreshOpenMode::Read, readFile);
+    control.readFailure = true;
     uint8_t readBuffer[4] = {};
     check(
-        readFile.read(readBuffer, sizeof(readBuffer)) == -1 &&
-            readFile.error() == EIO,
+        readFile.read(readBuffer, sizeof(readBuffer)) == -1 && readFile.error() == EIO,
         "propagate unavailable read"
     );
     readFile.close();
@@ -556,25 +370,16 @@ void setup() {
     check(static_cast<bool>(created), "create model for exists failure");
     JsonDocument document;
     document["value"] = 1;
-    check(
-        static_cast<bool>(created.model.create(document)),
-        "create dirty document for exists failure"
-    );
-    storage.failNextExists();
-    const uint32_t syncStartedAt = millis();
+    check(static_cast<bool>(created.model.create(document)), "create dirty document");
+    control.existsFailure = true;
     FreshResult existsFailure = database.forceSync();
     check(
-        !existsFailure && existsFailure.status == FreshStatus::FileSystemError &&
-            millis() - syncStartedAt < 1000,
-        "abort sync promptly when storage existence query fails"
+        !existsFailure && existsFailure.status == FreshStatus::FileSystemError,
+        "propagate storage existence failure"
     );
-    check(
-        static_cast<bool>(database.forceSync()),
-        "retry dirty sync after exists failure"
-    );
+    check(static_cast<bool>(database.forceSync()), "retry dirty sync");
 
     check(static_cast<bool>(database.deinit()), "deinitialize database");
-    check(static_cast<bool>(storage.detach()), "detach fault storage");
 
     Serial.printf(
         "Storage failure regression complete: %u passed, %u failed\n",

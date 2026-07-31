@@ -7,33 +7,35 @@ void setup() {
     Serial.begin(115200);
 
     FreshConfig config;
-    config.storageType = FreshStorageType::SD;
-    config.sd.interface = FreshSDInterface::SDMMC;
-    config.sd.mountPath = "/fresh-sd";
-    config.sd.maxOpenFiles = 8;
-    config.sd.allocationUnitSize = 16 * 1024;
-    config.sd.formatOnMountFailure = false;
 
-    config.sd.sdmmc.slot = 0;
-    config.sd.sdmmc.oneBitMode = false;
+    FreshSDConfig storageConfig;
+    storageConfig.interface = FreshSDInterface::SDMMC;
+    storageConfig.mountPath = "/fresh-sd";
+    storageConfig.maxOpenFiles = 8;
+    storageConfig.allocationUnitSize = 16 * 1024;
+    storageConfig.formatOnMountFailure = false;
 
-    // Leave the pins unset to use the target's default SDMMC routing.
-    // Targets with GPIO-matrix SDMMC support may configure clock, command,
-    // and data pins explicitly. See docs/storage.md.
+    // Waveshare ESP32-P4-Module-DEV-KIT onboard TF card.
+    storageConfig.sdmmc.slot = 1;
+    storageConfig.sdmmc.oneBitMode = false;
+    storageConfig.sdmmc.clockPin = GPIO_NUM_43;
+    storageConfig.sdmmc.commandPin = GPIO_NUM_44;
+    storageConfig.sdmmc.data0Pin = GPIO_NUM_39;
+    storageConfig.sdmmc.data1Pin = GPIO_NUM_40;
+    storageConfig.sdmmc.data2Pin = GPIO_NUM_41;
+    storageConfig.sdmmc.data3Pin = GPIO_NUM_42;
 
-    FreshResult initialized = database.init("/fresh", config);
+    FreshInitResult initialized = database.init(
+        "/fresh",
+        config,
+        FreshSDStorage(storageConfig)
+    );
     if (!initialized) {
         Serial.printf("Fresh init failed: %s\n", initialized.message.c_str());
         return;
     }
 
-    FreshStorageInfo storage;
-    FreshResult queried = database.storageInfo(storage);
-    if (!queried) {
-        Serial.printf("Storage query failed: %s\n", queried.message.c_str());
-        return;
-    }
-
+    FreshStorageInfo storage = database.storage().info();
     Serial.printf(
         "%s total=%u used=%u free=%u\n",
         storage.name.c_str(),

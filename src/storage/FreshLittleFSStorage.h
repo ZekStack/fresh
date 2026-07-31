@@ -6,7 +6,9 @@
 
 class FreshLittleFSStorage final : public FreshStorage {
   public:
-	explicit FreshLittleFSStorage(const FreshLittleFSConfig &config);
+	explicit FreshLittleFSStorage(
+	    const FreshLittleFSConfig &config = FreshLittleFSConfig()
+	);
 
 	const char *name() const override;
 	FreshStorageInfo info() const override;

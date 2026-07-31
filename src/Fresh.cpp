@@ -1,9 +1,8 @@
 #include "Fresh.h"
 #include "internal/FreshInternal.h"
 #include "internal/FreshMemory.h"
-#include "internal/FreshStorageFactory.h"
-#include "internal/FreshStorageReference.h"
 #include "internal/FreshStorageContext.h"
+#include "storage/FreshLittleFSStorage.h"
 
 #include <algorithm>
 #include <ctime>
@@ -67,9 +66,6 @@ Fresh::~Fresh() {
 
 	FreshResult shutdown = deinit(FreshDeinitOptions{.sync = true, .timeoutMS = UINT32_MAX});
 	if (!shutdown) {
-		// A failed final sync must not leave the task running while member state is
-		// destroyed. Stop without another durability attempt, then invalidate any
-		// remaining handles before releasing the storage object.
 		if (_storage) {
 			_storage->setApplicationFileAcceptance(false);
 			_storage->closeApplicationFiles(false);
@@ -134,66 +130,43 @@ FreshResult Fresh::validateConfig(const FreshConfig &config) const {
 		    "snapshot limit must be at least the document limit"
 		);
 	}
-
-	if (config.storageType != FreshStorageType::Custom) {
-		FreshLittleFSConfig littleFS = config.littleFS;
-		if (config.eraseOnFileSystemFailure) littleFS.formatOnMountFailure = true;
-		FreshResult storageConfig = FreshValidateStorageConfig(config.storageType, littleFS, config.sd);
-		if (!storageConfig) return storageConfig;
-	}
-
 	return FreshResult::success("configuration valid");
 }
 
 FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
-	if (config.storageType == FreshStorageType::Custom) {
-		return FreshResult::failure(
-		    FreshStatus::InvalidArgument,
-		    "custom storage requires a storage instance"
-		);
-	}
-	return initWithStorage(dbPath, config, nullptr);
-}
-
-FreshResult Fresh::init(
-    const char *dbPath,
-    std::unique_ptr<FreshStorage> storage,
-    const FreshConfig &config
-) {
-	if (!storage) {
-		return FreshResult::failure(FreshStatus::InvalidArgument, "custom storage is required");
-	}
-	FreshConfig effectiveConfig = config;
-	effectiveConfig.storageType = FreshStorageType::Custom;
-	return initWithStorage(dbPath, effectiveConfig, std::move(storage));
-}
-
-FreshResult Fresh::init(
-    const char *dbPath,
-    FreshStorage &storage,
-    const FreshConfig &config
-) {
-	std::unique_ptr<FreshStorage> reference(
-	    new (std::nothrow) FreshStorageReference(storage)
+	std::unique_ptr<FreshStorage> storage(
+	    new (std::nothrow) FreshLittleFSStorage(FreshLittleFSConfig())
 	);
-	if (!reference) {
+	if (!storage) {
 		return FreshResult::failure(
 		    FreshStatus::OutOfMemory,
-		    "failed to allocate custom storage reference"
+		    "failed to allocate default LittleFS storage"
 		);
 	}
-	FreshConfig effectiveConfig = config;
-	effectiveConfig.storageType = FreshStorageType::Custom;
-	return initWithStorage(dbPath, effectiveConfig, std::move(reference));
+	return initWithStorage(dbPath, config, std::move(storage));
+}
+
+FreshResult Fresh::init(
+    const char *dbPath,
+    const FreshConfig &config,
+    std::unique_ptr<FreshStorage> storage
+) {
+	if (!storage) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "storage is required");
+	}
+	return initWithStorage(dbPath, config, std::move(storage));
 }
 
 FreshResult Fresh::initWithStorage(
     const char *dbPath,
     const FreshConfig &config,
-    std::unique_ptr<FreshStorage> suppliedStorage
+    std::unique_ptr<FreshStorage> storage
 ) {
 	if (dbPath == nullptr || *dbPath == '\0') {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "db path is required");
+	}
+	if (!storage) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "storage is required");
 	}
 	FreshResult configResult = validateConfig(config);
 	if (!configResult) return configResult;
@@ -243,9 +216,6 @@ FreshResult Fresh::initWithStorage(
 	};
 
 	_config = config;
-	if (_config.eraseOnFileSystemFailure) {
-		_config.littleFS.formatOnMountFailure = true;
-	}
 	_diagnostics = FreshDiagnostics();
 	_models.clear();
 	_lifecycle = Lifecycle::Uninitialized;
@@ -258,20 +228,7 @@ FreshResult Fresh::initWithStorage(
 	_databaseRevision = 1;
 	xSemaphoreTake(_syncTaskExited, 0);
 
-	if (suppliedStorage) {
-		_storage = std::move(suppliedStorage);
-	} else {
-		FreshResult storageCreated = FreshCreateStorage(
-		    _config.storageType,
-		    _config.littleFS,
-		    _config.sd,
-		    _storage
-		);
-		if (!storageCreated) {
-			resetInitState();
-			return storageCreated;
-		}
-	}
+	_storage = std::move(storage);
 	FreshResult storageMounted = _storage->mount();
 	if (!storageMounted) {
 		resetInitState();
@@ -425,8 +382,6 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 				_lifecycle = Lifecycle::StopRequested;
 			}
 		} else if (_lifecycle == Lifecycle::FinalSync) {
-			// Once a shutdown has entered FinalSync, a bounded retry cannot
-			// downgrade the original durability decision with sync=false.
 			_stopping = true;
 			performFinalSync = true;
 		}
@@ -468,8 +423,6 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		}
 		FreshRemainingTicks(startedAt, options.timeoutMS, expired);
 		if (expired) {
-			// Keep FinalSync pending. A retry may safely repeat a forced sync,
-			// while skipping it could discard data created before the first call.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit deadline expired during final sync");
 		}
 	}
@@ -497,9 +450,6 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out waiting for task exit");
 		}
 		if (handle != nullptr) vTaskDelete(handle);
-		// The exit signal has now been consumed. Cleanup is a short in-memory
-		// lifetime barrier and must complete in this call so a retry never waits
-		// for a semaphore that cannot be signalled again.
 	}
 
 	if (_storage && _storage->internalOpenFileCount() != 0) {
@@ -631,16 +581,6 @@ FreshResult Fresh::storageInfo(FreshStorageInfo &result) const {
 		return FreshResult::failure(FreshStatus::NotInitialized, "database storage is not initialized");
 	}
 	return _storage->readInfo(result);
-}
-
-FreshStorage *Fresh::storage() {
-	FreshLock lock(*_mutex);
-	return _initialized && !_stopping ? _storage.get() : nullptr;
-}
-
-const FreshStorage *Fresh::storage() const {
-	FreshLock lock(*_mutex);
-	return _initialized && !_stopping ? _storage.get() : nullptr;
 }
 
 FreshDiagnostics Fresh::diagnostics() const {
