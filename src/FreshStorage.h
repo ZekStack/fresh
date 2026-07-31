@@ -84,6 +84,8 @@ struct FreshSDSPIConfig {
 struct FreshSDMMCConfig {
 	int slot = 1;
 	bool oneBitMode = false;
+	uint32_t frequencyHz = 20'000'000;
+	uint32_t slotFlags = 0;
 
 #if defined(ESP32)
 	gpio_num_t clockPin = GPIO_NUM_NC;

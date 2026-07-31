@@ -1,26 +1,26 @@
 # Fresh
 
-Fresh is a RAM-first document database for ESP32 with pluggable asynchronous storage.
+Fresh is a RAM-first document database for ESP32 with owned, pluggable storage.
 
-Fresh helps you keep small document collections and append-style logs in Arduino ESP32 projects without writing to storage from normal public write calls. It is designed for embedded applications that need predictable RAM-first behavior, background persistence, and simple result-based error handling.
+Fresh keeps small document collections and append-style logs in RAM while a background task persists them through a selected ESP-IDF storage backend.
 
 [![CI](https://github.com/ZekStack/fresh/actions/workflows/ci.yml/badge.svg)](https://github.com/ZekStack/fresh/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ZekStack/fresh?sort=semver)](https://github.com/ZekStack/fresh/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
 
-## Why use Fresh?
+## Features
 
-* **RAM-first writes** - public create, update, delete, and append calls accept data into memory before background persistence.
-* **Pluggable storage** - use Fresh-managed LittleFS, SDSPI, SDMMC, or a custom backend without changing database semantics.
-* **Document and stream models** - use general JSON document models or append-style stream models.
-* **Clear API** - operations return `FreshResult` instead of throwing exceptions.
-* **Production-minded** - FreeRTOS mutex protection, bindable callbacks, storage reporting, and explicit limitations.
+- RAM-first create, update, delete, and append operations.
+- General JSON document models and append-style stream models.
+- Owned LittleFS, SDSPI, SDMMC, eMMC, and custom storage backends.
+- Application-file access through `db.storage()`.
+- Background persistence, forced sync, streaming backup, and restore.
+- `FreshResult` error handling without exceptions.
+- FreeRTOS mutex protection and explicit shutdown behavior.
 
 ## Install
 
 ### PlatformIO
-
-Fresh is built for Arduino ESP32 and depends on ArduinoJson v7.
 
 ```ini
 [env:esp32dev]
@@ -40,9 +40,7 @@ build_unflags =
 
 ### Arduino IDE
 
-Fresh is not published to Arduino Library Manager yet.
-
-Install it by downloading the repository ZIP or cloning it into your Arduino libraries folder.
+Fresh is not published to Arduino Library Manager yet. Download the repository ZIP or clone it into:
 
 ```txt
 Arduino/libraries/Fresh
@@ -55,43 +53,39 @@ Arduino/libraries/Fresh
 #include <Fresh.h>
 
 Fresh db;
-FreshModel users;
 
 void setup() {
     Serial.begin(115200);
 
-    FreshResult initResult = db.init("/fresh_app");
-    if (!initResult) {
-        Serial.println(initResult.message.c_str());
+    FreshInitResult initialized = db.init("/fresh_app");
+    if (!initialized) {
+        Serial.println(initialized.message.c_str());
         return;
     }
 
     FreshModelResult usersResult = db.createModel("User");
-    if (!usersResult) {
+    if (!usersResult && usersResult.status != FreshStatus::ModelExists) {
         Serial.println(usersResult.message.c_str());
         return;
     }
-    users = usersResult.model;
+
+    FreshModel users = db.model("User");
 
     JsonDocument user;
     user["name"] = "Panna";
     user["age"] = 19;
 
-    FreshResult createResult = users.create(user);
-    if (!createResult) {
-        Serial.println(createResult.message.c_str());
+    FreshResult created = users.create(user);
+    if (!created) {
+        Serial.println(created.message.c_str());
         return;
     }
 
-    FreshResult found = users.findById(user["_id"].as<const char *>());
+    FreshResult found = users.findById(user["_id"].as<const char*>());
     if (found) {
         serializeJson(found.doc, Serial);
         Serial.println();
     }
-
-    JsonDocument patch;
-    patch["age"] = 20;
-    users.updateById(user["_id"].as<const char *>(), patch);
 }
 
 void loop() {
@@ -99,196 +93,158 @@ void loop() {
 }
 ```
 
-## Important notes
+The convenience overload above creates a default `FreshLittleFSStorage`.
+
+## Explicit storage
+
+`FreshConfig` contains database settings only. Construct storage independently and pass it to `init()`:
+
+```cpp
+FreshConfig config;
+config.syncIntervalMS = 5000;
+
+FreshLittleFSConfig storageConfig;
+storageConfig.partitionLabel = "spiffs";
+storageConfig.mountPath = "/littlefs";
+storageConfig.maxOpenFiles = 12;
+storageConfig.formatOnMountFailure = false;
+
+FreshInitResult initialized = db.init(
+    "/fresh_app",
+    config,
+    FreshLittleFSStorage(storageConfig)
+);
+```
+
+Fresh owns the backend after successful initialization. A named backend must be moved:
+
+```cpp
+FreshLittleFSStorage storage(storageConfig);
+db.init("/fresh_app", config, std::move(storage));
+```
+
+Supported built-in backends:
+
+- `FreshLittleFSStorage`
+- `FreshSDStorage` with SDSPI
+- `FreshSDStorage` with SDMMC
+- `FreshEMMCStorage`
+
+Custom classes can derive from `FreshStorage`.
+
+## Application files
+
+Database and application files can share the selected backend without a separate filesystem wrapper:
+
+```cpp
+FreshResult directory = db.storage().ensureDirectory("/backups");
+
+const uint8_t marker[] = {1, 2, 3, 4};
+FreshResult written = db.storage().writeFile(
+    "/backups/marker.bin",
+    marker,
+    sizeof(marker)
+);
+
+bool exists = db.storage().exists("/backups/marker.bin");
+```
+
+For streaming:
+
+```cpp
+FreshFile file;
+FreshResult opened = db.storage().open(
+    "/backups/system.fresh",
+    FreshOpenMode::Write,
+    file
+);
+if (!opened) return;
+
+file.write(buffer, length);
+file.syncAndClose();
+```
+
+The configured database root is protected from application storage operations. Open application files cause `deinit()` to return `FreshStatus::Busy` until they are closed.
+
+Fresh uses ESP-IDF filesystem and media drivers directly. It does not include or synchronize Arduino's global `LittleFS`, `SD`, or `SD_MMC` objects.
+
+## Persistence behavior
 
 > [!IMPORTANT]
-> Fresh accepts normal public writes into RAM first. A successful `create`, `update`, `delete`, or `append` result means the change was accepted in memory, not necessarily persisted to storage yet.
-
-* Persistence happens later in the sync task. Power loss before sync can lose recently accepted changes.
-* Sync captures dirty RAM state under a short database lock, then writes through the selected storage backend without holding the global database mutex.
-* `forceSyncAsync()` requests a forced checkpoint through the sync task for dirty state captured when that sync starts.
-* `forceSync()` runs the same forced captured-state checkpoint synchronously and touches storage in the caller context.
-* `flush()` synchronously persists captured pending journal operations without forcing a checkpoint snapshot. Use it as a durability barrier before a controlled reboot.
-* `deinit()` waits for the sync task to exit before owned state is destroyed. By default it performs a final forced checkpoint; pass `{.sync = false}` to stop without final persistence.
-* A bounded explicit `deinit()` may return `FreshStatus::Timeout`; the object remains in a stopping state and a later `deinit()` can finish waiting. The destructor uses an unbounded task-exit barrier because owned state cannot be destroyed while the sync task may still access it. Production code should still call `FreshResult result = db.deinit();` manually when it needs to observe final-sync failures.
-* Use `withStorage()` for short application file operations. The raw `storage()` pointer is deprecated because it cannot guarantee backend lifetime during concurrent shutdown.
-* Fresh rejects application access below the configured database root. Store backup archives and other application files in sibling paths such as `/backups`.
-* Open `FreshFile` handles cause `deinit()` to return `FreshStatus::Busy` before the sync task stops. Close them explicitly; use `syncAndClose()` for durable application files.
-* `diagnostics()` reports model load recovery after `init()`, including corrupt snapshots or recovered journals.
-* `create()` intentionally mutates the input `JsonDocument` by adding `_id`, `createdAt`, and `updatedAt`.
-* After `startBackup()`, keep calling `readBackup()` until backup finishes or call `cancelBackup()`. An undrained backup can occupy the sync task and delay normal persistence.
-* `backupStatus()` returns `FreshBackupStatus`: use `state` as the stable `FreshBackupState` lifecycle signal and `result` for detailed success/failure diagnostics.
-* Normal background sync is dirty-only and uses snapshot thresholds for compaction. Forced checkpoints compact the dirty models involved in that sync.
-* Fresh enforces configurable document, journal, snapshot, and backend reserve limits. Oversized payloads return `FreshStatus::SizeLimitExceeded`; sync preflight space failures return `FreshStatus::StorageFull`.
-* Callbacks are notification hooks. Do not call `deinit()`, `flush()`, `forceSync()`, `forceSyncAsync()`, `startBackup()`, `backupImport()`, `withStorage()`, or long-blocking code from callbacks. Post work to another task instead.
-* Fresh `0.2.0` keeps one journal, snapshot, manifest, and backup format across LittleFS, SD, and custom backends. Manifest entries map logical names to immutable storage IDs, so rename never moves model directories.
-
-## When not to use Fresh
-
-Fresh is not intended for large datasets, high-frequency telemetry, SQL-like querying, multi-device concurrency, or data that must be storage-durable immediately after every write.
-
-## Persistence guarantees
+> A successful public mutation means the change was accepted in RAM. It does not necessarily mean the change has reached storage.
 
 | Operation | RAM updated | Storage updated before return |
 | --- | --- | --- |
 | `create()` / `update()` / `delete()` / `append()` | yes | no |
-| `flush()` | yes | yes, for the captured pending journal operations |
+| `flush()` | yes | captured journal operations |
 | `forceSyncAsync()` | yes | no |
-| `forceSync()` | yes | yes, if successful |
-| `deinit({ .sync = true })` | yes | yes, if successful |
+| `forceSync()` | yes | yes, when successful |
+| `deinit({ .sync = true })` | yes | yes, when successful |
+
+Additional lifecycle rules:
+
+- Background sync captures dirty state under a short database lock and performs storage I/O outside that lock.
+- `forceSync()` performs a blocking forced checkpoint in the caller context.
+- `deinit()` performs a final sync by default and waits for the sync task to exit.
+- A timed-out `deinit()` may be called again to finish shutdown.
+- `FreshFile` operations are mutex-protected.
+- Callbacks are notifications; schedule blocking database or storage work on another task.
 
 ## Examples
 
-The repository includes topic-focused Arduino sketches in the `examples/` folder.
-
 | Example | Description |
 | --- | --- |
-| `Basic` | Minimal init, create, find, and update. |
-| `Crud` | Full create, find, update, and delete operations. |
-| `SyncAndStorage` | RAM-first writes, dirty background sync, `storageInfo`, and model lookup. |
-| `StreamModel` | Stream model append, retrieve, filtered retrieve, reverse/limit options, and `streamTo`. |
-| `ValidatorsAndCallbacks` | Bool/result validators, `std::bind`, event/sync callbacks, and custom time. |
-| `BackupStream` | Backup callbacks, `startBackup`, chunked `readBackup`, status checks, and `backupImport`. |
-| `ModelManagement` | Create, rename, drop, drop selected, and drop all models. |
-| `LittleFSStorage` | Configure the managed LittleFS backend explicitly. |
-| `SDSPIStorage` | Configure Fresh-managed SD storage over SPI. |
-| `SDMMCStorage` | Configure Fresh-managed SDMMC storage. |
-| `SameFilesystemBackup` | Store a backup archive beside the database through `withStorage()`. |
-| `CustomStorage` | Implement and reload data through a caller-owned in-memory custom backend. |
-| `StorageLifecycleRegressionTest` | Validate database-root protection, open-file shutdown blocking, and repeated initialization. |
-| `StorageFailureRegressionTest` | Inject short-write, sync, close, and unavailable-read failures into a custom backend. |
-| `SelfTest` | Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior. |
-| `ReleaseHardeningTest` | Focused validation for immutable storage IDs, rename persistence, configuration ceilings, synchronized metadata access, and repeatable shutdown. |
+| `Basic` | Minimal model and document usage. |
+| `Crud` | General-model CRUD operations. |
+| `StreamModel` | Append and retrieve stream records. |
+| `BackupStream` | Streaming backup lifecycle. |
+| `LittleFSStorage` | Explicit LittleFS backend and application files. |
+| `SDSPIStorage` | SD card over SPI. |
+| `SDMMCStorage` | SD card over SDMMC, including Waveshare ESP32-P4 pins. |
+| `EMMCStorage` | Dedicated eMMC backend. |
+| `SameFilesystemBackup` | Write a backup archive through `db.storage()`. |
+| `CustomStorage` | Owned custom backend over an external medium. |
+| `StorageLifecycleRegressionTest` | Storage ownership, path protection, and shutdown. |
+| `StorageFailureRegressionTest` | Inject file and backend failures. |
+| `HardeningRegressionTest` | Mutation and shutdown hardening. |
 
-Regression sketches are compiled by CI but are not executed in CI. Run them manually on representative ESP32 hardware. A successful `SelfTest` run ends like this:
-
-```txt
-Fresh SelfTest starting
-[PASS] create -> forceSync -> reload
-...
-SelfTest complete: 16 passed, 0 failed
-```
-
-Start with:
-
-```txt
-examples/Basic
-```
+Regression sketches are compiled in CI but require manual execution on hardware.
 
 ## Documentation
 
-Detailed documentation is available in the `docs/` folder.
-
-| Document | Description |
-| --- | --- |
-| [`docs/getting-started.md`](docs/getting-started.md) | Step-by-step setup and first document flow. |
-| [`docs/configuration.md`](docs/configuration.md) | `FreshConfig` options and defaults. |
-| [`docs/storage.md`](docs/storage.md) | Built-in storage, custom backends, ownership, and durability contracts. |
-| [`docs/migration-0.2.0.md`](docs/migration-0.2.0.md) | Upgrade, storage selection, and manual migration guidance. |
-| [`docs/release-notes-0.2.0.md`](docs/release-notes-0.2.0.md) | Fresh 0.2.0 feature and compatibility summary. |
-| [`docs/api.md`](docs/api.md) | Public classes, result types, callbacks, and backup API. |
-| [`docs/examples.md`](docs/examples.md) | Explanation of all included examples. |
-| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common issues and solutions. |
-| [`docs/release-hardening.md`](docs/release-hardening.md) | Persistence, synchronization, shutdown, allocation, and validation invariants. |
-
-## API overview
-
-```cpp
-Fresh db;
-FreshResult initResult = db.init("/fresh_app");
-
-FreshModelResult usersResult = db.createModel("User");
-FreshModel users = usersResult.model;
-FreshResult created = users.create(userDoc);
-FreshResult found = users.findById(id);
-FreshResult updated = users.updateById(id, patchDoc);
-FreshResult removed = users.deleteById(id);
-
-FreshModelResult logsResult = db.createModel("Log", FreshModelType::Stream);
-FreshModel logs = logsResult.model;
-FreshResult appended = logs.append(logDoc, {.maxEntries = 50});
-
-FreshStreamRetrieveOptions options;
-options.reverse = true;
-options.limit = 50;
-FreshResult entries = logs.retrieve(options);
-```
-
-For the full API, see [`docs/api.md`](docs/api.md).
+- [Getting started](docs/getting-started.md)
+- [Configuration](docs/configuration.md)
+- [Storage](docs/storage.md)
+- [API reference](docs/api.md)
+- [Examples](docs/examples.md)
+- [Migrating to 0.2.0](docs/migration-0.2.0.md)
+- [0.2.0 release notes](docs/release-notes-0.2.0.md)
+- [Storage implementation progress](docs/0.2.0-storage-progress.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Release hardening](docs/release-hardening.md)
 
 ## Compatibility
 
 | Item | Support |
 | --- | --- |
-| Framework | Arduino ESP32 |
-| Platform | `espressif32` |
+| Framework | Arduino as an ESP-IDF component / Arduino ESP32 |
 | Language | C++20 |
-| Storage | LittleFS, SDSPI, SDMMC, or custom `FreshStorage` |
-| Persistence format | ArduinoJson MessagePack |
-| PSRAM | Used when available for internal allocations |
-| Dependencies | `bblanchon/ArduinoJson >= 7.0.0` |
-| Exceptions | Not used |
+| Storage drivers | ESP-IDF LittleFS, SDSPI, SDMMC, eMMC, custom |
+| Persistence encoding | ArduinoJson MessagePack |
+| PSRAM | Used for eligible internal allocations when available |
+| Exceptions | Not used by the Fresh API |
 | Status | `0.2.0` pre-release |
 
-## Configuration
+## Limitations
 
-```cpp
-FreshConfig config;
-config.syncIntervalMS = 5000;
-config.syncTaskStackSize = 8192;
-config.snapshotRecordThreshold = 128;
-config.backupBufferSize = 8 * 1024;
-config.minFreeBytes = 4096;
-config.maxDocumentBytes = 16 * 1024;
-config.maxJournalRecordBytes = 32 * 1024;
-config.maxSnapshotBytes = 256 * 1024;
+Fresh is not intended for large datasets, high-frequency telemetry, SQL-style queries, multi-device concurrency, or data that must be durable after every public mutation.
 
-FreshResult result = db.init("/fresh_app", config);
-```
-
-For all options, see [`docs/configuration.md`](docs/configuration.md).
-
-## Error handling
-
-Fresh reports operation status through `FreshResult`.
-
-```cpp
-FreshResult result = db.init("/fresh_app");
-
-if (!result) {
-    Serial.println(result.message.c_str());
-    return;
-}
-```
-
-For result fields and status codes, see [`docs/api.md`](docs/api.md).
-
-## Project structure
-
-```txt
-fresh/
-├── examples/
-├── docs/
-├── src/
-├── library.json
-├── library.properties
-├── README.md
-├── LICENSE.md
-└── PLAN.md
-```
-
-## Status
-
-Fresh 0.2.0 is a pre-release. The complete source, lint, hardening, Arduino CLI, and PIOArduino compile matrix passes on ESP32, ESP32-C3, ESP32-S3, and ESP32-P4.
-
-Before production deployment, run the runtime regression sketches and validate the selected storage transport on the actual board, wiring, filesystem, and power-loss conditions used by the product. Automatic cross-filesystem migration and SD hot-swap recovery are intentionally not included.
+Automatic SD hot-swap recovery, automatic remount, and multiple simultaneously managed volumes are not part of 0.2.0.
 
 ## License
 
-MIT - see [`LICENSE.md`](LICENSE.md).
+MIT — see [LICENSE.md](LICENSE.md).
 
 ## ZekStack
 
-Part of the ZekStack ESP32 library stack.
-
-ZekStack libraries are designed to provide small, reusable building blocks for ESP32 applications.
+Fresh is part of the ZekStack ESP32 library stack.

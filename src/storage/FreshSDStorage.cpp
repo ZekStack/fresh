@@ -73,7 +73,7 @@ FreshResult FreshSDStorage::mountSPI() {
 		busConfig.sclk_io_num = _config.spi.clockPin;
 		busConfig.quadwp_io_num = -1;
 		busConfig.quadhd_io_num = -1;
-		busConfig.max_transfer_sz = static_cast<int>(_config.allocationUnitSize);
+		busConfig.max_transfer_sz = 0;
 
 		esp_err_t initialized =
 		    spi_bus_initialize(_config.spi.host, &busConfig, SPI_DMA_CH_AUTO);
@@ -120,12 +120,18 @@ FreshResult FreshSDStorage::mountSDMMC() {
 	if (_config.sdmmc.slot < 0) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "SDMMC slot is invalid");
 	}
+	if (_config.sdmmc.frequencyHz == 0) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "SDMMC frequency must be greater than zero");
+	}
 
 	sdmmc_host_t host = SDMMC_HOST_DEFAULT();
 	host.slot = _config.sdmmc.slot;
+	host.max_freq_khz = static_cast<int>(_config.sdmmc.frequencyHz / 1000);
+	if (host.max_freq_khz <= 0) host.max_freq_khz = 1;
 
 	sdmmc_slot_config_t slotConfig = SDMMC_SLOT_CONFIG_DEFAULT();
 	slotConfig.width = _config.sdmmc.oneBitMode ? 1 : 4;
+	slotConfig.flags |= _config.sdmmc.slotFlags;
 
 	const bool customPins = _config.sdmmc.clockPin != GPIO_NUM_NC ||
 	                        _config.sdmmc.commandPin != GPIO_NUM_NC ||

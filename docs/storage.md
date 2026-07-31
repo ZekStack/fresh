@@ -1,419 +1,240 @@
 # Storage
 
-Fresh 0.2.0 routes every database operation through a `FreshStorage` backend. The selected backend owns the database root, model storage, journals, snapshots, durable manifest slots, garbage collection, restore staging, and application-managed backup archives.
+Fresh 0.2.0 uses an object-based storage API. `FreshConfig` configures database behavior only; the storage backend configures mounting, filesystem options, media transport, pins, and bus ownership.
 
-Supported built-in backends:
+## Initialization
 
-- LittleFS through ESP-IDF VFS
-- SD over SPI through ESP-IDF SDSPI and FATFS
-- SD over SDMMC through ESP-IDF SDMMC and FATFS where supported
-
-Applications may also provide custom storage and file implementations. Custom storage does not need to use ESP-IDF VFS or POSIX files.
-
-## Default LittleFS
-
-The existing initialization API remains valid and selects Fresh-managed LittleFS:
+The default overload creates and owns a default LittleFS backend:
 
 ```cpp
-Fresh database;
-FreshResult initialized = database.init("/fresh");
+Fresh db;
+FreshInitResult result = db.init("/fresh");
 ```
 
-Equivalent explicit configuration:
+Explicit storage is passed as an rvalue and becomes owned by Fresh:
 
 ```cpp
 FreshConfig config;
-config.storageType = FreshStorageType::LittleFS;
-config.littleFS.partitionLabel = "spiffs";
-config.littleFS.mountPath = "/littlefs";
-config.littleFS.maxOpenFiles = 10;
-config.littleFS.formatOnMountFailure = false;
-config.littleFS.growOnMount = true;
 
-FreshResult initialized = database.init("/fresh", config);
-```
+FreshLittleFSConfig storageConfig;
+storageConfig.partitionLabel = "spiffs";
+storageConfig.mountPath = "/littlefs";
+storageConfig.maxOpenFiles = 12;
 
-Fresh mounts the partition during `init()` and unmounts it after the sync task exits during `deinit()`.
-
-`maxOpenFiles` is enforced by Fresh for every file opened through this storage instance, including internal persistence files and application files. It is not presented as a runtime LittleFS VFS registration option.
-
-`formatOnMountFailure` is disabled by default. Enabling it allows Fresh to erase and format the selected LittleFS partition after a mount failure.
-
-The deprecated `FreshConfig::eraseOnFileSystemFailure` field remains as a compatibility alias for `littleFS.formatOnMountFailure` during the 0.2.0 transition.
-
-## SD over SPI
-
-```cpp
-FreshConfig config;
-config.storageType = FreshStorageType::SD;
-config.sd.interface = FreshSDInterface::SPI;
-config.sd.mountPath = "/fresh-sd";
-config.sd.maxOpenFiles = 8;
-config.sd.allocationUnitSize = 16 * 1024;
-config.sd.formatOnMountFailure = false;
-
-config.sd.spi.host = SPI2_HOST;
-config.sd.spi.chipSelectPin = GPIO_NUM_10;
-config.sd.spi.clockPin = GPIO_NUM_12;
-config.sd.spi.mosiPin = GPIO_NUM_11;
-config.sd.spi.misoPin = GPIO_NUM_13;
-config.sd.spi.frequencyHz = 20'000'000;
-config.sd.spi.busOwnership = FreshSPIBusOwnership::Managed;
-
-Fresh database;
-FreshResult initialized = database.init("/fresh", config);
-```
-
-### Managed SPI bus
-
-With `FreshSPIBusOwnership::Managed`, Fresh:
-
-1. initializes the configured SPI host,
-2. mounts the SD card,
-3. unmounts the card during shutdown, and
-4. releases the SPI host after all Fresh files are closed.
-
-Clock, MOSI, MISO, and chip-select pins are required.
-
-### External SPI bus
-
-Use `FreshSPIBusOwnership::External` when another component initializes or shares the SPI host:
-
-```cpp
-config.sd.spi.busOwnership = FreshSPIBusOwnership::External;
-```
-
-Fresh mounts and unmounts its SD card device but never initializes or frees the SPI bus. The application must keep the bus available for the complete Fresh lifetime.
-
-SD formatting is always disabled unless `config.sd.formatOnMountFailure` is explicitly enabled. Fresh never silently formats removable media.
-
-## SDMMC
-
-```cpp
-FreshConfig config;
-config.storageType = FreshStorageType::SD;
-config.sd.interface = FreshSDInterface::SDMMC;
-config.sd.mountPath = "/fresh-sd";
-config.sd.sdmmc.slot = 0;
-config.sd.sdmmc.oneBitMode = false;
-
-Fresh database;
-FreshResult initialized = database.init("/fresh", config);
-```
-
-Board-default SDMMC pins are used when no pin values are supplied.
-
-Targets with SDMMC GPIO-matrix support may provide custom pins:
-
-```cpp
-config.sd.sdmmc.clockPin = GPIO_NUM_43;
-config.sd.sdmmc.commandPin = GPIO_NUM_44;
-config.sd.sdmmc.data0Pin = GPIO_NUM_39;
-config.sd.sdmmc.data1Pin = GPIO_NUM_40;
-config.sd.sdmmc.data2Pin = GPIO_NUM_41;
-config.sd.sdmmc.data3Pin = GPIO_NUM_42;
-```
-
-Fresh rejects custom routing on targets that only support fixed SDMMC pins. Four-bit mode requires data lines 0 through 3. One-bit mode requires only data line 0.
-
-## Fresh-owned custom storage
-
-An application can transfer ownership of a custom backend to Fresh:
-
-```cpp
-std::unique_ptr<FreshStorage> storage = createCustomStorage();
-
-Fresh database;
-FreshResult initialized = database.init(
+FreshInitResult result = db.init(
     "/fresh",
+    config,
+    FreshLittleFSStorage(storageConfig)
+);
+```
+
+A named backend must be moved:
+
+```cpp
+FreshLittleFSStorage storage(storageConfig);
+FreshInitResult result = db.init(
+    "/fresh",
+    config,
     std::move(storage)
 );
 ```
 
-Fresh calls the backend's protected `mount()` operation, owns it for the complete database lifetime, calls `unmount()` after the sync task exits, and destroys it during cleanup.
+Fresh mounts the backend during `init()`, uses it for database and application files, unmounts it during `deinit()`, and destroys it with the database. There is no borrowed-storage initialization mode in 0.2.0.
 
-This mode is appropriate when the custom backend exists only for this Fresh instance.
+## Application files
 
-## Caller-owned custom storage
-
-A shared or externally managed backend can be passed by reference:
+Use `db.storage()` for files outside the protected database root:
 
 ```cpp
-CustomStorage storage;
-FreshResult mounted = storage.attachApplicationStorage();
+FreshResult directory = db.storage().ensureDirectory("/backups");
 
-Fresh database;
-FreshResult initialized = database.init(
+const uint8_t bytes[] = {1, 2, 3, 4};
+FreshResult written = db.storage().writeFile(
+    "/backups/config.bin",
+    bytes,
+    sizeof(bytes)
+);
+
+bool exists = db.storage().exists("/backups/config.bin");
+```
+
+For streaming and large files, use `FreshFile`:
+
+```cpp
+FreshFile file;
+FreshResult opened = db.storage().open(
+    "/backups/system.fresh",
+    FreshOpenMode::Write,
+    file
+);
+if (!opened) return;
+
+file.write(buffer, length);
+FreshResult committed = file.syncAndClose();
+```
+
+The storage facade provides:
+
+- `available()`
+- `open()`
+- `exists()`
+- `fileSize()`
+- `ensureDirectory()` and `createDirectory()`
+- `removeFile()` and `removeDirectory()`
+- `rename()`
+- `listDirectory()`
+- `writeFile()` and `readFile()`
+- `info()`
+
+The configured database root is protected. When Fresh is initialized at `/fresh`, application calls cannot open, remove, rename, or enumerate `/fresh` or any child below it. Use sibling paths such as `/backups`, `/uploads`, or `/configuration`.
+
+Open application files are tracked. `deinit()` returns `FreshStatus::Busy` while a `FreshFile` remains open. Each `FreshFile` serializes its own operations with a mutex, and the database lifecycle prevents new application files while shutdown is in progress.
+
+## Logical and physical paths
+
+Storage APIs use logical absolute paths. The backend adds its ESP-IDF VFS mount point.
+
+```text
+LittleFS mount:    /littlefs
+Fresh database:    /fresh
+Application file:  /backups/system.fresh
+
+Physical VFS paths:
+/littlefs/fresh/...
+/littlefs/backups/system.fresh
+```
+
+Switching to SD or eMMC changes the physical mount point, not database or application paths.
+
+## LittleFS
+
+`FreshLittleFSStorage` uses ESP-IDF LittleFS directly through `esp_vfs_littlefs_register()`.
+
+```cpp
+FreshLittleFSConfig storageConfig;
+storageConfig.partitionLabel = "spiffs";
+storageConfig.mountPath = "/littlefs";
+storageConfig.maxOpenFiles = 12;
+storageConfig.formatOnMountFailure = false;
+storageConfig.growOnMount = true;
+
+db.init(
     "/fresh",
-    storage
+    FreshConfig(),
+    FreshLittleFSStorage(storageConfig)
 );
 ```
 
-Requirements:
+Fresh does not include or synchronize Arduino's global `LittleFS` object. Application files should use `db.storage()`.
 
-- The storage must already report `FreshStorageState::Mounted`.
-- The storage object must outlive the `Fresh` instance.
-- The application must not detach or destroy the storage while Fresh is initialized.
-- Fresh never calls the underlying backend's `unmount()` operation.
-- Fresh detaches only its internal reference adapter during `deinit()`.
+## SD over SPI
 
-This mode is appropriate for shared filesystems, application-managed buses, encrypted volume managers, or multiple services using one mounted storage device.
-
-## Custom storage contract
-
-A custom backend derives from `FreshStorage` and implements:
+`FreshSDStorage` supports SDSPI through ESP-IDF.
 
 ```cpp
-class CustomStorage final : public FreshStorage {
-public:
-    CustomStorage()
-        : FreshStorage(FreshStorageType::Custom) {}
+FreshSDConfig storageConfig;
+storageConfig.interface = FreshSDInterface::SPI;
+storageConfig.mountPath = "/sd";
+storageConfig.maxOpenFiles = 8;
+storageConfig.formatOnMountFailure = false;
 
-    const char* name() const override;
-    FreshStorageInfo info() const override;
+storageConfig.spi.host = SPI2_HOST;
+storageConfig.spi.chipSelectPin = GPIO_NUM_10;
+storageConfig.spi.clockPin = GPIO_NUM_12;
+storageConfig.spi.mosiPin = GPIO_NUM_11;
+storageConfig.spi.misoPin = GPIO_NUM_13;
+storageConfig.spi.frequencyHz = 10'000'000;
+storageConfig.spi.busOwnership = FreshSPIBusOwnership::Managed;
 
-private:
-    FreshResult mount() override;
-    FreshResult unmount() override;
-
-    FreshResult openBackend(
-        const char* logicalPath,
-        FreshOpenMode mode,
-        std::unique_ptr<FreshFileBackend>& backend
-    ) override;
-
-    FreshResult existsBackend(
-        const char* logicalPath,
-        bool& exists
-    ) const override;
-
-    FreshResult createDirectoryBackend(
-        const char* logicalPath
-    ) override;
-
-    FreshResult removeFileBackend(
-        const char* logicalPath
-    ) override;
-
-    FreshResult removeDirectoryBackend(
-        const char* logicalPath
-    ) override;
-
-    FreshResult listDirectoryBackend(
-        const char* logicalPath,
-        std::vector<FreshDirectoryEntry>& entries
-    ) const override;
-};
-```
-
-A VFS-mounted custom backend may inherit the default file and directory implementations by supplying a mount path to the `FreshStorage` constructor. A non-VFS backend overrides the primitives and returns its own `FreshFileBackend` implementation.
-
-Custom backends may pass a third constructor argument to enforce a backend-independent concurrent file limit:
-
-```cpp
-FreshStorage(FreshStorageType::Custom, nullptr, 8)
-```
-
-### File backend contract
-
-`FreshFileBackend` must implement:
-
-- open-state reporting,
-- byte and buffered reads,
-- byte and buffered writes,
-- `peek()`,
-- seek, position, and size,
-- durable `sync()`,
-- explicit `close()`, and
-- native error reporting.
-
-`sync()` is a durability boundary. It must not report success until data and required metadata have reached the backend's durable medium according to that storage technology's guarantees.
-
-Fresh performs the following sequence for durable journals, snapshots, and manifests:
-
-1. write the complete binary header and payload,
-2. reject short writes or `Print` write errors,
-3. call `sync()`,
-4. call `close()`, and
-5. reopen and verify durable slot data where the format requires verification.
-
-A custom backend must return failures honestly. It must not convert unavailable media, failed existence queries, short writes, failed synchronization, or failed close operations into success.
-
-## Logical paths
-
-Fresh passes storage-root-relative logical paths beginning with `/`:
-
-```text
-/fresh
-/fresh/manifest.a.msgpack
-/fresh/models/0123456789abcdef/journal.log
-/backups/configuration.fresh
-```
-
-Built-in VFS backends prepend their configured mount point internally. Applications and custom backends must not expose the VFS mount point as part of logical paths.
-
-Every public storage operation canonicalizes and validates its logical path before access control or backend dispatch. Fresh rejects:
-
-- paths without a leading `/`,
-- repeated separators such as `//fresh`,
-- `.` and `..` traversal segments,
-- backslashes, and
-- paths beyond the implementation limit.
-
-A trailing separator is normalized away except for `/`. The configured database root is normalized through the same path boundary before it is protected. Custom backends receive the already validated logical path and should preserve equivalent path isolation for any backend-specific aliases such as case folding.
-
-## Application files and backup archives
-
-Use `Fresh::withStorage()` for short storage operations such as creating a directory or opening a file:
-
-```cpp
-FreshFile archive;
-FreshResult opened = database.withStorage(
-    [&](FreshStorage& storage) -> FreshResult {
-        FreshResult directory = storage.createDirectory("/backups");
-        if (!directory) return directory;
-
-        return storage.open(
-            "/backups/configuration.fresh",
-            FreshOpenMode::Write,
-            archive
-        );
-    }
+db.init(
+    "/fresh",
+    FreshConfig(),
+    FreshSDStorage(storageConfig)
 );
 ```
 
-`withStorage()` holds the Fresh lifecycle lock while the callback runs. This prevents `deinit()` from detaching or destroying the backend between storage lookup and file open. Keep the callback short and do not call database methods from inside it.
+`Managed` initializes and releases the SPI bus. `External` assumes the application already initialized the selected bus and never releases it.
 
-Once a `FreshFile` is open, the callback may return. The file owns a shared state object rather than a raw pointer back to `FreshStorage`. Explicit `deinit()` returns `FreshStatus::Busy` until every application file is closed.
+Fresh does not include or synchronize Arduino's global `SD` object.
 
-Recommended layout:
+## SDMMC
 
-```text
-/fresh/       Fresh-owned database files
-/backups/     application-owned backup archives
-```
-
-Fresh rejects application operations targeting the configured database root or any child below it. Internal persistence operations run through a scoped internal storage context and remain authorized.
-
-The raw `Fresh::storage()` pointer remains deprecated for source compatibility. New code must use `withStorage()` because a raw pointer cannot provide a lifetime guarantee across concurrent shutdown.
-
-Close every `FreshFile` before calling `deinit()`. Use `syncAndClose()` when the application file is a durability boundary.
-
-When a `Fresh` object is destroyed with an application file still alive, destruction performs best-effort file synchronization, closes and invalidates the shared file state, completes the database shutdown barrier, and then releases storage. The surviving `FreshFile` object is safe to inspect or close but behaves as a closed file. This emergency cleanup prevents use-after-free; it is not a replacement for an explicit application durability boundary.
-
-A `FreshFile` reused for a later successful open starts with a cleared inherited `Print` write-error state. Moving a file transfers its current write-error state to the destination and clears the moved-from object.
-
-## Storage information
-
-Convenience form:
+`FreshSDStorage` also supports SD cards connected to an ESP-IDF SDMMC host:
 
 ```cpp
-FreshStorageInfo info = database.storageInfo();
+FreshSDConfig storageConfig;
+storageConfig.interface = FreshSDInterface::SDMMC;
+storageConfig.mountPath = "/sd";
+storageConfig.sdmmc.slot = 1;
+storageConfig.sdmmc.oneBitMode = false;
+
+storageConfig.sdmmc.clockPin = GPIO_NUM_43;
+storageConfig.sdmmc.commandPin = GPIO_NUM_44;
+storageConfig.sdmmc.data0Pin = GPIO_NUM_39;
+storageConfig.sdmmc.data1Pin = GPIO_NUM_40;
+storageConfig.sdmmc.data2Pin = GPIO_NUM_41;
+storageConfig.sdmmc.data3Pin = GPIO_NUM_42;
+
+db.init(
+    "/fresh",
+    FreshConfig(),
+    FreshSDStorage(storageConfig)
+);
 ```
 
-Result-aware form:
+These pins match the onboard TF-card data signals on the Waveshare ESP32-P4-Module-DEV-KIT. Board-specific power, LDO, reset, and voltage-selection setup must be completed by the application before `db.init()`.
+
+Fresh does not include or synchronize Arduino's global `SD_MMC` object.
+
+## eMMC
+
+Include the dedicated backend:
 
 ```cpp
-FreshStorageInfo info;
-FreshResult queried = database.storageInfo(info);
-if (!queried) {
-    Serial.println(queried.message.c_str());
-}
+#include <FreshEMMCStorage.h>
 ```
 
-The result-aware form distinguishes a real zero-capacity value from a failed capacity query.
+Then configure its SDMMC connection:
 
-`FreshStorageInfo` contains:
+```cpp
+FreshEMMCConfig storageConfig;
+storageConfig.mountPath = "/emmc";
+storageConfig.slot = 1;
+storageConfig.busWidth = 8;
+storageConfig.frequencyHz = 20'000'000;
+storageConfig.formatOnMountFailure = false;
 
-- backend type,
-- backend state,
-- backend name,
-- mount path,
-- backend-native error code,
-- total active Fresh file count,
-- application file count,
-- internal persistence file count,
-- configured concurrent file limit,
-- total bytes,
-- used bytes, and
-- free bytes.
+// Set clock, command, and data0-data7 when custom GPIO routing is used.
 
-Custom backends may override result-aware information retrieval when capacity queries can fail independently.
+db.init(
+    "/fresh",
+    FreshConfig(),
+    FreshEMMCStorage(storageConfig)
+);
+```
 
-## Shutdown and open handles
+The backend supports 1-, 4-, and 8-bit widths. Board-specific power and reset sequencing remains outside Fresh and must complete before initialization.
 
-Explicit `deinit()` performs:
+## Custom backends
 
-1. reject shutdown with `FreshStatus::Busy` if application files remain open,
-2. reject new application file opens,
-3. cancel or finish backup activity,
-4. perform the requested final sync,
-5. stop and join the sync task,
-6. verify or invalidate any remaining internal handle,
-7. unmount or detach storage according to ownership mode, and
-8. destroy Fresh-owned backend state.
+A custom backend derives from `FreshStorage` and implements mount, unmount, capacity reporting, and file/directory primitives. Fresh owns the backend object, while the underlying medium may live independently.
 
-Application and internal files are counted separately. A transient internal persistence handle no longer causes explicit shutdown to return `Busy`; shutdown waits for the sync boundary instead.
+For an in-memory test backend, keep the volume outside the backend:
 
-A bounded `deinit()` failure leaves the object in a retryable lifecycle state where possible. Once a call enters final-sync mode, later retries cannot weaken that pending durability decision by passing `sync = false`; the final sync is retried before stop is committed.
+```cpp
+MemoryVolume volume;
 
-The destructor is an unbounded lifetime barrier. It first stops accepting new application files, closes surviving application file states, and then performs normal shutdown. If the durability attempt itself fails, it still stops the task and invalidates remaining handles before member state is destroyed.
+db.init(
+    "/fresh",
+    FreshConfig(),
+    MemoryStorage(volume)
+);
+```
 
-## Open-file limits
+After `deinit()`, another `MemoryStorage(volume)` can mount the same external volume. This mirrors real hardware: Fresh owns the driver/backend object, not the physical flash chip or card.
 
-`littleFS.maxOpenFiles`, `sd.maxOpenFiles`, and the optional custom-storage constructor limit are enforced at `FreshStorage::open()` before the backend is invoked.
+## Failure and removal behavior
 
-The limit includes:
+Fresh 0.2.0 fails closed when storage operations fail. Short writes, read failures, sync failures, close failures, capacity-query failures, and unavailable media are returned as `FreshResult` failures.
 
-- application files opened through `withStorage()`,
-- journals,
-- snapshots,
-- manifests,
-- restore staging files, and
-- backup archives opened through the same storage instance.
-
-When the limit is reached, `open()` returns `FreshStatus::Busy`. A successful or failed close releases the reserved slot exactly once. `FreshStorageInfo` exposes the current total, application, and internal counts to help diagnose constrained devices.
-
-## SD card removal
-
-Automatic hot-swap recovery is not included in 0.2.0.
-
-If SD media disappears during operation:
-
-- the current operation returns a storage or filesystem error,
-- failed existence probes abort the current sync instead of spinning during model-ID allocation,
-- dirty RAM state remains dirty,
-- unverified writes are not marked committed,
-- restore staging is retained when manifest commit state is uncertain, and
-- the application should deinitialize without discarding unsynchronized state only when safe, remount, and reinitialize, or reboot.
-
-Fresh does not automatically fall back from SD to LittleFS because doing so could silently split one logical database across two filesystems.
-
-## Formatting policy
-
-- LittleFS formatting is opt-in.
-- SD formatting is opt-in and disabled by default.
-- Custom storage formatting is entirely backend-defined.
-- Fresh never changes from one storage backend to another after initialization.
-- Fresh 0.2.0 does not migrate databases between filesystems.
-
-## Conformance examples
-
-`examples/CustomStorage` contains an in-memory non-VFS backend that verifies:
-
-- caller-owned storage attachment,
-- directory and file primitives,
-- model creation,
-- durable synchronization,
-- result-query error propagation,
-- database-root protection,
-- open-file shutdown blocking,
-- deinitialization,
-- reinitialization against the same storage instance, and
-- persisted document reload.
-
-`examples/StorageLifecycleRegressionTest` exercises path authorization, per-origin handle accounting, explicit Busy shutdown, leaked-file destructor cleanup, and repeated LittleFS lifecycle behavior.
-
-`examples/StorageFailureRegressionTest` exercises configured handle limits, failed existence probes, short writes, read/sync/close failures, and `FreshFile` reuse after a write error.
-
-Production backends also need failure-path and power-loss testing appropriate to their storage medium.
+Automatic removable-media remount and hot-swap recovery are not implemented. Applications should treat card removal while Fresh is active as a storage failure and perform a controlled shutdown or restart before reinitializing the backend.
