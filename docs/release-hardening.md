@@ -117,7 +117,7 @@ CI validates:
 
 ## Physical validation
 
-Before tagging 0.2.0, execute runtime qualification for:
+Before tagging v0.2.0, execute runtime qualification for:
 
 - LittleFS two-boot persistence;
 - managed and external SDSPI;
