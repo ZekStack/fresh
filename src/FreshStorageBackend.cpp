@@ -3,6 +3,7 @@
 #include "Fresh.h"
 #include "FreshFile.h"
 #include "internal/FreshFileState.h"
+#include "internal/FreshStorageAccessState.h"
 #include "internal/FreshStorageContext.h"
 #include "internal/FreshVFSFile.h"
 
@@ -33,7 +34,8 @@ FreshStorage::FreshStorage(
 )
     : _type(type),
       _mountPath(mountPath != nullptr ? mountPath : ""),
-      _fileRegistry(new (std::nothrow) FreshStorageFileRegistry(maxOpenFiles)) {
+      _fileRegistry(new (std::nothrow) FreshStorageFileRegistry(maxOpenFiles)),
+      _accessOwner(new (std::nothrow) FreshStorageAccessOwner(this)) {
 	while (_mountPath.size() > 1 && _mountPath.back() == '/') _mountPath.pop_back();
 }
 
@@ -112,6 +114,14 @@ FreshResult FreshStorage::normalizeLogicalPath(
 }
 
 FreshResult FreshStorage::setProtectedPath(const std::string &path) {
+	std::shared_ptr<FreshStorageAccessState> accessState = _accessOwner ? _accessOwner->state() : nullptr;
+	if (!accessState) {
+		return FreshResult::failure(FreshStatus::OutOfMemory, "storage access state is unavailable");
+	}
+	FreshLock operationLock(accessState->mutex);
+	if (!operationLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage operation");
+	}
 	std::string normalized;
 	FreshResult result = normalizeLogicalPath(path.c_str(), normalized);
 	if (!result) return result;
@@ -220,6 +230,12 @@ FreshResult FreshStorage::registerFileState(
 }
 
 void FreshStorage::setApplicationFileAcceptance(bool accepted) {
+	std::shared_ptr<FreshStorageAccessState> accessState = _accessOwner ? _accessOwner->state() : nullptr;
+	if (accessState) {
+		FreshLock operationLock(accessState->mutex);
+		if (_fileRegistry) _fileRegistry->acceptApplicationFiles.store(accepted);
+		return;
+	}
 	if (_fileRegistry) _fileRegistry->acceptApplicationFiles.store(accepted);
 }
 
@@ -270,6 +286,14 @@ FreshResult FreshStorage::closeAllFiles(bool syncBeforeClose) {
 }
 
 FreshResult FreshStorage::open(const char *path, FreshOpenMode mode, FreshFile &file) {
+	std::shared_ptr<FreshStorageAccessState> accessState = _accessOwner ? _accessOwner->state() : nullptr;
+	if (!accessState) {
+		return FreshResult::failure(FreshStatus::OutOfMemory, "storage access state is unavailable");
+	}
+	FreshLock operationLock(accessState->mutex);
+	if (!operationLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage operation");
+	}
 	std::string normalized;
 	FreshResult pathResult = normalizeLogicalPath(path, normalized);
 	if (!pathResult) return pathResult;
@@ -322,6 +346,14 @@ FreshResult FreshStorage::open(const char *path, FreshOpenMode mode, FreshFile &
 }
 
 FreshResult FreshStorage::exists(const char *path, bool &result) const {
+	std::shared_ptr<FreshStorageAccessState> accessState = _accessOwner ? _accessOwner->state() : nullptr;
+	if (!accessState) {
+		return FreshResult::failure(FreshStatus::OutOfMemory, "storage access state is unavailable");
+	}
+	FreshLock operationLock(accessState->mutex);
+	if (!operationLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage operation");
+	}
 	std::string normalized;
 	FreshResult pathResult = normalizeLogicalPath(path, normalized);
 	if (!pathResult) {
@@ -341,6 +373,14 @@ FreshResult FreshStorage::exists(const char *path, bool &result) const {
 }
 
 FreshResult FreshStorage::createDirectory(const char *path) {
+	std::shared_ptr<FreshStorageAccessState> accessState = _accessOwner ? _accessOwner->state() : nullptr;
+	if (!accessState) {
+		return FreshResult::failure(FreshStatus::OutOfMemory, "storage access state is unavailable");
+	}
+	FreshLock operationLock(accessState->mutex);
+	if (!operationLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage operation");
+	}
 	std::string normalized;
 	FreshResult pathResult = normalizeLogicalPath(path, normalized);
 	if (!pathResult) return pathResult;
@@ -353,6 +393,14 @@ FreshResult FreshStorage::createDirectory(const char *path) {
 }
 
 FreshResult FreshStorage::removeFile(const char *path) {
+	std::shared_ptr<FreshStorageAccessState> accessState = _accessOwner ? _accessOwner->state() : nullptr;
+	if (!accessState) {
+		return FreshResult::failure(FreshStatus::OutOfMemory, "storage access state is unavailable");
+	}
+	FreshLock operationLock(accessState->mutex);
+	if (!operationLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage operation");
+	}
 	std::string normalized;
 	FreshResult pathResult = normalizeLogicalPath(path, normalized);
 	if (!pathResult) return pathResult;
@@ -365,6 +413,14 @@ FreshResult FreshStorage::removeFile(const char *path) {
 }
 
 FreshResult FreshStorage::removeDirectory(const char *path) {
+	std::shared_ptr<FreshStorageAccessState> accessState = _accessOwner ? _accessOwner->state() : nullptr;
+	if (!accessState) {
+		return FreshResult::failure(FreshStatus::OutOfMemory, "storage access state is unavailable");
+	}
+	FreshLock operationLock(accessState->mutex);
+	if (!operationLock) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage operation");
+	}
 	std::string normalized;
 	FreshResult pathResult = normalizeLogicalPath(path, normalized);
 	if (!pathResult) return pathResult;
@@ -380,6 +436,16 @@ FreshResult FreshStorage::listDirectory(
     const char *path,
     std::vector<FreshDirectoryEntry> &entries
 ) const {
+	std::shared_ptr<FreshStorageAccessState> accessState = _accessOwner ? _accessOwner->state() : nullptr;
+	if (!accessState) {
+		entries.clear();
+		return FreshResult::failure(FreshStatus::OutOfMemory, "storage access state is unavailable");
+	}
+	FreshLock operationLock(accessState->mutex);
+	if (!operationLock) {
+		entries.clear();
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage operation");
+	}
 	std::string normalized;
 	FreshResult pathResult = normalizeLogicalPath(path, normalized);
 	if (!pathResult) {
@@ -500,6 +566,16 @@ FreshResult FreshStorage::listDirectoryBackend(
 }
 
 FreshResult FreshStorage::readInfo(FreshStorageInfo &result) const {
+	std::shared_ptr<FreshStorageAccessState> accessState = _accessOwner ? _accessOwner->state() : nullptr;
+	if (!accessState) {
+		result = FreshStorageInfo();
+		return FreshResult::failure(FreshStatus::OutOfMemory, "storage access state is unavailable");
+	}
+	FreshLock operationLock(accessState->mutex);
+	if (!operationLock) {
+		result = FreshStorageInfo();
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage operation");
+	}
 	result = FreshStorageInfo();
 	if (!isMounted()) {
 		result.type = type();

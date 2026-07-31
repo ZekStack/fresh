@@ -962,18 +962,21 @@ FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) 
 			return {.result = false, .status = revisionResult.status, .message = revisionResult.message};
 		}
 
-		std::string storageId;
-		bool duplicate = false;
-		do {
-			storageId = FreshMakeId();
-			duplicate = FreshFS.exists(modelPath(storageId).c_str());
-			for (const auto &entry : _models) {
-				if (entry.second->storageId == storageId) {
-					duplicate = true;
-					break;
-				}
+		std::set<std::string> reservedStorageIds;
+		for (const auto &entry : _models) {
+			if (!entry.second->storageId.empty()) {
+				reservedStorageIds.insert(entry.second->storageId);
 			}
-		} while (duplicate);
+		}
+		std::string storageId;
+		FreshResult storageIdResult = allocateUniqueStorageId(reservedStorageIds, storageId);
+		if (!storageIdResult) {
+			return {
+			    .result = false,
+			    .status = storageIdResult.status,
+			    .message = storageIdResult.message
+			};
+		}
 
 		state = std::make_shared<FreshModel::State>();
 		if (!state) {

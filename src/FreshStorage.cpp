@@ -186,21 +186,29 @@ FreshSlotReadResult readDurableSlot(
     size_t maxPayloadBytes = FreshMaxPersistedPayloadBytes
 ) {
 	FreshSlotReadResult result;
-	const std::string slotAPath = FreshSlotPath(basePath, fileBaseName, 'a');
-	const std::string slotBPath = FreshSlotPath(basePath, fileBaseName, 'b');
-	const bool existsA = FreshFS.exists(slotAPath.c_str());
-	const bool existsB = FreshFS.exists(slotBPath.c_str());
-	if (!existsA && !existsB) {
+	const std::string slotPaths[] = {
+	    FreshSlotPath(basePath, fileBaseName, 'a'),
+	    FreshSlotPath(basePath, fileBaseName, 'b')
+	};
+	bool slotExists[] = {false, false};
+	for (size_t index = 0; index < 2; ++index) {
+		FreshResult existsResult = FreshFS.exists(slotPaths[index].c_str(), slotExists[index]);
+		if (!existsResult) {
+			result.missing = false;
+			result.result = existsResult;
+			return result;
+		}
+	}
+	if (!slotExists[0] && !slotExists[1]) {
 		result.missing = true;
 		result.result = FreshResult::success("durable slot missing");
 		return result;
 	}
 
 	FreshResult lastFailure = FreshResult::failure(FreshStatus::CorruptData, "no valid durable slot");
-	for (const std::string &path : {slotAPath, slotBPath}) {
-		if (!FreshFS.exists(path.c_str())) {
-			continue;
-		}
+	for (size_t index = 0; index < 2; ++index) {
+		if (!slotExists[index]) continue;
+		const std::string &path = slotPaths[index];
 		JsonDocument candidate(&FreshJsonAllocator());
 		uint64_t candidateGeneration = 0;
 		FreshResult readResult = FreshReadSlotFile(path, candidate, candidateGeneration, maxPayloadBytes);
@@ -343,7 +351,10 @@ FreshResult FreshWriteJournalRecord(const FreshModelSyncBatch &batch, const Fres
 	    record.payload.size() > FreshMaxPersistedPayloadBytes) {
 		return FreshResult::failure(FreshStatus::SizeLimitExceeded, "journal record payload is too large");
 	}
-	if (!FreshFS.exists(batch.path.c_str()) && !FreshFS.mkdir(batch.path.c_str())) {
+	bool directoryExists = false;
+	FreshResult existsResult = FreshFS.exists(batch.path.c_str(), directoryExists);
+	if (!existsResult) return existsResult;
+	if (!directoryExists && !FreshFS.mkdir(batch.path.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create model directory");
 	}
 
@@ -371,7 +382,10 @@ FreshResult FreshWriteJournalRecord(const FreshModelSyncBatch &batch, const Fres
 
 FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch, bool &snapshotWritten) {
 	snapshotWritten = false;
-	if (!FreshFS.exists(batch.path.c_str()) && !FreshFS.mkdir(batch.path.c_str())) {
+	bool directoryExists = false;
+	FreshResult existsResult = FreshFS.exists(batch.path.c_str(), directoryExists);
+	if (!existsResult) return existsResult;
+	if (!directoryExists && !FreshFS.mkdir(batch.path.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create model directory");
 	}
 
@@ -403,7 +417,10 @@ FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch, bool &snap
 	}
 	snapshotWritten = true;
 
-	if (FreshFS.exists(batch.journalPath.c_str()) && !FreshFS.remove(batch.journalPath.c_str())) {
+	bool journalExists = false;
+	FreshResult journalExistsResult = FreshFS.exists(batch.journalPath.c_str(), journalExists);
+	if (!journalExistsResult) return journalExistsResult;
+	if (journalExists && !FreshFS.remove(batch.journalPath.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "snapshot written but journal cleanup failed");
 	}
 	return FreshResult::success("snapshot written");
@@ -442,7 +459,13 @@ FreshModelSyncResult FreshDeleteModelBatch(const FreshModelSyncBatch &batch) {
 	FreshFS.remove(batch.journalPath.c_str());
 	FreshFS.remove(FreshSlotPath(batch.path, FreshSnapshotFile, 'a').c_str());
 	FreshFS.remove(FreshSlotPath(batch.path, FreshSnapshotFile, 'b').c_str());
-	if (FreshFS.exists(batch.path.c_str()) && !FreshFS.rmdir(batch.path.c_str())) {
+	bool directoryExists = false;
+	FreshResult existsResult = FreshFS.exists(batch.path.c_str(), directoryExists);
+	if (!existsResult) {
+		result.result = existsResult;
+		return result;
+	}
+	if (directoryExists && !FreshFS.rmdir(batch.path.c_str())) {
 		result.result = FreshResult::failure(FreshStatus::FileSystemError, "failed to remove model directory");
 		return result;
 	}
@@ -483,6 +506,33 @@ std::string Fresh::modelPath(const std::string &storageId) const {
 
 std::string Fresh::modelFile(const std::string &storageId, const char *fileName) const {
 	return FreshJoinPath(modelPath(storageId), fileName);
+}
+
+FreshResult Fresh::allocateUniqueStorageId(
+    const std::set<std::string> &reservedStorageIds,
+    std::string &storageId
+) const {
+	storageId.clear();
+	constexpr size_t MaxStorageIdAttempts = 64;
+	for (size_t attempt = 0; attempt < MaxStorageIdAttempts; ++attempt) {
+		std::string candidate = FreshMakeId();
+		if (candidate.empty() || reservedStorageIds.find(candidate) != reservedStorageIds.end()) {
+			continue;
+		}
+
+		bool pathExists = false;
+		FreshResult existsResult = FreshFS.exists(modelPath(candidate).c_str(), pathExists);
+		if (!existsResult) return existsResult;
+		if (!pathExists) {
+			storageId = std::move(candidate);
+			return FreshResult::success("unique model storage id allocated");
+		}
+	}
+
+	return FreshResult::failure(
+	    FreshStatus::InternalError,
+	    "failed to allocate unique model storage id"
+	);
 }
 
 FreshResult Fresh::ensureDir(const std::string &path) {
@@ -756,7 +806,10 @@ FreshResult Fresh::loadSnapshot(const std::shared_ptr<FreshModel::State> &state)
 
 FreshResult Fresh::loadJournal(const std::shared_ptr<FreshModel::State> &state) {
 	const std::string path = modelFile(state->storageId, FreshJournalFile);
-	if (!FreshFS.exists(path.c_str())) {
+	bool journalExists = false;
+	FreshResult existsResult = FreshFS.exists(path.c_str(), journalExists);
+	if (!existsResult) return existsResult;
+	if (!journalExists) {
 		return FreshLoadResult(FreshLoadStatus::LoadedOk, "journal not found");
 	}
 
@@ -1026,34 +1079,15 @@ FreshResult Fresh::syncDirty(bool force) {
 				usedStorageIds.insert(entry.second->storageId);
 			}
 		}
-		constexpr size_t maxStorageIdAttempts = 64;
 		for (const auto &entry : _models) {
 			const auto &state = entry.second;
 			if (!state->dropped && state->storageId.empty()) {
 				std::string selectedStorageId;
-				bool selected = false;
-				for (size_t attempt = 0; attempt < maxStorageIdAttempts; ++attempt) {
-					std::string candidate = FreshMakeId();
-					if (usedStorageIds.find(candidate) != usedStorageIds.end()) continue;
-
-					bool pathExists = false;
-					FreshResult existsResult = FreshFS.exists(
-					    modelPath(candidate).c_str(),
-					    pathExists
-					);
-					if (!existsResult) return existsResult;
-					if (!pathExists) {
-						selectedStorageId = std::move(candidate);
-						selected = true;
-						break;
-					}
-				}
-				if (!selected) {
-					return FreshResult::failure(
-					    FreshStatus::InternalError,
-					    "failed to allocate unique model storage id"
-					);
-				}
+				FreshResult storageIdResult = allocateUniqueStorageId(
+				    usedStorageIds,
+				    selectedStorageId
+				);
+				if (!storageIdResult) return storageIdResult;
 
 				state->storageId = std::move(selectedStorageId);
 				usedStorageIds.insert(state->storageId);

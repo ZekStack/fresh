@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -527,6 +528,10 @@ class Fresh {
 	);
 	std::string modelPath(const std::string &storageId) const;
 	std::string modelFile(const std::string &storageId, const char *fileName) const;
+	FreshResult allocateUniqueStorageId(
+	    const std::set<std::string> &reservedStorageIds,
+	    std::string &storageId
+	) const;
 	FreshResult ensureDir(const std::string &path);
 	FreshResult checkFreeSpace(size_t requiredBytes) const;
 	FreshResult readManifest();

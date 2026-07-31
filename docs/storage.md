@@ -90,6 +90,12 @@ The configured database root is protected. When Fresh is initialized at `/fresh`
 
 Open application files are tracked. `deinit()` returns `FreshStatus::Busy` while a `FreshFile` remains open. Each `FreshFile` serializes its own operations with a mutex, and the database lifecycle prevents new application files while shutdown is in progress.
 
+`readFile()` is a complete-file helper. It returns `FreshStatus::SizeLimitExceeded` without copying a prefix when the supplied buffer is too small; `affectedCount` reports the required capacity. Use `FreshFile` for streaming or files that may exceed the available buffer.
+
+Copied storage facades fail safely after their backend is deinitialized or destroyed. A facade retained across a successful `deinit()` remains detached if a later `init()` installs a new backend; request a new facade with `db.storage()`.
+
+Replacement rename never pre-deletes the target. Identical normalized source and target paths are a successful no-op. A failed replacement preserves the previous target. Custom backends must provide the same guarantee.
+
 ## Logical and physical paths
 
 Storage APIs use logical absolute paths. The backend adds its ESP-IDF VFS mount point.

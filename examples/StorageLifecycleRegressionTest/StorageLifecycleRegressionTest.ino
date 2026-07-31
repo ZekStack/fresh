@@ -106,6 +106,7 @@ void setup() {
     checkResult(database.deinit(), "deinitialize after closing files");
     check(!database.storage().available(), "detach storage facade after deinit");
 
+    FreshStorageAccess retainedStorage;
     FreshFile leaked;
     {
         Fresh scoped;
@@ -113,6 +114,8 @@ void setup() {
             scoped.init("/fresh_storage_destructor"),
             "initialize destructor lifecycle database"
         );
+        retainedStorage = scoped.storage();
+        check(retainedStorage.available(), "retained facade is initially available");
         checkResult(
             scoped.storage().ensureDirectory("/backups"),
             "create destructor test directory"
@@ -130,6 +133,18 @@ void setup() {
             "write file before destructor cleanup"
         );
     }
+
+    check(!retainedStorage.available(), "retained facade detaches after Fresh destruction");
+    bool retainedExists = true;
+    FreshResult retainedExistsResult = retainedStorage.exists(
+        "/backups/destructor.bin",
+        retainedExists
+    );
+    check(
+        !retainedExistsResult && retainedExistsResult.status == FreshStatus::NotInitialized &&
+            !retainedExists,
+        "retained facade fails safely after Fresh destruction"
+    );
 
     check(!leaked, "destructor invalidates surviving FreshFile");
     check(

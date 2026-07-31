@@ -37,8 +37,9 @@ Fresh owns the configured `FreshStorage` backend from successful `init()` until 
 
 Application file operations use `db.storage()`. The facade:
 
-- checks database lifecycle under `Fresh::_mutex`;
-- refuses new files while shutdown is active;
+- holds a backend-owned recursive access state while entering storage operations;
+- becomes detached before the backend can be destroyed;
+- refuses new operations while shutdown is active;
 - rejects the configured database root and all descendants;
 - returns `FreshFile` handles that participate in open-file accounting;
 - exposes no mount or unmount operation.
@@ -49,7 +50,7 @@ Application file operations use `db.storage()`. The facade:
 
 ## Synchronization and user-code policy
 
-`Fresh::_mutex` protects database lifecycle state, models, callbacks, configuration, and storage facade entry.
+`Fresh::_mutex` protects database lifecycle state, models, callbacks, configuration, and storage-facade acquisition. Each backend access state serializes filesystem operations and gates teardown; it is recursive because facade entry calls the same guarded base storage operations used by internal persistence.
 
 `Fresh::_syncMutex` serializes persistence and backup-import commits. Code acquires `_syncMutex` before `_mutex` when both are required. Public mutation code does not acquire `_syncMutex` while holding `_mutex`.
 
@@ -73,7 +74,9 @@ Board-level power, regulator, reset, voltage selection, and external bus coordin
 
 Patch updates reject non-object patches. The merged document, validation result, size checks, journal record, and requested return value are prepared before live state changes.
 
-Backup restore uses prepare/commit semantics. The replacement registry is decoded, counted, cloned, size-checked, and assigned storage identities before commit. The commit is serialized against sync, revalidates captured state, invalidates old handles, and swaps prepared containers. Failure before the swap leaves the live database unchanged.
+Backup restore uses prepare/commit semantics. The replacement registry is decoded, counted, cloned, size-checked, and assigned storage identities before commit. Model creation, sync repair, and restore all use the same bounded storage-ID allocator, which propagates existence-query failures instead of treating them as collisions or absence. The commit is serialized against sync, revalidates captured state, invalidates old handles, and swaps prepared containers. Failure before the swap leaves the live database unchanged.
+
+Replacement rename does not delete an existing target before the backend rename succeeds. Identical source and target paths are a no-op, and failed replacement preserves the old target. Complete-file helpers reject undersized buffers with the required capacity instead of reporting truncated success.
 
 ## Shutdown lifetime
 
