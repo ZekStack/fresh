@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Fresh.h>
+#include <FreshEMMCStorage.h>
 
 Fresh database;
 
@@ -8,32 +9,23 @@ void setup() {
 
     FreshConfig config;
 
-    FreshSDConfig storageConfig;
-    storageConfig.interface = FreshSDInterface::SDMMC;
-    storageConfig.mountPath = "/fresh-sd";
+    FreshEMMCConfig storageConfig;
+    storageConfig.mountPath = "/fresh-emmc";
     storageConfig.maxOpenFiles = 8;
     storageConfig.allocationUnitSize = 16 * 1024;
     storageConfig.formatOnMountFailure = false;
-    storageConfig.sdmmc.slot = 1;
-    storageConfig.sdmmc.oneBitMode = false;
+    storageConfig.slot = 1;
+    storageConfig.busWidth = 8;
+    storageConfig.frequencyHz = 20'000'000;
 
-#if defined(CONFIG_IDF_TARGET_ESP32P4)
-    // Waveshare ESP32-P4-Module-DEV-KIT onboard TF card signals.
-    storageConfig.sdmmc.clockPin = GPIO_NUM_43;
-    storageConfig.sdmmc.commandPin = GPIO_NUM_44;
-    storageConfig.sdmmc.data0Pin = GPIO_NUM_39;
-    storageConfig.sdmmc.data1Pin = GPIO_NUM_40;
-    storageConfig.sdmmc.data2Pin = GPIO_NUM_41;
-    storageConfig.sdmmc.data3Pin = GPIO_NUM_42;
-#else
-    // Configure the SDMMC pins required by the target board. Leaving them
-    // unset uses the ESP-IDF target defaults when that target supports SDMMC.
-#endif
+    // Configure clock, command, and data0-data7 when the board does not use
+    // the target's default SDMMC routing. Power and reset sequencing remain
+    // application/board-support responsibilities and must run before init().
 
     FreshInitResult initialized = database.init(
         "/fresh",
         config,
-        FreshSDStorage(storageConfig)
+        FreshEMMCStorage(storageConfig)
     );
     if (!initialized) {
         Serial.printf("Fresh init failed: %s\n", initialized.message.c_str());
