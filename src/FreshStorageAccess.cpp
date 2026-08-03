@@ -1,35 +1,68 @@
 #include "Fresh.h"
 
 #include "FreshFile.h"
+#include "internal/FreshFileState.h"
 #include "internal/FreshInternal.h"
+#include "internal/FreshStorageAccessState.h"
 
 #include <cstring>
+#include <new>
+#include <utility>
+
+FreshStorageAccessOwner::FreshStorageAccessOwner(FreshStorage *storage)
+    : _state(new (std::nothrow) FreshStorageAccessState()) {
+	if (_state) _state->storage.store(storage);
+}
+
+FreshStorageAccessOwner::~FreshStorageAccessOwner() {
+	if (!_state) return;
+	FreshLock lock(_state->mutex);
+	_state->storage.store(nullptr);
+}
+
+FreshStorageAccessOwner::FreshStorageAccessOwner(FreshStorageAccessOwner &&other) noexcept
+    : _state(std::move(other._state)) {
+}
+
+void FreshStorageAccessOwner::rebind(FreshStorage *storage) {
+	if (!_state) return;
+	FreshLock lock(_state->mutex);
+	if (lock) _state->storage.store(storage);
+}
 
 #define FRESH_REQUIRE_STORAGE(storageName)                                                        \
-	if (_owner == nullptr) {                                                                       \
-		return FreshResult::failure(FreshStatus::NotInitialized, "storage access is detached");      \
+	std::shared_ptr<FreshStorageAccessState> accessState = _state.lock();                           \
+	if (!accessState) {                                                                             \
+		return FreshResult::failure(FreshStatus::NotInitialized, "storage access is detached");     \
 	}                                                                                              \
-	FreshLock storageLock(*_owner->_mutex);                                                         \
-	if (!storageLock) {                                                                             \
-		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database storage");  \
+	FreshLock accessLock(accessState->mutex);                                                       \
+	if (!accessLock) {                                                                              \
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock storage access");   \
 	}                                                                                              \
-	if (!_owner->_initialized || !_owner->_storage || !_owner->_storage->isMounted()) {             \
+	FreshStorage *storagePointer = accessState->storage.load();                                     \
+	if (storagePointer == nullptr) {                                                                \
+		return FreshResult::failure(FreshStatus::NotInitialized, "storage access is detached");     \
+	}                                                                                              \
+	if (!storagePointer->_fileRegistry ||                                                           \
+	    !storagePointer->_fileRegistry->acceptApplicationFiles.load()) {                            \
+		return FreshResult::failure(FreshStatus::Busy, "database storage is stopping");             \
+	}                                                                                              \
+	if (!storagePointer->isMounted()) {                                                             \
 		return FreshResult::failure(                                                                 \
 		    FreshStatus::NotInitialized,                                                             \
 		    "database storage is not initialized"                                                   \
 		);                                                                                           \
 	}                                                                                              \
-	if (_owner->_stopping || _owner->_lifecycle != Fresh::Lifecycle::Running) {                     \
-		return FreshResult::failure(FreshStatus::Busy, "database is stopping");                      \
-	}                                                                                              \
-	FreshStorage &storageName = *_owner->_storage
+	FreshStorage &storageName = *storagePointer
 
 bool FreshStorageAccess::available() const {
-	if (_owner == nullptr) return false;
-	FreshLock storageLock(*_owner->_mutex);
-	return storageLock && _owner->_initialized && !_owner->_stopping &&
-	       _owner->_lifecycle == Fresh::Lifecycle::Running && _owner->_storage &&
-	       _owner->_storage->isMounted();
+	std::shared_ptr<FreshStorageAccessState> accessState = _state.lock();
+	if (!accessState) return false;
+	FreshLock accessLock(accessState->mutex);
+	if (!accessLock) return false;
+	FreshStorage *storage = accessState->storage.load();
+	return storage != nullptr && storage->_fileRegistry &&
+	       storage->_fileRegistry->acceptApplicationFiles.load() && storage->isMounted();
 }
 
 FreshResult FreshStorageAccess::open(
@@ -47,6 +80,7 @@ bool FreshStorageAccess::exists(const char *path) const {
 }
 
 FreshResult FreshStorageAccess::exists(const char *path, bool &result) const {
+	result = false;
 	FRESH_REQUIRE_STORAGE(storage);
 	return storage.exists(path, result);
 }
@@ -161,17 +195,41 @@ FreshResult FreshStorageAccess::readFile(
 	FreshResult opened = open(path, FreshOpenMode::Read, file);
 	if (!opened) return opened;
 
-	while (bytesRead < capacity) {
-		const int read = file.read(buffer + bytesRead, capacity - bytesRead);
+	const size_t expectedSize = file.size();
+	if (expectedSize > capacity) {
+		FreshResult closed = file.close();
+		if (!closed) return closed;
+		return FreshResult::failure(
+		    FreshStatus::SizeLimitExceeded,
+		    "file buffer is too small",
+		    expectedSize
+		);
+	}
+
+	while (bytesRead < expectedSize) {
+		const int read = file.read(buffer + bytesRead, expectedSize - bytesRead);
 		if (read < 0) {
 			file.close();
+			bytesRead = 0;
 			return FreshResult::failure(FreshStatus::FileSystemError, "failed to read storage file");
 		}
-		if (read == 0) break;
+		if (read == 0) {
+			file.close();
+			bytesRead = 0;
+			return FreshResult::failure(FreshStatus::FileSystemError, "storage file ended unexpectedly");
+		}
 		bytesRead += static_cast<size_t>(read);
 	}
+	if (file.size() != expectedSize) {
+		file.close();
+		bytesRead = 0;
+		return FreshResult::failure(FreshStatus::Busy, "storage file changed while reading");
+	}
 	FreshResult closed = file.close();
-	if (!closed) return closed;
+	if (!closed) {
+		bytesRead = 0;
+		return closed;
+	}
 	return FreshResult::success("storage file read", bytesRead);
 }
 
@@ -187,7 +245,9 @@ FreshStorageInfo FreshStorageAccess::info() const {
 }
 
 FreshStorageAccess Fresh::storage() {
-	return FreshStorageAccess(this);
+	FreshLock lock(*_mutex);
+	if (!lock || !_storage || !_storage->_accessOwner) return FreshStorageAccess();
+	return FreshStorageAccess(_storage->_accessOwner->state());
 }
 
 #undef FRESH_REQUIRE_STORAGE

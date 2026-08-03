@@ -18,10 +18,13 @@ struct FreshResult;
 struct FreshStorageInfo;
 struct FreshFileState;
 struct FreshStorageFileRegistry;
+struct FreshStorageAccessState;
+class FreshStorageAccessOwner;
 enum class FreshFileOrigin : uint8_t;
 class Fresh;
 class FreshFile;
 class FreshFileBackend;
+class FreshStorage;
 class FreshStorageAccess;
 
 enum class FreshStorageType : uint8_t {
@@ -148,10 +151,12 @@ class FreshStorageAccess {
 
   private:
 	friend class Fresh;
-	explicit FreshStorageAccess(Fresh *owner) : _owner(owner) {
+	explicit FreshStorageAccess(
+	    const std::shared_ptr<FreshStorageAccessState> &state
+	) : _state(state) {
 	}
 
-	Fresh *_owner = nullptr;
+	std::weak_ptr<FreshStorageAccessState> _state;
 };
 
 // Fresh owns the backend and controls mount/unmount. Application files are
@@ -225,6 +230,8 @@ class FreshStorage {
 	virtual FreshResult createDirectoryBackend(const char *logicalPath);
 	virtual FreshResult removeFileBackend(const char *logicalPath);
 	virtual FreshResult removeDirectoryBackend(const char *logicalPath);
+	// A failed replacement must preserve the existing target. Backends must
+	// not implement replacement as an unconditional delete followed by rename.
 	virtual FreshResult renameBackend(
 	    const char *source,
 	    const char *target,
@@ -258,4 +265,7 @@ class FreshStorage {
 	std::string _mountPath;
 	std::string _protectedPath;
 	std::shared_ptr<FreshStorageFileRegistry> _fileRegistry;
+	// Declared last so facade access is invalidated before the remaining
+	// storage members are destroyed.
+	std::unique_ptr<FreshStorageAccessOwner> _accessOwner;
 };

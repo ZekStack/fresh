@@ -9,7 +9,6 @@ class FreshStorageFileSystem {
   public:
 	FreshFile open(const char *path, const char *mode) const;
 	FreshResult exists(const char *path, bool &result) const;
-	bool exists(const char *path) const;
 	bool mkdir(const char *path) const;
 	bool remove(const char *path) const;
 	bool rmdir(const char *path) const;

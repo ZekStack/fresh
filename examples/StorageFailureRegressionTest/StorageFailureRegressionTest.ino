@@ -20,6 +20,8 @@ struct FaultControl {
     bool closeFailure = false;
     bool readFailure = false;
     bool existsFailure = false;
+    bool persistentExistsFailure = false;
+    bool renameFailure = false;
 };
 
 struct FaultVolume {
@@ -197,7 +199,7 @@ class FaultStorage final : public FreshStorage {
 
     FreshResult existsBackend(const char* path, bool& exists) const override {
         exists = false;
-        if (_control.existsFailure) {
+        if (_control.persistentExistsFailure || _control.existsFailure) {
             _control.existsFailure = false;
             return FreshResult::failure(FreshStatus::FileSystemError, "injected exists failure");
         }
@@ -236,6 +238,31 @@ class FaultStorage final : public FreshStorage {
         }
         _volume.directories.erase(directory);
         return FreshResult::success("fault directory removed");
+    }
+
+    FreshResult renameBackend(
+        const char* source,
+        const char* target,
+        bool replaceExisting
+    ) override {
+        if (_control.renameFailure) {
+            _control.renameFailure = false;
+            return FreshResult::failure(FreshStatus::FileSystemError, "injected rename failure");
+        }
+        const std::string sourcePath(source);
+        const std::string targetPath(target);
+        auto sourceFile = _volume.files.find(sourcePath);
+        if (sourceFile == _volume.files.end()) {
+            return FreshResult::failure(FreshStatus::FileSystemError, "fault rename source is missing");
+        }
+        auto targetFile = _volume.files.find(targetPath);
+        if (targetFile != _volume.files.end() && !replaceExisting) {
+            return FreshResult::failure(FreshStatus::Busy, "fault rename target exists");
+        }
+        std::vector<uint8_t> replacement = sourceFile->second;
+        _volume.files[targetPath] = std::move(replacement);
+        _volume.files.erase(sourcePath);
+        return FreshResult::success("fault file renamed");
     }
 
     FreshResult listDirectoryBackend(
@@ -356,6 +383,20 @@ void setup() {
         )),
         "prepare readable file"
     );
+    uint8_t smallBuffer[2] = {};
+    size_t boundedBytesRead = 99;
+    FreshResult boundedRead = database.storage().readFile(
+        "/tests/read.bin",
+        smallBuffer,
+        sizeof(smallBuffer),
+        boundedBytesRead
+    );
+    check(
+        !boundedRead && boundedRead.status == FreshStatus::SizeLimitExceeded &&
+            boundedRead.affectedCount == sizeof(payload) && boundedBytesRead == 0,
+        "reject truncated complete-file read"
+    );
+
     FreshFile readFile;
     database.storage().open("/tests/read.bin", FreshOpenMode::Read, readFile);
     control.readFailure = true;
@@ -365,6 +406,69 @@ void setup() {
         "propagate unavailable read"
     );
     readFile.close();
+
+    control.persistentExistsFailure = true;
+    FreshModelResult createExistsFailure = database.createModel("create_exists_failure");
+    control.persistentExistsFailure = false;
+    check(
+        !createExistsFailure && createExistsFailure.status == FreshStatus::FileSystemError,
+        "createModel propagates persistent existence failure"
+    );
+    check(
+        static_cast<bool>(database.createModel("create_exists_failure")),
+        "createModel remains usable after existence failure"
+    );
+
+    check(
+        static_cast<bool>(database.storage().writeFile(
+            "/tests/rename-source.bin",
+            payload,
+            sizeof(payload)
+        )),
+        "prepare rename source"
+    );
+    const uint8_t previousTarget[] = {9, 8, 7};
+    check(
+        static_cast<bool>(database.storage().writeFile(
+            "/tests/rename-target.bin",
+            previousTarget,
+            sizeof(previousTarget)
+        )),
+        "prepare rename target"
+    );
+    check(
+        static_cast<bool>(database.storage().rename(
+            "/tests/rename-source.bin",
+            "/tests/rename-source.bin",
+            true
+        )),
+        "same-path replacement rename is a no-op"
+    );
+    control.renameFailure = true;
+    FreshResult renameFailure = database.storage().rename(
+        "/tests/rename-source.bin",
+        "/tests/rename-target.bin",
+        true
+    );
+    uint8_t targetAfterFailure[sizeof(previousTarget)] = {};
+    size_t targetBytesRead = 0;
+    FreshResult targetRead = database.storage().readFile(
+        "/tests/rename-target.bin",
+        targetAfterFailure,
+        sizeof(targetAfterFailure),
+        targetBytesRead
+    );
+    check(
+        !renameFailure && renameFailure.status == FreshStatus::FileSystemError &&
+            database.storage().exists("/tests/rename-source.bin") && targetRead &&
+            targetBytesRead == sizeof(previousTarget) &&
+            std::equal(
+                previousTarget,
+                previousTarget + sizeof(previousTarget),
+                targetAfterFailure
+            ),
+        "failed replacement rename preserves source and target"
+    );
 
     FreshModelResult created = database.createModel("exists_failure");
     check(static_cast<bool>(created), "create model for exists failure");

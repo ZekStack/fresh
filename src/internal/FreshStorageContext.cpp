@@ -69,15 +69,6 @@ FreshResult FreshStorageFileSystem::exists(const char *path, bool &result) const
 	return FreshActiveStorage->exists(path, result);
 }
 
-bool FreshStorageFileSystem::exists(const char *path) const {
-	bool result = false;
-	FreshResult existsResult = exists(path, result);
-	// Legacy boolean callers must not interpret a failed backend query as
-	// proven absence. Result-aware callers use the overload above and propagate
-	// the storage failure directly.
-	return !existsResult || result;
-}
-
 bool FreshStorageFileSystem::mkdir(const char *path) const {
 	return FreshActiveStorage != nullptr && FreshActiveStorage->createDirectory(path);
 }

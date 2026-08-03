@@ -109,7 +109,10 @@ bool FreshRemoveRestoreStorage(const std::string &modelPath) {
 	FreshFS.remove(FreshJoinPath(modelPath, FreshJournalFile).c_str());
 	FreshFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'a').c_str());
 	FreshFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'b').c_str());
-	return !FreshFS.exists(modelPath.c_str()) || FreshFS.rmdir(modelPath.c_str());
+	bool exists = false;
+	FreshResult existsResult = FreshFS.exists(modelPath.c_str(), exists);
+	if (!existsResult) return false;
+	return !exists || FreshFS.rmdir(modelPath.c_str());
 }
 
 FreshResult FreshValidateRestoreManifest(const JsonDocument &manifest) {
@@ -267,7 +270,8 @@ FreshResult FreshProbeRestoreManifestSlot(
     FreshRestoreSlotProbe &probe
 ) {
 	probe = FreshRestoreSlotProbe();
-	probe.exists = FreshFS.exists(path.c_str());
+	FreshResult existsResult = FreshFS.exists(path.c_str(), probe.exists);
+	if (!existsResult) return existsResult;
 	if (!probe.exists) return FreshResult::success("manifest slot missing");
 
 	File input = FreshFS.open(path.c_str(), "r");
@@ -431,7 +435,10 @@ FreshResult FreshWriteRestoreSnapshot(
 	);
 	if (!encodedResult) return encodedResult;
 
-	if (FreshFS.exists(modelPath.c_str())) {
+	bool storagePathExists = false;
+	FreshResult existsResult = FreshFS.exists(modelPath.c_str(), storagePathExists);
+	if (!existsResult) return existsResult;
+	if (storagePathExists) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "restore storage path already exists");
 	}
 	if (!FreshFS.mkdir(modelPath.c_str())) {
@@ -666,10 +673,8 @@ FreshResult Fresh::restoreBackup(Stream &input, const FreshRestoreOptions &optio
 	for (const auto &entry : oldModels) usedStorageIds.insert(entry.second->storageId);
 	for (auto &entry : importedModels) {
 		std::string storageId;
-		do {
-			storageId = FreshMakeId();
-		} while (storageId.empty() || usedStorageIds.find(storageId) != usedStorageIds.end() ||
-		         FreshFS.exists(modelPath(storageId).c_str()));
+		FreshResult storageIdResult = allocateUniqueStorageId(usedStorageIds, storageId);
+		if (!storageIdResult) return storageIdResult;
 		entry.second->storageId = storageId;
 		usedStorageIds.insert(storageId);
 	}
