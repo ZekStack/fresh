@@ -5,11 +5,15 @@
 #include <FS.h>
 #include <Print.h>
 #include <Stream.h>
+#include "FreshStorage.h"
 #include <functional>
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #if defined(ESP32)
@@ -24,6 +28,7 @@ enum class FreshStatus : uint8_t {
 	AlreadyInitialized,
 	InvalidArgument,
 	FileSystemError,
+	StorageUnavailable,
 	ModelExists,
 	ModelNotFound,
 	DocumentNotFound,
@@ -85,7 +90,6 @@ struct FreshConfig {
 	UBaseType_t syncTaskPriority = 1;
 	BaseType_t syncTaskCore = tskNO_AFFINITY;
 	uint32_t syncTaskStackSize = 8192;
-	bool eraseOnFileSystemFailure = false;
 	FreshCompressionType compressionType = FreshCompressionType::MessagePack;
 	FreshModelType defaultModelType = FreshModelType::General;
 	uint32_t snapshotRecordThreshold = 128;
@@ -99,8 +103,6 @@ struct FreshConfig {
 
 struct FreshDeinitOptions {
 	bool sync = true;
-	// Total deadline for the complete explicit shutdown operation. UINT32_MAX
-	// keeps destructor-style unbounded lifetime-barrier behavior.
 	uint32_t timeoutMS = 2000;
 };
 
@@ -118,6 +120,8 @@ struct FreshResult {
 	static FreshResult success(const char *message = "ok", size_t affectedCount = 0);
 	static FreshResult failure(FreshStatus status, const char *message, size_t affectedCount = 0);
 };
+
+using FreshInitResult = FreshResult;
 
 struct FreshValidationResult {
 	bool result = false;
@@ -175,8 +179,6 @@ struct FreshBackupInfo {
 };
 
 struct FreshBackupOptions {
-	// Empty backs up every active model. A non-empty list is an exact model
-	// allowlist. Names are validated and copied when the backup is queued.
 	std::vector<std::string> modelNames;
 };
 
@@ -208,8 +210,6 @@ enum class FreshRestoreMode : uint8_t {
 };
 
 struct FreshRestoreOptions {
-	// ReplaceSelected preserves models that are absent from the archive.
-	// ReplaceAll removes absent models unless they are explicitly protected.
 	FreshRestoreMode mode = FreshRestoreMode::ReplaceSelected;
 	std::vector<std::string> protectedModels;
 };
@@ -229,9 +229,18 @@ struct FreshGarbageCollectionDiagnostics {
 };
 
 struct FreshStorageInfo {
-	size_t totalBytes = 0;
-	size_t usedBytes = 0;
-	size_t freeBytes = 0;
+	FreshStorageType type = FreshStorageType::LittleFS;
+	FreshStorageState state = FreshStorageState::Uninitialized;
+	std::string name;
+	std::string mountPath;
+	int nativeError = 0;
+	size_t openFileCount = 0;
+	size_t applicationOpenFileCount = 0;
+	size_t internalOpenFileCount = 0;
+	size_t maxOpenFiles = 0;
+	uint64_t totalBytes = 0;
+	uint64_t usedBytes = 0;
+	uint64_t freeBytes = 0;
 };
 
 struct FreshModelLoadInfo {
@@ -275,8 +284,6 @@ struct FreshRecordRetrieveOptions {
 using FreshStreamRetrieveOptions = FreshRecordRetrieveOptions;
 
 struct FreshStreamAppendOptions {
-	// Zero keeps the stream unbounded. A positive value retains only the newest
-	// maxEntries entries as part of the same append operation.
 	size_t maxEntries = 0;
 };
 
@@ -396,8 +403,38 @@ class Fresh {
 	Fresh(const Fresh &) = delete;
 	Fresh &operator=(const Fresh &) = delete;
 
+	// Convenience overload using FreshLittleFSStorage with default settings.
 	FreshResult init(const char *dbPath, const FreshConfig &config = FreshConfig());
+	FreshResult init(
+	    const char *dbPath,
+	    const FreshConfig &config,
+	    std::unique_ptr<FreshStorage> storage
+	);
+
+	template <
+	    typename TStorage,
+	    typename Storage = std::remove_cv_t<std::remove_reference_t<TStorage>>,
+	    typename = std::enable_if_t<std::is_base_of_v<FreshStorage, Storage>>
+	>
+	FreshResult init(
+	    const char *dbPath,
+	    const FreshConfig &config,
+	    TStorage &&storage
+	) {
+		static_assert(
+		    !std::is_lvalue_reference_v<TStorage>,
+		    "move the storage into Fresh with std::move(storage)"
+		);
+		return init(
+		    dbPath,
+		    config,
+		    std::make_unique<Storage>(std::forward<TStorage>(storage))
+		);
+	}
+
 	FreshResult deinit(const FreshDeinitOptions &options = FreshDeinitOptions());
+	// Formats the complete configured storage volume and starts an empty database.
+	FreshResult format();
 
 	FreshModel model(const char *modelName);
 	FreshModelListResult listModels() const;
@@ -412,7 +449,9 @@ class Fresh {
 	FreshResult forceSyncAsync();
 	FreshResult forceSync();
 
+	FreshStorageAccess storage();
 	FreshStorageInfo storageInfo() const;
+	FreshResult storageInfo(FreshStorageInfo &result) const;
 	FreshDiagnostics diagnostics() const;
 	FreshResult collectGarbage(FreshGarbageCollectionResult &result);
 
@@ -459,18 +498,18 @@ class Fresh {
 	const char *loadStatusToString(FreshLoadStatus status) const;
 	const char *statusToString(FreshStatus status) const;
 
-	// Internal checked staging boundary shared by the model implementation.
-	// These are not application-level APIs and may change before v0.1.0.
 	FreshResult checkPayloadSize(size_t payloadBytes, size_t limit, const char *label) const;
 	FreshResult recordToJson(const FreshPendingRecord &record, JsonDocument &out);
 
   private:
 	friend class FreshModel;
 	friend class FreshBackupPrint;
+	friend class FreshStorageAccess;
 
 	enum class Lifecycle : uint8_t {
 		Uninitialized,
 		Running,
+		Formatting,
 		FinalSync,
 		StopRequested,
 		WaitingForTaskExit,
@@ -485,8 +524,17 @@ class Fresh {
 	void emitSync(FreshResult result);
 
 	FreshResult validateConfig(const FreshConfig &config) const;
+	FreshResult initWithStorage(
+	    const char *dbPath,
+	    const FreshConfig &config,
+	    std::unique_ptr<FreshStorage> storage
+	);
 	std::string modelPath(const std::string &storageId) const;
 	std::string modelFile(const std::string &storageId, const char *fileName) const;
+	FreshResult allocateUniqueStorageId(
+	    const std::set<std::string> &reservedStorageIds,
+	    std::string &storageId
+	) const;
 	FreshResult ensureDir(const std::string &path);
 	FreshResult checkFreeSpace(size_t requiredBytes) const;
 	FreshResult readManifest();
@@ -509,6 +557,7 @@ class Fresh {
 
 	FreshConfig _config;
 	FreshDiagnostics _diagnostics;
+	std::unique_ptr<FreshStorage> _storage;
 	std::string _rootPath;
 	Lifecycle _lifecycle = Lifecycle::Uninitialized;
 	bool _initialized = false;
@@ -535,3 +584,6 @@ class Fresh {
 	FreshBackupCallback _onBackupError;
 	mutable std::unique_ptr<FreshBackupRuntimeState> _backup;
 };
+
+#include "storage/FreshLittleFSStorage.h"
+#include "storage/FreshSDStorage.h"

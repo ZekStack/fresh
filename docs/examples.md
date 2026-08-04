@@ -1,138 +1,52 @@
 # Examples
 
-Fresh examples are topic-focused Arduino sketches. Start with `Basic`, then move to the example that matches the behavior you need.
+All examples are under [`../examples`](../examples).
 
-## Basic
+| Example | Purpose |
+| --- | --- |
+| `Basic` | General model creation and document operations. |
+| `StreamModel` | Append-only stream model usage. |
+| `LittleFSStorage` | Explicit `FreshLittleFSStorage` configuration and `db.storage()` file access. |
+| `SDSPIStorage` | ESP-IDF SD card storage over a managed SPI bus. |
+| `SDMMCStorage` | ESP-IDF SDMMC card configuration, including the Waveshare ESP32-P4-Module-DEV-KIT pins, power gate, and LDO channel. |
+| `EMMCStorage` | Dedicated 1/4/8-bit eMMC backend configuration. |
+| `SameFilesystemBackup` | Stream a Fresh backup into an application file on the active backend. |
+| `CustomStorage` | Implement an owned custom backend over an independently owned memory volume. |
+| `StorageLifecycleRegressionTest` | Database-root protection, open-file shutdown blocking, and repeated initialization. |
+| `StorageFailureRegressionTest` | Short-write, read, sync, close, and existence-query failure injection. |
+| `HardeningRegressionTest` | Atomic mutation, retryable shutdown, timeout, and allocation hardening checks. |
+| `SelfTest` | Destructive end-to-end development test. |
+| `ReleaseHardeningTest` | Persistence and lifecycle release checks. |
 
-Path: [`../examples/Basic/Basic.ino`](../examples/Basic/Basic.ino)
+## Storage initialization pattern
 
-Shows the smallest complete document flow:
+```cpp
+Fresh database;
+FreshConfig config;
 
-* initialize `Fresh`
-* create a `User` model
-* insert a document
-* find it by `_id`
-* update it
+FreshLittleFSConfig storageConfig;
+storageConfig.maxOpenFiles = 12;
 
-Use this first when wiring Fresh into a new project.
-
-## Crud
-
-Path: [`../examples/Crud/Crud.ino`](../examples/Crud/Crud.ino)
-
-Demonstrates document model operations:
-
-* `create`
-* `findById`
-* `findOne`
-* `find`
-* `updateById`
-* `updateOne`
-* `update`
-* `deleteById`
-* `deleteOne`
-* `deleteMany`
-
-Use this when validating query and patch behavior.
-
-## SyncAndStorage
-
-Path: [`../examples/SyncAndStorage/SyncAndStorage.ino`](../examples/SyncAndStorage/SyncAndStorage.ino)
-
-Demonstrates RAM-first writes and background persistence:
-
-* custom `syncIntervalMS`
-* storage usage before and after writes
-* delayed background sync
-* `storageInfo()`
-* `model(name)` lookup
-
-Use this when tuning persistence timing or explaining why an accepted write may not immediately appear in flash usage.
-
-## StreamModel
-
-Path: [`../examples/StreamModel/StreamModel.ino`](../examples/StreamModel/StreamModel.ino)
-
-Demonstrates append-style records:
-
-* `createModel(name, FreshModelType::Stream)`
-* `append`
-* bounded `retrieve`
-* filtered `retrieve`
-* `FreshStreamRetrieveOptions`
-* `streamTo(Print&)`
-
-Use this for logs, telemetry records, and other append-heavy data. Prefer `reverse = true` with a `limit` for normal log views so reads stay bounded.
-
-## ValidatorsAndCallbacks
-
-Path: [`../examples/ValidatorsAndCallbacks/ValidatorsAndCallbacks.ino`](../examples/ValidatorsAndCallbacks/ValidatorsAndCallbacks.ino)
-
-Demonstrates validation and callback wiring:
-
-* bool validators
-* `FreshValidationResult` validators
-* event callbacks
-* sync callbacks
-* custom time callback
-* `std::bind` with private class methods
-
-Use this when integrating Fresh into a class-based application.
-
-## BackupStream
-
-Path: [`../examples/BackupStream/BackupStream.ino`](../examples/BackupStream/BackupStream.ino)
-
-Demonstrates chunked backup and restore:
-
-* backup start/progress/end/error callbacks
-* `startBackup()`
-* repeated `readBackup(...)`
-* `backupStatus()` with `FreshBackupState`
-* `backupImport(data, length)`
-* restore into another `Fresh` instance
-
-After `startBackup()`, keep reading chunks until `backupStatus().state` is `FreshBackupState::Finished`, `FreshBackupState::Cancelled`, or `FreshBackupState::Error`, or call `cancelBackup()` if the consumer stops. An undrained backup can occupy the sync task and delay normal persistence.
-
-Use this when building backup download, upload, or migration flows.
-
-## ModelManagement
-
-Path: [`../examples/ModelManagement/ModelManagement.ino`](../examples/ModelManagement/ModelManagement.ino)
-
-Demonstrates model lifecycle helpers:
-
-* create multiple models
-* `renameModel`
-* `dropModel`
-* `dropModels`
-* `dropAllModels`
-
-Use this for setup tools, reset flows, and maintenance screens.
-
-## SelfTest
-
-Path: [`../examples/SelfTest/SelfTest.ino`](../examples/SelfTest/SelfTest.ino)
-
-Destructive Fresh development self-test for persistence, recovery, backup, and shutdown behavior.
-
-It uses `/fresh_selftest`, `/fresh_selftest_src`, and `/fresh_selftest_dst`, touches internal storage files, and should only be run on a test device or test partition. SelfTest intentionally depends on the current Fresh storage layout and may need updates when the storage format changes.
-
-SelfTest is compiled by CI through the examples build loop, but it is not executed in CI. Run it manually on ESP32 hardware. A successful run ends like this:
-
-```txt
-Fresh SelfTest starting
-[PASS] create -> forceSync -> reload
-...
-SelfTest complete: 16 passed, 0 failed
+FreshInitResult initialized = database.init(
+    "/fresh",
+    config,
+    FreshLittleFSStorage(storageConfig)
+);
 ```
 
-## Compiling examples
+## Application-file pattern
 
-Compile an example with PlatformIO CI:
+```cpp
+database.storage().ensureDirectory("/backups");
 
-```sh
-pio ci examples/Basic --board esp32dev --lib . --project-option build_unflags=-std=gnu++11 --project-option build_flags=-std=gnu++20
+FreshFile archive;
+FreshResult opened = database.storage().open(
+    "/backups/system.fresh",
+    FreshOpenMode::Write,
+    archive
+);
 ```
 
-Run the same command for each example folder.
+## Hardware examples
+
+SD and eMMC examples compile across the CI target matrix but still require matching physical wiring, media, bus ownership, and board-level power/reset setup before runtime validation.

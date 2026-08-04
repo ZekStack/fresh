@@ -1,9 +1,9 @@
 #include "Fresh.h"
+#include "FreshFile.h"
 #include "FreshGarbageCollectionTesting.h"
 #include "internal/FreshInternal.h"
 #include "internal/FreshMemory.h"
-
-#include <LittleFS.h>
+#include "internal/FreshStorageContext.h"
 
 #include <cstring>
 #include <limits>
@@ -28,10 +28,7 @@ struct FreshGarbageCollectionManifestSlot {
 	FreshResult result = FreshResult::success("manifest slot missing");
 };
 
-std::string FreshGarbageCollectionSlotPath(
-    const std::string &rootPath,
-    char slot
-) {
+std::string FreshGarbageCollectionSlotPath(const std::string &rootPath, char slot) {
 	std::string fileName = FreshManifestFile;
 	fileName += ".";
 	fileName.push_back(slot);
@@ -45,11 +42,6 @@ bool FreshIsStorageId(const std::string &name) {
 		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
 	}
 	return true;
-}
-
-std::string FreshBaseName(const std::string &path) {
-	const size_t separator = path.find_last_of('/');
-	return separator == std::string::npos ? path : path.substr(separator + 1);
 }
 
 FreshResult FreshValidateGarbageCollectionManifest(
@@ -92,13 +84,22 @@ FreshResult FreshValidateGarbageCollectionManifest(
 }
 
 FreshGarbageCollectionManifestSlot FreshReadGarbageCollectionManifestSlot(
+    FreshStorage &storage,
     const std::string &path
 ) {
 	FreshGarbageCollectionManifestSlot slot;
-	if (!LittleFS.exists(path.c_str())) return slot;
+	bool exists = false;
+	FreshResult existsResult = storage.exists(path.c_str(), exists);
+	if (!existsResult) {
+		slot.status = FreshGarbageCollectionSlotStatus::Unavailable;
+		slot.result = existsResult;
+		return slot;
+	}
+	if (!exists) return slot;
 
-	File file = LittleFS.open(path.c_str(), "r");
-	if (!file) {
+	FreshFile file;
+	FreshResult openResult = storage.open(path.c_str(), FreshOpenMode::Read, file);
+	if (!openResult) {
 		slot.status = FreshGarbageCollectionSlotStatus::Unavailable;
 		slot.result = FreshResult::failure(
 		    FreshStatus::FileSystemError,
@@ -185,29 +186,24 @@ FreshGarbageCollectionManifestSlot FreshReadGarbageCollectionManifestSlot(
 	return slot;
 }
 
-bool FreshRemoveGarbageCollectionTree(const std::string &path) {
-	File entry = LittleFS.open(path.c_str(), "r");
-	if (!entry) return !LittleFS.exists(path.c_str());
+bool FreshRemoveGarbageCollectionTree(
+    FreshStorage &storage,
+    const std::string &path
+) {
+	std::vector<FreshDirectoryEntry> children;
+	FreshResult listed = storage.listDirectory(path.c_str(), children);
+	if (!listed) return false;
 
-	if (!entry.isDirectory()) {
-		entry.close();
-		return LittleFS.remove(path.c_str());
+	for (const FreshDirectoryEntry &child : children) {
+		const std::string childPath = FreshJoinPath(path, child.name);
+		if (child.isDirectory) {
+			if (!FreshRemoveGarbageCollectionTree(storage, childPath)) return false;
+		} else {
+			FreshResult removed = storage.removeFile(childPath.c_str());
+			if (!removed) return false;
+		}
 	}
-
-	std::vector<std::string> children;
-	File child = entry.openNextFile();
-	while (child) {
-		const std::string childName = FreshBaseName(child.name());
-		children.push_back(FreshJoinPath(path, childName));
-		child.close();
-		child = entry.openNextFile();
-	}
-	entry.close();
-
-	for (const std::string &childPath : children) {
-		if (!FreshRemoveGarbageCollectionTree(childPath)) return false;
-	}
-	return !LittleFS.exists(path.c_str()) || LittleFS.rmdir(path.c_str());
+	return static_cast<bool>(storage.removeDirectory(path.c_str()));
 }
 
 #if defined(FRESH_TESTING)
@@ -259,19 +255,28 @@ FreshResult FreshCollectGarbageStorage(
 	result = FreshGarbageCollectionResult();
 	attempted = false;
 
+	FreshStorage *storage = FreshCurrentStorage();
+	if (storage == nullptr || !storage->isMounted()) {
+		return FreshResult::failure(FreshStatus::StorageUnavailable, "garbage collection storage is unavailable");
+	}
+
 	const std::string slotAPath = FreshGarbageCollectionSlotPath(rootPath, 'a');
 	const std::string slotBPath = FreshGarbageCollectionSlotPath(rootPath, 'b');
-	const bool slotAExists = LittleFS.exists(slotAPath.c_str());
-	const bool slotBExists = LittleFS.exists(slotBPath.c_str());
+	bool slotAExists = false;
+	bool slotBExists = false;
+	FreshResult existsA = storage->exists(slotAPath.c_str(), slotAExists);
+	if (!existsA) return existsA;
+	FreshResult existsB = storage->exists(slotBPath.c_str(), slotBExists);
+	if (!existsB) return existsB;
 	if (!slotAExists && !slotBExists) {
 		return FreshResult::success("garbage collection skipped; manifest not found");
 	}
 	attempted = true;
 
 	FreshGarbageCollectionManifestSlot slotA =
-	    FreshReadGarbageCollectionManifestSlot(slotAPath);
+	    FreshReadGarbageCollectionManifestSlot(*storage, slotAPath);
 	FreshGarbageCollectionManifestSlot slotB =
-	    FreshReadGarbageCollectionManifestSlot(slotBPath);
+	    FreshReadGarbageCollectionManifestSlot(*storage, slotBPath);
 
 	if (slotA.status == FreshGarbageCollectionSlotStatus::Unavailable) return slotA.result;
 	if (slotB.status == FreshGarbageCollectionSlotStatus::Unavailable) return slotB.result;
@@ -297,9 +302,9 @@ FreshResult FreshCollectGarbageStorage(
 	if (!manifestResult) return manifestResult;
 
 	const std::string modelsPath = FreshJoinPath(rootPath, "models");
-	File models = LittleFS.open(modelsPath.c_str(), "r");
-	if (!models || !models.isDirectory()) {
-		if (models) models.close();
+	std::vector<FreshDirectoryEntry> modelEntries;
+	FreshResult listed = storage->listDirectory(modelsPath.c_str(), modelEntries);
+	if (!listed) {
 		return FreshResult::failure(
 		    FreshStatus::FileSystemError,
 		    "failed to open models directory for garbage collection"
@@ -307,22 +312,14 @@ FreshResult FreshCollectGarbageStorage(
 	}
 
 	std::vector<std::string> candidates;
-	File child = models.openNextFile();
-	while (child) {
-		const bool isDirectory = child.isDirectory();
-		const std::string name = FreshBaseName(child.name());
-		child.close();
-
-		if (isDirectory) {
-			result.scannedDirectories++;
-			if (FreshIsStorageId(name) &&
-			    referencedStorageIds.find(name) == referencedStorageIds.end()) {
-				candidates.push_back(FreshJoinPath(modelsPath, name));
-			}
+	for (const FreshDirectoryEntry &entry : modelEntries) {
+		if (!entry.isDirectory) continue;
+		result.scannedDirectories++;
+		if (FreshIsStorageId(entry.name) &&
+		    referencedStorageIds.find(entry.name) == referencedStorageIds.end()) {
+			candidates.push_back(FreshJoinPath(modelsPath, entry.name));
 		}
-		child = models.openNextFile();
 	}
-	models.close();
 
 	for (const std::string &candidate : candidates) {
 		if (FreshGarbageCollectionShouldFail(
@@ -332,19 +329,28 @@ FreshResult FreshCollectGarbageStorage(
 			continue;
 		}
 
-		const size_t usedBefore = LittleFS.usedBytes();
-		const bool removed = FreshRemoveGarbageCollectionTree(candidate);
-		const size_t usedAfter = LittleFS.usedBytes();
+		FreshStorageInfo beforeInfo;
+		FreshResult beforeInfoResult = storage->readInfo(beforeInfo);
+		if (!beforeInfoResult) return beforeInfoResult;
+		const bool removed = FreshRemoveGarbageCollectionTree(*storage, candidate);
+		FreshStorageInfo afterInfo;
+		FreshResult afterInfoResult = storage->readInfo(afterInfo);
+		if (!afterInfoResult) return afterInfoResult;
+		const uint64_t usedBefore = beforeInfo.usedBytes;
+		const uint64_t usedAfter = afterInfo.usedBytes;
 		if (usedBefore > usedAfter) {
-			const size_t reclaimed = usedBefore - usedAfter;
-			if (reclaimed > std::numeric_limits<size_t>::max() - result.reclaimedBytes) {
+			const uint64_t reclaimed = usedBefore - usedAfter;
+			const uint64_t remaining = std::numeric_limits<size_t>::max() - result.reclaimedBytes;
+			if (reclaimed > remaining) {
 				result.reclaimedBytes = std::numeric_limits<size_t>::max();
 			} else {
-				result.reclaimedBytes += reclaimed;
+				result.reclaimedBytes += static_cast<size_t>(reclaimed);
 			}
 		}
 
-		if (removed && !LittleFS.exists(candidate.c_str())) {
+		bool stillExists = true;
+		FreshResult exists = storage->exists(candidate.c_str(), stillExists);
+		if (removed && exists && !stillExists) {
 			result.removedDirectories++;
 		} else {
 			result.failedDirectories++;
@@ -382,7 +388,7 @@ FreshResult Fresh::collectGarbage(FreshGarbageCollectionResult &result) {
 		if (!lock) {
 			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 		}
-		if (!_initialized) {
+		if (!_initialized || !_storage || !_storage->isMounted()) {
 			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 		}
 		if (_stopping || _lifecycle != Lifecycle::Running) {
@@ -390,6 +396,7 @@ FreshResult Fresh::collectGarbage(FreshGarbageCollectionResult &result) {
 		}
 	}
 
+	FreshStorageScope storageScope(_storage.get());
 	FreshResult syncResult = forceSync();
 	if (!syncResult) return syncResult;
 
@@ -404,7 +411,7 @@ FreshResult Fresh::collectGarbage(FreshGarbageCollectionResult &result) {
 	if (!lock) {
 		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 	}
-	if (!_initialized) {
+	if (!_initialized || !_storage || !_storage->isMounted()) {
 		return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
 	}
 	if (_stopping || _lifecycle != Lifecycle::Running) {

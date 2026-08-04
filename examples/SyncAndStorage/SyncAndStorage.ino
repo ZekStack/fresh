@@ -7,11 +7,11 @@ FreshModel readings;
 void printStorage(const char *label) {
 	FreshStorageInfo info = db.storageInfo();
 	Serial.printf(
-	    "%s total=%u used=%u free=%u\n",
+	    "%s total=%llu used=%llu free=%llu\n",
 	    label,
-	    static_cast<unsigned>(info.totalBytes),
-	    static_cast<unsigned>(info.usedBytes),
-	    static_cast<unsigned>(info.freeBytes)
+	    static_cast<unsigned long long>(info.totalBytes),
+	    static_cast<unsigned long long>(info.usedBytes),
+	    static_cast<unsigned long long>(info.freeBytes)
 	);
 }
 

@@ -5,7 +5,11 @@
 #include "internal/FreshInternal.h"
 #include "internal/FreshMemory.h"
 
-#include <LittleFS.h>
+#include "FreshFile.h"
+#include "internal/FreshStorageContext.h"
+
+#define File FreshFile
+#define FreshFS FreshCurrentFileSystem()
 
 #include <cstring>
 #include <functional>
@@ -102,10 +106,13 @@ std::string FreshRestoreSnapshotSlotPath(const std::string &modelPath, char slot
 }
 
 bool FreshRemoveRestoreStorage(const std::string &modelPath) {
-	LittleFS.remove(FreshJoinPath(modelPath, FreshJournalFile).c_str());
-	LittleFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'a').c_str());
-	LittleFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'b').c_str());
-	return !LittleFS.exists(modelPath.c_str()) || LittleFS.rmdir(modelPath.c_str());
+	FreshFS.remove(FreshJoinPath(modelPath, FreshJournalFile).c_str());
+	FreshFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'a').c_str());
+	FreshFS.remove(FreshRestoreSnapshotSlotPath(modelPath, 'b').c_str());
+	bool exists = false;
+	FreshResult existsResult = FreshFS.exists(modelPath.c_str(), exists);
+	if (!existsResult) return false;
+	return !exists || FreshFS.rmdir(modelPath.c_str());
 }
 
 FreshResult FreshValidateRestoreManifest(const JsonDocument &manifest) {
@@ -211,7 +218,7 @@ FreshRestoreSlotVerification FreshVerifyExactRestoreSlot(
     uint64_t expectedGeneration,
     const FreshBuffer &expected
 ) {
-	File input = LittleFS.open(path.c_str(), "r");
+	File input = FreshFS.open(path.c_str(), "r");
 	if (!input) return FreshRestoreSlotVerification::Unavailable;
 
 	uint32_t magic = 0;
@@ -263,10 +270,11 @@ FreshResult FreshProbeRestoreManifestSlot(
     FreshRestoreSlotProbe &probe
 ) {
 	probe = FreshRestoreSlotProbe();
-	probe.exists = LittleFS.exists(path.c_str());
+	FreshResult existsResult = FreshFS.exists(path.c_str(), probe.exists);
+	if (!existsResult) return existsResult;
 	if (!probe.exists) return FreshResult::success("manifest slot missing");
 
-	File input = LittleFS.open(path.c_str(), "r");
+	File input = FreshFS.open(path.c_str(), "r");
 	if (!input) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open manifest slot");
 	}
@@ -353,7 +361,7 @@ FreshResult FreshCommitRestoreManifest(
 	const char targetSlot = nextGeneration % 2 == 0 ? 'a' : 'b';
 	const std::string targetPath = targetSlot == 'a' ? slotA : slotB;
 
-	File output = LittleFS.open(targetPath.c_str(), "w");
+	File output = FreshFS.open(targetPath.c_str(), "w");
 	if (!output) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open restore manifest slot");
 	}
@@ -363,8 +371,8 @@ FreshResult FreshCommitRestoreManifest(
 	FreshWriteU32(output, static_cast<uint32_t>(encoded.size()));
 	FreshWriteU32(output, FreshChecksum(encoded.data(), encoded.size()));
 	const size_t written = output.write(encoded.data(), encoded.size());
-	output.flush();
-	output.close();
+	const bool writeFailed = output.getWriteError() != 0;
+	FreshResult durabilityResult = output.syncAndClose();
 
 	const FreshRestoreSlotVerification verification = FreshVerifyExactRestoreSlot(
 	    targetPath,
@@ -372,6 +380,13 @@ FreshResult FreshCommitRestoreManifest(
 	    encoded
 	);
 	if (verification == FreshRestoreSlotVerification::Exact) {
+		if (writeFailed || written != encoded.size() || !durabilityResult) {
+			commitState = FreshRestoreManifestCommitState::Unknown;
+			return FreshResult::failure(
+			    FreshStatus::FileSystemError,
+			    "restore manifest durability could not be confirmed; reboot required"
+			);
+		}
 		commitState = FreshRestoreManifestCommitState::Committed;
 		return FreshResult::success("restore manifest committed");
 	}
@@ -379,7 +394,7 @@ FreshResult FreshCommitRestoreManifest(
 		commitState = FreshRestoreManifestCommitState::NotCommitted;
 		return FreshResult::failure(
 		    FreshStatus::FileSystemError,
-		    written == encoded.size()
+		    !writeFailed && written == encoded.size() && durabilityResult
 		        ? "restore manifest verification failed"
 		        : "restore manifest write was incomplete"
 		);
@@ -420,15 +435,18 @@ FreshResult FreshWriteRestoreSnapshot(
 	);
 	if (!encodedResult) return encodedResult;
 
-	if (LittleFS.exists(modelPath.c_str())) {
+	bool storagePathExists = false;
+	FreshResult existsResult = FreshFS.exists(modelPath.c_str(), storagePathExists);
+	if (!existsResult) return existsResult;
+	if (storagePathExists) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "restore storage path already exists");
 	}
-	if (!LittleFS.mkdir(modelPath.c_str())) {
+	if (!FreshFS.mkdir(modelPath.c_str())) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to create restore storage directory");
 	}
 
 	const std::string slotPath = FreshRestoreSnapshotSlotPath(modelPath, 'b');
-	File output = LittleFS.open(slotPath.c_str(), "w");
+	File output = FreshFS.open(slotPath.c_str(), "w");
 	if (!output) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to open restore snapshot slot");
 	}
@@ -438,11 +456,12 @@ FreshResult FreshWriteRestoreSnapshot(
 	FreshWriteU32(output, static_cast<uint32_t>(encoded.size()));
 	FreshWriteU32(output, FreshChecksum(encoded.data(), encoded.size()));
 	const size_t written = output.write(encoded.data(), encoded.size());
-	output.flush();
-	output.close();
-	if (written != encoded.size()) {
+	const bool writeFailed = output.getWriteError() != 0;
+	FreshResult durabilityResult = output.syncAndClose();
+	if (writeFailed || written != encoded.size()) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to write restore snapshot");
 	}
+	if (!durabilityResult) return durabilityResult;
 	if (FreshVerifyExactRestoreSlot(slotPath, 1, encoded) != FreshRestoreSlotVerification::Exact) {
 		return FreshResult::failure(FreshStatus::CorruptData, "restore snapshot verification failed");
 	}
@@ -489,11 +508,14 @@ FreshResult Fresh::restoreBackup(Stream &input, const FreshRestoreOptions &optio
 	{
 		FreshLock lock(*_mutex);
 		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
-		if (!_initialized) return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		if (!_initialized || !_storage || !_storage->isMounted()) {
+			return FreshResult::failure(FreshStatus::NotInitialized, "database not initialized");
+		}
 		if (_stopping || _lifecycle != Lifecycle::Running) {
 			return FreshResult::failure(FreshStatus::Busy, "database is stopping");
 		}
 	}
+	FreshStorageScope storageScope(_storage.get());
 
 	// Preserved and protected states keep their existing storage IDs, so the
 	// current registry must be fully durable before restore planning begins.
@@ -651,10 +673,8 @@ FreshResult Fresh::restoreBackup(Stream &input, const FreshRestoreOptions &optio
 	for (const auto &entry : oldModels) usedStorageIds.insert(entry.second->storageId);
 	for (auto &entry : importedModels) {
 		std::string storageId;
-		do {
-			storageId = FreshMakeId();
-		} while (storageId.empty() || usedStorageIds.find(storageId) != usedStorageIds.end() ||
-		         LittleFS.exists(modelPath(storageId).c_str()));
+		FreshResult storageIdResult = allocateUniqueStorageId(usedStorageIds, storageId);
+		if (!storageIdResult) return storageIdResult;
 		entry.second->storageId = storageId;
 		usedStorageIds.insert(storageId);
 	}

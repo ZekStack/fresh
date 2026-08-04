@@ -1,45 +1,26 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Fresh.h>
-#include <LittleFS.h>
 
 #if defined(FRESH_TESTING)
 #include <internal/FreshMemory.h>
 #endif
 
+#include <atomic>
 #include <string>
 
 namespace {
 
-constexpr const char *TestPath = "/fresh_hardening_regression";
 int passed = 0;
 int failed = 0;
+uint32_t testSequence = 0;
 
-std::string joinPath(const std::string &base, const std::string &name) {
-	if (base.empty() || base == "/") return "/" + name;
-	return base.back() == '/' ? base + name : base + "/" + name;
-}
-
-void removeTree(const std::string &path) {
-	File root = LittleFS.open(path.c_str(), "r");
-	if (!root) return;
-	if (!root.isDirectory()) {
-		root.close();
-		LittleFS.remove(path.c_str());
-		return;
-	}
-	File child = root.openNextFile();
-	while (child) {
-		std::string childPath = child.name();
-		if (childPath.empty() || childPath.front() != '/') childPath = joinPath(path, childPath);
-		const bool directory = child.isDirectory();
-		child.close();
-		if (directory) removeTree(childPath);
-		else LittleFS.remove(childPath.c_str());
-		child = root.openNextFile();
-	}
-	root.close();
-	LittleFS.rmdir(path.c_str());
+std::string testPath(const char* name) {
+	std::string path = "/fresh_hardening_";
+	path += name;
+	path += "_";
+	path += std::to_string(++testSequence);
+	return path;
 }
 
 bool expect(bool condition, const char *message) {
@@ -59,11 +40,11 @@ bool expectResult(const FreshResult &result, const char *message) {
 	return false;
 }
 
-FreshModelResult prepareModel(Fresh &db) {
+FreshModelResult prepareModel(Fresh &db, const char* path) {
 	FreshConfig config;
 	config.syncIntervalMS = 60000;
 	config.snapshotRecordThreshold = 1000;
-	FreshResult init = db.init(TestPath, config);
+	FreshResult init = db.init(path, config);
 	if (!init) {
 		Serial.print("    init failed: ");
 		Serial.println(init.message.c_str());
@@ -86,9 +67,9 @@ FreshModelResult prepareModel(Fresh &db) {
 }
 
 bool testInvalidPatchIsAtomic() {
-	removeTree(TestPath);
+	const std::string path = testPath("invalid_patch");
 	Fresh db;
-	FreshModelResult items = prepareModel(db);
+	FreshModelResult items = prepareModel(db, path.c_str());
 	if (!items) return false;
 
 	JsonDocument scalarPatch;
@@ -105,9 +86,9 @@ bool testInvalidPatchIsAtomic() {
 }
 
 bool testPredicateReentrancyReturnsBusy() {
-	removeTree(TestPath);
+	const std::string path = testPath("predicate");
 	Fresh db;
-	FreshModelResult items = prepareModel(db);
+	FreshModelResult items = prepareModel(db, path.c_str());
 	if (!items) return false;
 
 	FreshResult nested;
@@ -134,12 +115,12 @@ bool testPredicateReentrancyReturnsBusy() {
 }
 
 bool testFailedFinalSyncIsRetryable() {
-	removeTree(TestPath);
+	const std::string path = testPath("storage_full");
 	FreshConfig config;
 	config.syncIntervalMS = 60000;
-	config.minFreeBytes = LittleFS.totalBytes() + 1;
+	config.minFreeBytes = SIZE_MAX;
 	Fresh db;
-	if (!expectResult(db.init(TestPath, config), "init storage-full test")) return false;
+	if (!expectResult(db.init(path.c_str(), config), "init storage-full test")) return false;
 	FreshModelResult items = db.createModel("Items");
 	if (!items) return false;
 	JsonDocument doc;
@@ -158,11 +139,77 @@ bool testFailedFinalSyncIsRetryable() {
 	return preserved && expectResult(forcedClose, "retry deinit without sync");
 }
 
+bool testTimedOutFinalSyncIntentIsPreserved() {
+	const std::string path = testPath("timeout");
+	Fresh db;
+	FreshModelResult items = prepareModel(db, path.c_str());
+	if (!items) return false;
+	if (!expectResult(db.forceSync(), "persist shutdown timeout baseline")) return false;
+
+	std::atomic<bool> blockFirstSync{true};
+	std::atomic<bool> callbackEntered{false};
+	std::atomic<bool> releaseCallback{false};
+	db.onSync([&](FreshResult) {
+		if (!blockFirstSync.exchange(false)) return;
+		callbackEntered.store(true);
+		while (!releaseCallback.load()) delay(1);
+	});
+
+	JsonDocument firstPatch;
+	firstPatch["value"] = 2;
+	if (!expectResult(items.model.updateById("item-1", firstPatch), "prepare first async sync batch")) {
+		return false;
+	}
+	if (!expectResult(db.forceSyncAsync(), "start blocked background sync")) return false;
+
+	const uint32_t callbackDeadline = millis() + 2000;
+	while (!callbackEntered.load() && static_cast<int32_t>(callbackDeadline - millis()) > 0) {
+		delay(1);
+	}
+	if (!expect(callbackEntered.load(), "background sync callback did not start")) {
+		releaseCallback.store(true);
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	JsonDocument secondPatch;
+	secondPatch["value"] = 3;
+	if (!expectResult(items.model.updateById("item-1", secondPatch), "create data after sync capture")) {
+		releaseCallback.store(true);
+		db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+
+	FreshResult timedOut = db.deinit(FreshDeinitOptions{.sync = true, .timeoutMS = 50});
+	const bool timeoutObserved = expect(
+	    !timedOut && timedOut.status == FreshStatus::Timeout,
+	    "final-sync shutdown did not time out at the sync barrier"
+	);
+	releaseCallback.store(true);
+
+	FreshResult retry = db.deinit(FreshDeinitOptions{.sync = false, .timeoutMS = 5000});
+	const bool retrySucceeded = expectResult(
+	    retry,
+	    "sync=false retry did not preserve pending final sync"
+	);
+	if (!timeoutObserved || !retrySucceeded) return false;
+
+	FreshConfig config;
+	config.syncIntervalMS = 60000;
+	if (!expectResult(db.init(path.c_str(), config), "reinitialize after timed-out final sync")) return false;
+	FreshResult found = db.model("Items").findById("item-1");
+	const bool persisted = expectResult(found, "reload data after timed-out final sync") &&
+	                       expect((found.doc["value"] | 0) == 3,
+	                              "sync=false retry discarded pending final sync");
+	db.deinit(FreshDeinitOptions{.sync = false});
+	return persisted;
+}
+
 #if defined(FRESH_TESTING)
 bool testAllocationFailureIsRetryable() {
-	removeTree(TestPath);
+	const std::string path = testPath("allocation");
 	Fresh db;
-	FreshModelResult items = prepareModel(db);
+	FreshModelResult items = prepareModel(db, path.c_str());
 	if (!items) return false;
 
 	JsonDocument patch;
@@ -209,11 +256,11 @@ void runTest(const char *name, bool (*test)()) {
 void setup() {
 	Serial.begin(115200);
 	delay(500);
-	LittleFS.begin(true);
 
 	runTest("invalid patch is atomic", testInvalidPatchIsAtomic);
 	runTest("predicate reentrancy returns busy", testPredicateReentrancyReturnsBusy);
 	runTest("failed final sync is retryable", testFailedFinalSyncIsRetryable);
+	runTest("timed-out final sync intent is preserved", testTimedOutFinalSyncIntentIsPreserved);
 #if defined(FRESH_TESTING)
 	runTest("allocation failure is retryable", testAllocationFailureIsRetryable);
 #endif

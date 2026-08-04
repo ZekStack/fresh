@@ -17,25 +17,25 @@ uint32_t FreshChecksum(const uint8_t *data, size_t length) {
 	return hash;
 }
 
-void FreshWriteU16(File &file, uint16_t value) {
+void FreshWriteU16(Print &file, uint16_t value) {
 	file.write(static_cast<uint8_t>(value & 0xff));
 	file.write(static_cast<uint8_t>((value >> 8) & 0xff));
 }
 
-void FreshWriteU32(File &file, uint32_t value) {
+void FreshWriteU32(Print &file, uint32_t value) {
 	file.write(static_cast<uint8_t>(value & 0xff));
 	file.write(static_cast<uint8_t>((value >> 8) & 0xff));
 	file.write(static_cast<uint8_t>((value >> 16) & 0xff));
 	file.write(static_cast<uint8_t>((value >> 24) & 0xff));
 }
 
-void FreshWriteU64(File &file, uint64_t value) {
+void FreshWriteU64(Print &file, uint64_t value) {
 	for (uint8_t shift = 0; shift < 64; shift += 8) {
 		file.write(static_cast<uint8_t>((value >> shift) & 0xff));
 	}
 }
 
-bool FreshReadU16(File &file, uint16_t &value) {
+bool FreshReadU16(Stream &file, uint16_t &value) {
 	if (file.available() < 2) {
 		return false;
 	}
@@ -45,7 +45,7 @@ bool FreshReadU16(File &file, uint16_t &value) {
 	return true;
 }
 
-bool FreshReadU32(File &file, uint32_t &value) {
+bool FreshReadU32(Stream &file, uint32_t &value) {
 	if (file.available() < 4) {
 		return false;
 	}
@@ -57,7 +57,7 @@ bool FreshReadU32(File &file, uint32_t &value) {
 	return true;
 }
 
-bool FreshReadU64(File &file, uint64_t &value) {
+bool FreshReadU64(Stream &file, uint64_t &value) {
 	if (file.available() < 8) {
 		return false;
 	}

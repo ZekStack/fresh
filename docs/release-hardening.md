@@ -1,6 +1,6 @@
-# v0.1.0 release hardening
+# Fresh 0.2.0 release hardening
 
-Fresh `v0.1.0` uses manifest and snapshot payload version 4, journal format version 3, and backup archive version 2. These formats are intentionally incompatible with unsafe pre-release persisted data.
+Fresh 0.2.0 preserves one manifest, snapshot, journal, and backup format across supported storage backends. The storage redesign changes source APIs and lifecycle ownership, not the durable database model.
 
 ## Completeness metadata
 
@@ -11,79 +11,118 @@ Every durable structure is constructed with checked ArduinoJson operations and r
 - backup archives declare `modelCount` and a `recordCount` for every model;
 - journal records are measured only after every field and payload insertion succeeds.
 
-A newly written snapshot is read back and semantically validated for version, storage ID, type, applied sequence, and exact record count before Fresh removes its journal. An allocation failure can therefore leave the previous durable state and journal in place, but cannot commit a successful partial snapshot.
+A newly written snapshot is read back and semantically validated before its journal is removed. Allocation or storage failure can leave the previous durable state and journal in place, but cannot commit a successful partial snapshot.
 
 ## Immutable model storage IDs
 
-Each manifest model entry contains a logical `name`, immutable `storageId`, and model `type`. Model snapshots and journals live under:
+Each manifest entry contains a logical name, immutable storage ID, and model type. Model snapshots and journals live under:
 
 ```text
-<database-root>/models/<storageId>/
+<database-root>/models/<storage-id>/
 ```
 
-Renaming changes only the logical name in the manifest. It never renames a directory and never rewrites a snapshot merely to change a name.
+Renaming changes only the logical manifest name. It does not rename model directories.
 
-The sync commit order is:
+The commit order remains:
 
-1. Write active model journals and snapshots.
-2. Commit the durable manifest slot.
-3. Remove storage for models no longer referenced by the committed manifest.
+1. Persist active model journals and snapshots.
+2. Commit a durable manifest slot.
+3. Remove storage no longer referenced by the committed manifest.
 
-A reset at any persistence boundary therefore exposes either the old committed manifest or the new committed manifest. A manifest never points at storage that Fresh has not attempted to make durable first. Cleanup failures may leave unreferenced storage, but cannot remove data still referenced by the committed manifest. Storage ID generation also rejects IDs whose directories already exist, so an orphan left before manifest commit cannot be reused by a later model.
+A reset at a persistence boundary therefore exposes the previous or new committed manifest. Cleanup failures may leave orphaned storage but cannot delete storage still referenced by the committed manifest.
+
+## Storage ownership and access
+
+Fresh owns the configured `FreshStorage` backend from successful `init()` until `deinit()` or destruction. It is the only component allowed to mount or unmount that backend.
+
+Application file operations use `db.storage()`. The facade:
+
+- holds a backend-owned recursive access state while entering storage operations;
+- becomes detached before the backend can be destroyed;
+- refuses new operations while shutdown is active;
+- rejects the configured database root and all descendants;
+- returns `FreshFile` handles that participate in open-file accounting;
+- exposes no mount or unmount operation.
+
+`FreshFile` owns a mutex-protected file state. Reads, writes, seek, size, sync, close, and error queries are serialized per handle. Storage file counters distinguish internal persistence handles from application handles.
+
+`deinit()` returns `FreshStatus::Busy` before stopping the sync task when an application file remains open. The destructor force-closes application files before its unbounded lifetime barrier so a surviving handle fails closed.
 
 ## Synchronization and user-code policy
 
-`Fresh::_mutex` protects database lifetime state, the model registry, every mutable `FreshModel::State` field, callbacks, configuration observed by public operations, and the sync task handle.
+`Fresh::_mutex` protects database lifecycle state, models, callbacks, configuration, and storage-facade acquisition. Each backend access state serializes filesystem operations and gates teardown; it is recursive because facade entry calls the same guarded base storage operations used by internal persistence.
 
-`Fresh::_syncMutex` serializes filesystem sync and backup-import commits. Code acquires `_syncMutex` before `_mutex` when both are required. Public mutation code never acquires `_syncMutex` while holding `_mutex`.
+`Fresh::_syncMutex` serializes persistence and backup-import commits. Code acquires `_syncMutex` before `_mutex` when both are required. Public mutation code does not acquire `_syncMutex` while holding `_mutex`.
 
-Predicates and validators are synchronous, bounded user functions, but Fresh does not invoke them while holding the database mutex. Fresh instead clones a point-in-time snapshot, releases the mutex, evaluates user code once, and revalidates the model revision before committing. A conflicting reentrant or concurrent change is preserved and the outer operation returns `FreshStatus::Busy`; Fresh does not retry predicates or validators because they may have side effects.
+Predicates and validators are invoked outside the database mutex. Fresh clones a point-in-time view, evaluates user code once, and validates the model revision before commit. A concurrent or reentrant change is preserved and the outer operation returns `FreshStatus::Busy`.
 
-Event, time, and backup callbacks are also copied under the database mutex and invoked after releasing it.
+Callbacks are copied under the database mutex and invoked after release. Blocking lifecycle, persistence, backup, or storage work must be scheduled on another task.
 
-`FreshModel::name()` returns a value copy. Read APIs return a consistent cloned snapshot and do not hold the database mutex while evaluating predicates or serializing to a potentially blocking `Print` target.
+## Storage driver boundary
+
+Production Fresh sources use ESP-IDF storage and VFS APIs. The source audit rejects direct includes or use of Arduino filesystem singleton APIs:
+
+```text
+LittleFS
+SD
+SD_MMC
+```
+
+Fresh can own an ESP-IDF on-chip LDO power-control handle for SDMMC. Board-level power gates, external regulators, reset, voltage selection, and external bus coordination remain application responsibilities and must be complete before initialization.
 
 ## Transactional mutations and import
 
-Patch updates reject null, scalar, and array patches. The complete merged document, validation result, document-size check, journal record, and requested return value are prepared before live state changes. `_id` and `createdAt` remain Fresh-owned metadata; `updatedAt` is assigned by Fresh.
+Patch updates reject non-object patches. The merged document, validation result, size checks, journal record, and requested return value are prepared before live state changes.
 
-Backup import uses prepare/commit semantics. The complete replacement registry is decoded, counted, cloned, size-checked, and assigned storage identities before commit. The commit is serialized against sync, revalidates the captured database state, invalidates old model handles, and swaps the registry using prepared containers. Any failure before the swap leaves the live database unchanged.
+Backup restore uses prepare/commit semantics. The replacement registry is decoded, counted, cloned, size-checked, and assigned storage identities before commit. Model creation, sync repair, and restore all use the same bounded storage-ID allocator, which propagates existence-query failures instead of treating them as collisions or absence. The commit is serialized against sync, revalidates captured state, invalidates old handles, and swaps prepared containers. Failure before the swap leaves the live database unchanged.
+
+Replacement rename does not delete an existing target before the backend rename succeeds. Identical source and target paths are a no-op, and failed replacement preserves the old target. Complete-file helpers reject undersized buffers with the required capacity instead of reporting truncated success.
 
 ## Shutdown lifetime
 
-`FreshDeinitOptions::timeoutMS` is the total explicit shutdown deadline, covering database and backup locks, waiting for sync ownership, final sync, stop notification, task exit, and cleanup checks.
+`FreshDeinitOptions::timeoutMS` is the complete explicit shutdown deadline, covering locks, final sync, stop notification, task exit, storage checks, and unmount.
 
-If final sync fails before stop is committed, `deinit()` restores the `Running` lifecycle and preserves models, pending records, callbacks, configuration, and task ownership so the caller can correct the filesystem condition and retry.
+When final sync fails before stop is committed, Fresh returns to `Running`, re-enables application file acceptance, and preserves pending state so the caller can correct the storage problem and retry.
 
-Once stop is requested, a bounded `deinit()` may return `FreshStatus::Timeout`. The object remains alive in a stopping state, public database operations return `Busy`, and a later `deinit()` continues waiting without repeating final sync. The destructor performs an unbounded lifetime barrier.
+After stop is requested, a bounded call may return `FreshStatus::Timeout`. The object remains in a stopping state and a later `deinit()` continues waiting. The destructor uses an unbounded task-lifetime barrier.
 
 ## Allocation failures
 
-Large and persisted ArduinoJson documents use the process-lifetime PSRAM-first allocator. Fallible serialized-byte and backup-ring allocations use a move-only `FreshBuffer` with explicit allocation results. Allocation failure is reported as `FreshStatus::OutOfMemory`.
+Large persisted ArduinoJson documents use the process-lifetime PSRAM-first allocator. Serialized buffers and backup-ring allocations use move-only explicit-result buffers. Allocation failures return `FreshStatus::OutOfMemory`.
 
-When `FRESH_TESTING` is enabled, deterministic allocation failure can be configured by allocation number, category, minimum size, and one-shot behavior. Production builds contain no fault-injection bookkeeping.
+`FRESH_TESTING` supports deterministic allocation failure by allocation number, category, minimum size, and one-shot behavior. Production builds contain no fault-injection bookkeeping.
 
 ## Persisted-size ceilings
 
-The absolute payload ceiling for manifest slots, snapshot slots, and journal records is 1 MiB. `FreshConfig` is rejected during `init()` when:
+The absolute payload ceiling for manifest slots, snapshots, and journal records is 1 MiB. Configuration is rejected when:
 
-- `maxDocumentBytes`, `maxJournalRecordBytes`, or `maxSnapshotBytes` is zero or above 1 MiB;
-- `maxJournalRecordBytes` does not exceed `maxDocumentBytes`;
-- `maxSnapshotBytes` is below `maxDocumentBytes`;
-- `backupBufferSize` is zero or above 1 MiB;
-- sync task interval, stack, priority, or core settings are invalid.
+- document, journal, or snapshot limits are zero or above the ceiling;
+- journal limit does not exceed document limit;
+- snapshot limit is below document limit;
+- backup buffer is zero or above the ceiling;
+- sync task interval, stack, priority, or core are invalid.
 
-Reader and writer paths apply the same absolute ceiling and configured journal/snapshot limits. All persisted 32-bit length conversions are checked first.
+Reader and writer paths apply the same configured and absolute bounds. All persisted 32-bit length conversions are checked before conversion.
 
-## Validation
+## Automated validation
 
-`examples/ReleaseHardeningTest` continues to exercise storage identity, rename durability, limits, concurrent handle reads, and repeated shutdown.
+CI validates:
 
-`examples/HardeningRegressionTest` adds:
+- production source boundaries;
+- metadata and Arduino lint;
+- Arduino CLI builds on ESP32, ESP32-C3, ESP32-S3, and ESP32-P4;
+- PIOArduino builds for all examples on the same targets;
+- hardening build with deterministic allocation failure;
+- custom storage, file lifecycle, and storage failure regression sketches.
 
-- rejection and atomicity of non-object patches;
-- reentrant predicate conflict detection;
-- preservation of RAM state after a failed final sync;
-- deterministic allocation-failure rollback and retry when built with `FRESH_TESTING`.
+## Physical validation
 
-The sketches must be executed on physical ESP32, ESP32-S3, ESP32-C3, and ESP32-P4 boards before the final `v0.1.0` tag. Record each board, Arduino-ESP32 core version, filesystem partition size, PSRAM availability, and complete serial output in issue #9 or the release notes before tagging.
+Before tagging v0.2.0, execute runtime qualification for:
+
+- LittleFS two-boot persistence;
+- managed and external SDSPI;
+- SDMMC on representative one-bit/four-bit boards;
+- Waveshare ESP32-P4-Module-DEV-KIT onboard TF card;
+- four-bit/eight-bit eMMC;
+- absent, full, removed, and write-protected media;
+- power loss during journal, snapshot, manifest, backup, and application-file operations.

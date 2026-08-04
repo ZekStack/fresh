@@ -176,12 +176,12 @@ inline FreshResult FreshJsonAddObject(
 }
 
 uint32_t FreshChecksum(const uint8_t *data, size_t length);
-void FreshWriteU16(File &file, uint16_t value);
-void FreshWriteU32(File &file, uint32_t value);
-void FreshWriteU64(File &file, uint64_t value);
-bool FreshReadU16(File &file, uint16_t &value);
-bool FreshReadU32(File &file, uint32_t &value);
-bool FreshReadU64(File &file, uint64_t &value);
+void FreshWriteU16(Print &output, uint16_t value);
+void FreshWriteU32(Print &output, uint32_t value);
+void FreshWriteU64(Print &output, uint64_t value);
+bool FreshReadU16(Stream &input, uint16_t &value);
+bool FreshReadU32(Stream &input, uint32_t &value);
+bool FreshReadU64(Stream &input, uint64_t &value);
 std::string FreshJoinPath(const std::string &base, const std::string &name);
 bool FreshIsValidName(const char *name);
 const char *FreshModelTypeToString(FreshModelType type);

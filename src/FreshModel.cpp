@@ -2,7 +2,9 @@
 #include "internal/FreshInternal.h"
 #include "internal/FreshMemory.h"
 
-#include <LittleFS.h>
+#include "internal/FreshStorageContext.h"
+
+#define FreshFS FreshCurrentFileSystem()
 
 #include <limits>
 #include <utility>
@@ -930,6 +932,14 @@ FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) 
 		if (_stopping || _lifecycle != Lifecycle::Running) {
 			return {.result = false, .status = FreshStatus::Busy, .message = "database is stopping"};
 		}
+		if (!_storage || !_storage->isMounted()) {
+			return {
+			    .result = false,
+			    .status = FreshStatus::StorageUnavailable,
+			    .message = "storage is unavailable"
+			};
+		}
+		FreshStorageScope storageScope(_storage.get());
 		auto existing = _models.find(modelName);
 		if (existing != _models.end()) {
 			if (existing->second->dropped) {
@@ -952,18 +962,21 @@ FreshModelResult Fresh::createModel(const char *modelName, FreshModelType type) 
 			return {.result = false, .status = revisionResult.status, .message = revisionResult.message};
 		}
 
-		std::string storageId;
-		bool duplicate = false;
-		do {
-			storageId = FreshMakeId();
-			duplicate = LittleFS.exists(modelPath(storageId).c_str());
-			for (const auto &entry : _models) {
-				if (entry.second->storageId == storageId) {
-					duplicate = true;
-					break;
-				}
+		std::set<std::string> reservedStorageIds;
+		for (const auto &entry : _models) {
+			if (!entry.second->storageId.empty()) {
+				reservedStorageIds.insert(entry.second->storageId);
 			}
-		} while (duplicate);
+		}
+		std::string storageId;
+		FreshResult storageIdResult = allocateUniqueStorageId(reservedStorageIds, storageId);
+		if (!storageIdResult) {
+			return {
+			    .result = false,
+			    .status = storageIdResult.status,
+			    .message = storageIdResult.message
+			};
+		}
 
 		state = std::make_shared<FreshModel::State>();
 		if (!state) {

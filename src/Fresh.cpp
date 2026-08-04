@@ -1,8 +1,9 @@
 #include "Fresh.h"
 #include "internal/FreshInternal.h"
 #include "internal/FreshMemory.h"
+#include "internal/FreshStorageContext.h"
+#include "storage/FreshLittleFSStorage.h"
 
-#include <LittleFS.h>
 #include <algorithm>
 #include <ctime>
 
@@ -58,7 +59,26 @@ Fresh::Fresh()
 }
 
 Fresh::~Fresh() {
-	deinit(FreshDeinitOptions{.sync = true, .timeoutMS = UINT32_MAX});
+	if (_storage) {
+		_storage->setApplicationFileAcceptance(false);
+		_storage->closeApplicationFiles(true);
+	}
+
+	FreshResult shutdown = deinit(FreshDeinitOptions{.sync = true, .timeoutMS = UINT32_MAX});
+	if (!shutdown) {
+		if (_storage) {
+			_storage->setApplicationFileAcceptance(false);
+			_storage->closeApplicationFiles(false);
+		}
+		deinit(FreshDeinitOptions{.sync = false, .timeoutMS = UINT32_MAX});
+	}
+
+	if (_storage) {
+		_storage->setApplicationFileAcceptance(false);
+		_storage->closeAllFiles(false);
+		_storage->unmount();
+		_storage.reset();
+	}
 	if (_syncTaskExited != nullptr) {
 		vSemaphoreDelete(_syncTaskExited);
 		_syncTaskExited = nullptr;
@@ -114,8 +134,39 @@ FreshResult Fresh::validateConfig(const FreshConfig &config) const {
 }
 
 FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
+	std::unique_ptr<FreshStorage> storage(
+	    new (std::nothrow) FreshLittleFSStorage(FreshLittleFSConfig())
+	);
+	if (!storage) {
+		return FreshResult::failure(
+		    FreshStatus::OutOfMemory,
+		    "failed to allocate default LittleFS storage"
+		);
+	}
+	return initWithStorage(dbPath, config, std::move(storage));
+}
+
+FreshResult Fresh::init(
+    const char *dbPath,
+    const FreshConfig &config,
+    std::unique_ptr<FreshStorage> storage
+) {
+	if (!storage) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "storage is required");
+	}
+	return initWithStorage(dbPath, config, std::move(storage));
+}
+
+FreshResult Fresh::initWithStorage(
+    const char *dbPath,
+    const FreshConfig &config,
+    std::unique_ptr<FreshStorage> storage
+) {
 	if (dbPath == nullptr || *dbPath == '\0') {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "db path is required");
+	}
+	if (!storage) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "storage is required");
 	}
 	FreshResult configResult = validateConfig(config);
 	if (!configResult) return configResult;
@@ -124,12 +175,18 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 	if (!lock) {
 		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 	}
-	if (_initialized || _syncTaskStarted ||
+	if (_initialized || _syncTaskStarted || _storage ||
 	    (_lifecycle != Lifecycle::Uninitialized && _lifecycle != Lifecycle::Stopped)) {
 		return FreshResult::failure(FreshStatus::AlreadyInitialized, "database already initialized");
 	}
 
 	auto resetInitState = [this]() {
+		if (_storage) {
+			_storage->setApplicationFileAcceptance(false);
+			_storage->closeAllFiles(false);
+			_storage->unmount();
+			_storage.reset();
+		}
 		_models.clear();
 		_diagnostics = FreshDiagnostics();
 		_rootPath.clear();
@@ -171,7 +228,16 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 	_databaseRevision = 1;
 	xSemaphoreTake(_syncTaskExited, 0);
 
-	const size_t backupBytes = std::max<size_t>(config.backupBufferSize, 512);
+	_storage = std::move(storage);
+	FreshResult storageMounted = _storage->mount();
+	if (!storageMounted) {
+		resetInitState();
+		return storageMounted;
+	}
+	_storage->setApplicationFileAcceptance(true);
+	FreshStorageScope storageScope(_storage.get());
+
+	const size_t backupBytes = std::max<size_t>(_config.backupBufferSize, 512);
 	if (!_backup->buffer.allocate(backupBytes, FreshAllocationCategory::BackupBuffer)) {
 		resetInitState();
 		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate backup buffer");
@@ -191,12 +257,10 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 
 	_rootPath = dbPath;
 	if (_rootPath.back() == '/' && _rootPath.size() > 1) _rootPath.pop_back();
-
-	if (!LittleFS.begin(false)) {
-		if (!config.eraseOnFileSystemFailure || !LittleFS.begin(true)) {
-			resetInitState();
-			return FreshResult::failure(FreshStatus::FileSystemError, "failed to mount LittleFS");
-		}
+	FreshResult protectedPath = _storage->setProtectedPath(_rootPath);
+	if (!protectedPath) {
+		resetInitState();
+		return protectedPath;
 	}
 
 	FreshResult dirResult = ensureDir(_rootPath);
@@ -233,24 +297,24 @@ FreshResult Fresh::init(const char *dbPath, const FreshConfig &config) {
 	_lifecycle = Lifecycle::Running;
 
 	BaseType_t taskResult = pdFAIL;
-	if (config.syncTaskCore == tskNO_AFFINITY) {
+	if (_config.syncTaskCore == tskNO_AFFINITY) {
 		taskResult = xTaskCreate(
 		    Fresh::syncTaskThunk,
 		    "fresh-sync",
-		    config.syncTaskStackSize,
+		    _config.syncTaskStackSize,
 		    this,
-		    config.syncTaskPriority,
+		    _config.syncTaskPriority,
 		    &_syncTaskHandle
 		);
 	} else {
 		taskResult = xTaskCreatePinnedToCore(
 		    Fresh::syncTaskThunk,
 		    "fresh-sync",
-		    config.syncTaskStackSize,
+		    _config.syncTaskStackSize,
 		    this,
-		    config.syncTaskPriority,
+		    _config.syncTaskPriority,
 		    &_syncTaskHandle,
-		    config.syncTaskCore
+		    _config.syncTaskCore
 		);
 	}
 
@@ -292,19 +356,37 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		if (expired || !lock) {
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out acquiring database lock");
 		}
+		if (_lifecycle == Lifecycle::Formatting) {
+			return FreshResult::failure(FreshStatus::Busy, "database format is in progress");
+		}
 		if ((!_initialized && !_syncTaskStarted) ||
 		    _lifecycle == Lifecycle::Uninitialized || _lifecycle == Lifecycle::Stopped) {
+			if (_storage) {
+				FreshResult unmounted = _storage->unmount();
+				if (!unmounted) return unmounted;
+				_storage.reset();
+			}
 			return FreshResult::success("database not initialized");
 		}
+		if (_storage && _storage->applicationOpenFileCount() != 0) {
+			return FreshResult::failure(
+			    FreshStatus::Busy,
+			    "storage still has open application files",
+			    _storage->applicationOpenFileCount()
+			);
+		}
+		if (_storage) _storage->setApplicationFileAcceptance(false);
 		if (_lifecycle == Lifecycle::Running) {
-			_lifecycle = Lifecycle::FinalSync;
 			_stopping = true;
-			performFinalSync = options.sync;
+			if (options.sync) {
+				_lifecycle = Lifecycle::FinalSync;
+				performFinalSync = true;
+			} else {
+				_lifecycle = Lifecycle::StopRequested;
+			}
 		} else if (_lifecycle == Lifecycle::FinalSync) {
-			// A previous bounded call timed out before stop was committed. Preserve
-			// the pending final-sync decision so the retry cannot discard dirty RAM.
 			_stopping = true;
-			performFinalSync = options.sync;
+			performFinalSync = true;
 		}
 		handle = _syncTaskHandle;
 		taskStarted = _syncTaskStarted;
@@ -316,8 +398,6 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		    FreshRemainingTicks(startedAt, options.timeoutMS, expired)
 		);
 		if (expired || !backupLock) {
-			// FinalSync intentionally remains pending. A later deinit() retries
-			// cancellation and final sync instead of proceeding directly to stop.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out cancelling backup");
 		}
 		_backup->requested = false;
@@ -334,7 +414,6 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		    FreshRemainingTicks(startedAt, options.timeoutMS, expired)
 		);
 		if (expired || !syncLock) {
-			// Keep FinalSync pending; the next bounded call retries safely.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out waiting for sync");
 		}
 		FreshResult finalSyncResult = syncDirty(true);
@@ -342,13 +421,11 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 			FreshLock lock(*_mutex);
 			_lifecycle = Lifecycle::Running;
 			_stopping = false;
+			if (_storage) _storage->setApplicationFileAcceptance(true);
 			return finalSyncResult;
 		}
 		FreshRemainingTicks(startedAt, options.timeoutMS, expired);
 		if (expired) {
-			FreshLock lock(*_mutex);
-			_lifecycle = Lifecycle::Running;
-			_stopping = false;
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit deadline expired during final sync");
 		}
 	}
@@ -356,11 +433,10 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 	{
 		FreshLock lock(*_mutex, FreshRemainingTicks(startedAt, options.timeoutMS, expired));
 		if (expired || !lock) {
-			// Stop has not been committed. FinalSync remains pending and is safe
-			// to repeat on the next call.
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out requesting stop");
 		}
-		if (_lifecycle == Lifecycle::FinalSync || _lifecycle == Lifecycle::Running) {
+		if (_lifecycle == Lifecycle::FinalSync || _lifecycle == Lifecycle::Running ||
+		    _lifecycle == Lifecycle::StopRequested) {
 			_lifecycle = Lifecycle::StopRequested;
 			_stopTask = true;
 		}
@@ -377,10 +453,13 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out waiting for task exit");
 		}
 		if (handle != nullptr) vTaskDelete(handle);
-		// The exit signal has now been consumed. Cleanup is a short in-memory
-		// lifetime barrier and must complete in this call so a retry never waits
-		// for a semaphore that cannot be signalled again.
 	}
+
+	if (_storage && _storage->internalOpenFileCount() != 0) {
+		_storage->closeAllFiles(false);
+	}
+	FreshResult storageUnmounted = FreshResult::success("storage not configured");
+	if (_storage) storageUnmounted = _storage->unmount();
 
 	{
 		FreshLock lock(*_mutex);
@@ -408,6 +487,7 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		_syncTaskStarted = false;
 		_rootPath.clear();
 		_lifecycle = Lifecycle::Stopped;
+		if (storageUnmounted) _storage.reset();
 	}
 
 	{
@@ -427,6 +507,7 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		_backup->result = FreshResult::failure(FreshStatus::BackupNotRunning, "backup not running");
 	}
 
+	if (!storageUnmounted) return storageUnmounted;
 	return FreshResult::success("database deinitialized");
 }
 
@@ -487,12 +568,22 @@ void Fresh::emitSync(FreshResult result) {
 }
 
 FreshStorageInfo Fresh::storageInfo() const {
+	FreshStorageInfo result;
+	storageInfo(result);
+	return result;
+}
+
+FreshResult Fresh::storageInfo(FreshStorageInfo &result) const {
 	FreshLock lock(*_mutex);
-	FreshStorageInfo info;
-	info.totalBytes = LittleFS.totalBytes();
-	info.usedBytes = LittleFS.usedBytes();
-	info.freeBytes = info.totalBytes > info.usedBytes ? info.totalBytes - info.usedBytes : 0;
-	return info;
+	if (!lock) {
+		result = FreshStorageInfo();
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+	}
+	if (!_storage) {
+		result = FreshStorageInfo();
+		return FreshResult::failure(FreshStatus::NotInitialized, "database storage is not initialized");
+	}
+	return _storage->readInfo(result);
 }
 
 FreshDiagnostics Fresh::diagnostics() const {
@@ -597,6 +688,7 @@ const char *Fresh::statusToString(FreshStatus status) const {
 	case FreshStatus::AlreadyInitialized: return "already initialized";
 	case FreshStatus::InvalidArgument: return "invalid argument";
 	case FreshStatus::FileSystemError: return "file system error";
+	case FreshStatus::StorageUnavailable: return "storage unavailable";
 	case FreshStatus::ModelExists: return "model exists";
 	case FreshStatus::ModelNotFound: return "model not found";
 	case FreshStatus::DocumentNotFound: return "document not found";
