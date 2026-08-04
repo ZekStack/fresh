@@ -23,12 +23,18 @@ FreshInitResult init(
 Moves an explicit `FreshStorage` backend into Fresh, mounts it, loads the database, and starts the sync task.
 
 ```cpp
+FreshResult format();
+```
+
+Formats the complete configured storage volume, invalidates existing file and model handles, creates an empty durable database, and restarts the sync task. This deletes application and unrelated files as well as Fresh data. Built-in backends support formatting; custom backends must opt in. See [Formatting storage](format.md).
+
+```cpp
 FreshResult deinit(
     const FreshDeinitOptions& options = FreshDeinitOptions()
 );
 ```
 
-Performs final persistence by default, stops the sync task, unmounts the backend, and destroys it. Returns `FreshStatus::Busy` while an application `FreshFile` is open.
+Performs final persistence by default, stops the sync task, unmounts the backend, and destroys it. Returns `FreshStatus::Busy` while an application `FreshFile` is open or while formatting is active.
 
 ## Storage access
 
@@ -36,7 +42,7 @@ Performs final persistence by default, stops the sync task, unmounts the backend
 FreshStorageAccess storage();
 ```
 
-Returns a lightweight facade for the active backend. It does not expose mount or unmount operations.
+Returns a lightweight facade for the active backend. It does not expose mount, unmount, or format operations.
 
 ### Availability and information
 
@@ -118,7 +124,7 @@ FreshResult close();
 FreshResult syncAndClose();
 ```
 
-Every operation is serialized by the file state's mutex. `syncAndClose()` is the normal durability boundary for application output.
+Every operation is serialized by the file state's mutex. `syncAndClose()` is the normal durability boundary for application output. `format()` force-closes tracked files without syncing them because the complete volume is about to be destroyed.
 
 ## Models
 
@@ -131,6 +137,8 @@ FreshResult renameModel(const char* oldName, const char* newName);
 FreshResult dropModel(const char* name);
 FreshResult dropAllModels();
 ```
+
+`dropAllModels()` preserves application and unrelated files. Use `format()` only when the entire configured volume should be recreated.
 
 ### General-model records
 

@@ -38,6 +38,7 @@ enum class FreshStorageState : uint8_t {
 	Uninitialized,
 	Mounting,
 	Mounted,
+	Formatting,
 	Unmounting,
 	Error,
 };
@@ -219,6 +220,10 @@ class FreshStorage {
 
 	virtual FreshResult mount() = 0;
 	virtual FreshResult unmount() = 0;
+	virtual bool supportsFormat() const {
+		return false;
+	}
+	virtual FreshResult formatBackend();
 
 	virtual FreshResult readInfoBackend(FreshStorageInfo &result) const;
 	virtual FreshResult openBackend(
@@ -250,6 +255,7 @@ class FreshStorage {
 	}
 
   private:
+	FreshResult format();
 	FreshResult normalizeLogicalPath(const char *path, std::string &normalized) const;
 	FreshResult setProtectedPath(const std::string &path);
 	FreshResult validatePathAccess(const std::string &path) const;

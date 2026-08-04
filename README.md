@@ -14,6 +14,7 @@ Fresh keeps small document collections and append-style logs in RAM while a back
 - General JSON document models and append-style stream models.
 - Owned LittleFS, SDSPI, SDMMC, eMMC, and custom storage backends.
 - Application-file access through `db.storage()`.
+- Destructive whole-volume formatting through `db.format()`.
 - Background persistence, forced sync, streaming backup, and restore.
 - `FreshResult` error handling without exceptions.
 - FreeRTOS mutex protection and explicit shutdown behavior.
@@ -168,6 +169,24 @@ The configured database root is protected from application storage operations. O
 
 Fresh uses ESP-IDF filesystem and media drivers directly. It does not include or synchronize Arduino's global `LittleFS`, `SD`, or `SD_MMC` objects.
 
+## Formatting storage
+
+> [!CAUTION]
+> `db.format()` formats the complete configured storage volume. It deletes the Fresh database, application files, and unrelated files stored on the same filesystem.
+
+```cpp
+FreshResult formatted = db.format();
+if (!formatted) {
+    Serial.println(formatted.message.c_str());
+    return;
+}
+
+// The same Fresh instance is initialized again as an empty database.
+db.createModel("settings");
+```
+
+Formatting stops background work, closes and invalidates all tracked files, invalidates existing model handles, writes an empty durable manifest, and restarts the sync task. Use `dropAllModels()` when files outside the database must be preserved. See [Formatting storage](docs/format.md) for the custom-backend contract and failure behavior.
+
 ## Persistence behavior
 
 > [!IMPORTANT]
@@ -179,12 +198,14 @@ Fresh uses ESP-IDF filesystem and media drivers directly. It does not include or
 | `flush()` | yes | captured journal operations |
 | `forceSyncAsync()` | yes | no |
 | `forceSync()` | yes | yes, when successful |
+| `format()` | reset | empty database manifest |
 | `deinit({ .sync = true })` | yes | yes, when successful |
 
 Additional lifecycle rules:
 
 - Background sync captures dirty state under a short database lock and performs storage I/O outside that lock.
 - `forceSync()` performs a blocking forced checkpoint in the caller context.
+- `format()` performs a destructive synchronous lifecycle transition without a final sync.
 - `deinit()` performs a final sync by default and waits for the sync task to exit.
 - A timed-out `deinit()` may be called again to finish shutdown.
 - `FreshFile` operations are mutex-protected.
@@ -205,6 +226,7 @@ Additional lifecycle rules:
 | `SameFilesystemBackup` | Write a backup archive through `db.storage()`. |
 | `CustomStorage` | Owned custom backend over an external medium. |
 | `StorageLifecycleRegressionTest` | Storage ownership, path protection, and shutdown. |
+| `StorageFormatRegressionTest` | Whole-volume format lifecycle and failure behavior. |
 | `StorageFailureRegressionTest` | Inject file and backend failures. |
 | `HardeningRegressionTest` | Mutation and shutdown hardening. |
 
@@ -215,6 +237,7 @@ Regression sketches are compiled in CI but require manual execution on hardware.
 - [Getting started](docs/getting-started.md)
 - [Configuration](docs/configuration.md)
 - [Storage](docs/storage.md)
+- [Formatting storage](docs/format.md)
 - [API reference](docs/api.md)
 - [Examples](docs/examples.md)
 - [Migrating to 0.2.0](docs/migration-0.2.0.md)

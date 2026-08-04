@@ -356,6 +356,9 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		if (expired || !lock) {
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out acquiring database lock");
 		}
+		if (_lifecycle == Lifecycle::Formatting) {
+			return FreshResult::failure(FreshStatus::Busy, "database format is in progress");
+		}
 		if ((!_initialized && !_syncTaskStarted) ||
 		    _lifecycle == Lifecycle::Uninitialized || _lifecycle == Lifecycle::Stopped) {
 			if (_storage) {

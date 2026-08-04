@@ -12,6 +12,7 @@ Fresh 0.2.0 introduces owned, pluggable storage and a unified application-file A
 - Database-root paths are protected from application operations.
 - Open application files block `deinit()` with `FreshStatus::Busy`.
 - `FreshFile` remains move-only and serializes file operations with a mutex.
+- `Fresh::format()` destructively formats the complete configured storage volume and restarts an empty database.
 
 ## Built-in backends
 
@@ -19,6 +20,8 @@ Fresh 0.2.0 introduces owned, pluggable storage and a unified application-file A
 - `FreshSDStorage` using ESP-IDF SDSPI or SDMMC.
 - `FreshEMMCStorage` using ESP-IDF SDMMC with 1-, 4-, or 8-bit bus width.
 - User-defined `FreshStorage` backends.
+
+LittleFS, SDSPI, SDMMC, and eMMC support whole-volume formatting. Custom backends can opt in by overriding `supportsFormat()` and `formatBackend()`.
 
 Fresh does not include or synchronize Arduino's `LittleFS`, `SD`, or `SD_MMC` singleton objects.
 
@@ -35,6 +38,12 @@ Fresh does not include or synchronize Arduino's `LittleFS`, `SD`, or `SD_MMC` si
 - rename with optional replacement;
 - capacity and open-file diagnostics.
 
+## Destructive formatting
+
+`database.format()` removes the Fresh database, application files, and unrelated files stored on the same configured filesystem. Fresh stops synchronization, closes tracked files, invalidates existing file and model handles, formats the backend, writes an empty durable manifest, and restarts the same database instance.
+
+Formatting is not equivalent to `dropAllModels()` and is not a secure erase guarantee. Failures after native formatting begins leave Fresh fail-closed.
+
 ## Breaking changes
 
 Removed:
@@ -48,6 +57,6 @@ Removed:
 
 ## Validation
 
-The source audit rejects production includes or direct use of Arduino filesystem singleton APIs. CI compiles the library and examples for ESP32, ESP32-C3, ESP32-S3, and ESP32-P4 through Arduino CLI and PIOArduino.
+The source audit rejects production includes or direct use of Arduino filesystem singleton APIs. CI compiles the library and examples for ESP32, ESP32-C3, ESP32-S3, and ESP32-P4 through Arduino CLI and PIOArduino. A custom in-memory regression covers supported and unsupported formatting, stale handle invalidation, persistence after restart, repeated formatting, and native formatter failure.
 
-Physical qualification is still required for representative SDSPI, SDMMC, and eMMC hardware, including absent media, full media, removal, power loss, and board-specific power/reset sequencing.
+Physical qualification is still required for representative SDSPI, SDMMC, and eMMC hardware, including formatting, absent media, full media, removal, power loss, and board-specific power/reset sequencing.

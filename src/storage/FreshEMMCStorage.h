@@ -57,6 +57,10 @@ class FreshEMMCStorage final : public FreshStorage {
   private:
 	FreshResult mount() override;
 	FreshResult unmount() override;
+	bool supportsFormat() const override {
+		return true;
+	}
+	FreshResult formatBackend() override;
 	FreshResult readInfoBackend(FreshStorageInfo &result) const override;
 
 	FreshEMMCConfig _config;

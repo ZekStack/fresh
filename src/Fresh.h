@@ -433,6 +433,8 @@ class Fresh {
 	}
 
 	FreshResult deinit(const FreshDeinitOptions &options = FreshDeinitOptions());
+	// Formats the complete configured storage volume and starts an empty database.
+	FreshResult format();
 
 	FreshModel model(const char *modelName);
 	FreshModelListResult listModels() const;
@@ -507,6 +509,7 @@ class Fresh {
 	enum class Lifecycle : uint8_t {
 		Uninitialized,
 		Running,
+		Formatting,
 		FinalSync,
 		StopRequested,
 		WaitingForTaskExit,
