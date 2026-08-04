@@ -171,7 +171,7 @@ Fresh does not include or synchronize Arduino's global `SD` object.
 FreshSDConfig storageConfig;
 storageConfig.interface = FreshSDInterface::SDMMC;
 storageConfig.mountPath = "/sd";
-storageConfig.sdmmc.slot = 1;
+storageConfig.sdmmc.slot = SDMMC_HOST_SLOT_0;
 storageConfig.sdmmc.oneBitMode = false;
 storageConfig.sdmmc.powerMode = FreshSDMMCPowerMode::OnChipLDO;
 storageConfig.sdmmc.ldoChannel = 4;
@@ -190,7 +190,7 @@ db.init(
 );
 ```
 
-These pins and LDO channel match the onboard TF-card interface on the Waveshare ESP32-P4-Module-DEV-KIT. Fresh creates the ESP-IDF SDMMC power-control handle before mounting and releases it after unmounting. The application must still enable the board's active-low GPIO 45 card-power gate before `db.init()`:
+These slot-0 pins and LDO channel match the onboard TF-card interface on the Waveshare ESP32-P4-Module-DEV-KIT. Slot 1 is used by the onboard ESP32-C6 SDIO connection and must not also be assigned to the TF card. Fresh creates the ESP-IDF SDMMC power-control handle before mounting and releases it after unmounting. The application must still enable the board's active-low GPIO 45 card-power gate before `db.init()`:
 
 ```cpp
 gpio_set_level(GPIO_NUM_45, 0);

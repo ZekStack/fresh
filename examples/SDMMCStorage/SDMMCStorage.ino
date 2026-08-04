@@ -19,12 +19,12 @@ void setup() {
     storageConfig.maxOpenFiles = 8;
     storageConfig.allocationUnitSize = 16 * 1024;
     storageConfig.formatOnMountFailure = false;
-    storageConfig.sdmmc.slot = 1;
     storageConfig.sdmmc.oneBitMode = false;
     storageConfig.sdmmc.frequencyHz = 20'000'000;
 
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
     // Waveshare ESP32-P4-Module-DEV-KIT onboard TF card power and signals.
+    storageConfig.sdmmc.slot = SDMMC_HOST_SLOT_0;
     if (gpio_set_level(GPIO_NUM_45, 0) != ESP_OK ||
         gpio_set_direction(GPIO_NUM_45, GPIO_MODE_OUTPUT) != ESP_OK ||
         gpio_set_level(GPIO_NUM_45, 0) != ESP_OK) {
@@ -41,8 +41,8 @@ void setup() {
     storageConfig.sdmmc.data3Pin = GPIO_NUM_42;
     storageConfig.sdmmc.slotFlags = SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 #else
-    // Configure the SDMMC pins required by the target board. Leaving them
-    // unset uses the ESP-IDF target defaults when that target supports SDMMC.
+    // Configure the SDMMC slot and pins required by the target board. Leaving
+    // them unset uses the ESP-IDF target defaults when that target supports SDMMC.
 #endif
 
     FreshInitResult initialized = database.init(
