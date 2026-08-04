@@ -262,7 +262,7 @@ Regression sketches are compiled in CI but require manual execution on hardware.
 
 Fresh is not intended for large datasets, high-frequency telemetry, SQL-style queries, multi-device concurrency, or data that must be durable after every public mutation.
 
-Automatic SD hot-swap recovery, automatic remount, and multiple simultaneously managed volumes are not part of 0.2.0.
+Automatic SD hot-swap recovery, automatic remount, and multiple simultaneously managed volumes are not part of 0.2.0-rc.1.
 
 ## License
 
