@@ -8,7 +8,7 @@ All examples are under [`../examples`](../examples).
 | `StreamModel` | Append-only stream model usage. |
 | `LittleFSStorage` | Explicit `FreshLittleFSStorage` configuration and `db.storage()` file access. |
 | `SDSPIStorage` | ESP-IDF SD card storage over a managed SPI bus. |
-| `SDMMCStorage` | ESP-IDF SDMMC card configuration, including the Waveshare ESP32-P4-Module-DEV-KIT pins. |
+| `SDMMCStorage` | ESP-IDF SDMMC card configuration, including the Waveshare ESP32-P4-Module-DEV-KIT pins, power gate, and LDO channel. |
 | `EMMCStorage` | Dedicated 1/4/8-bit eMMC backend configuration. |
 | `SameFilesystemBackup` | Stream a Fresh backup into an application file on the active backend. |
 | `CustomStorage` | Implement an owned custom backend over an independently owned memory volume. |

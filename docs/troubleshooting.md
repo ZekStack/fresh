@@ -119,11 +119,12 @@ Verify:
 - the selected SDMMC slot is correct;
 - all required pins are configured for the selected bus width;
 - pull-ups required by the board are present;
+- `FreshSDMMCPowerMode::OnChipLDO` and the configured LDO channel match boards that route SDMMC I/O power through an ESP32 on-chip LDO;
 - SDSPI managed/external ownership matches actual bus initialization;
 - no other component already owns the mount point or card device;
 - `formatOnMountFailure` is not hiding a wiring or power problem.
 
-Fresh does not perform board-specific GPIO, LDO, or regulator setup automatically.
+Fresh can own the ESP-IDF on-chip LDO power-control handle for SDMMC. It does not toggle board-specific enable/reset GPIOs or manage external regulators.
 
 ## Card removal
 

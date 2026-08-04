@@ -68,7 +68,7 @@ SD
 SD_MMC
 ```
 
-Board-level power, regulator, reset, voltage selection, and external bus coordination remain application responsibilities and must be complete before initialization.
+Fresh can own an ESP-IDF on-chip LDO power-control handle for SDMMC. Board-level power gates, external regulators, reset, voltage selection, and external bus coordination remain application responsibilities and must be complete before initialization.
 
 ## Transactional mutations and import
 

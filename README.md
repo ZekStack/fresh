@@ -221,7 +221,7 @@ Additional lifecycle rules:
 | `BackupStream` | Streaming backup lifecycle. |
 | `LittleFSStorage` | Explicit LittleFS backend and application files. |
 | `SDSPIStorage` | SD card over SPI. |
-| `SDMMCStorage` | SD card over SDMMC, including Waveshare ESP32-P4 pins. |
+| `SDMMCStorage` | SD card over SDMMC, including Waveshare ESP32-P4 pins and power setup. |
 | `EMMCStorage` | Dedicated eMMC backend. |
 | `SameFilesystemBackup` | Write a backup archive through `db.storage()`. |
 | `CustomStorage` | Owned custom backend over an external medium. |

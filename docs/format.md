@@ -41,6 +41,8 @@ On success, the same `Fresh` instance and previously copied `FreshStorageAccess`
 
 The built-in LittleFS, SDSPI, SDMMC, and eMMC backends support formatting.
 
+SD and eMMC formatting recreates a FAT volume through ESP-IDF. Existing FAT32 cards do not require reformatting. For blank or corrupt media that cannot mount, opt in to destructive recovery with `formatOnMountFailure = true`; otherwise leave it disabled so power and wiring faults cannot trigger a format.
+
 Custom backends are unsupported by default. A custom backend must explicitly opt in and implement whole-volume formatting:
 
 ```cpp

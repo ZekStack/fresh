@@ -18,6 +18,7 @@ Fresh 0.2.0 introduces owned, pluggable storage and a unified application-file A
 
 - `FreshLittleFSStorage` using ESP-IDF LittleFS VFS.
 - `FreshSDStorage` using ESP-IDF SDSPI or SDMMC.
+- Optional Fresh-owned ESP-IDF on-chip LDO power control for SDMMC.
 - `FreshEMMCStorage` using ESP-IDF SDMMC with 1-, 4-, or 8-bit bus width.
 - User-defined `FreshStorage` backends.
 

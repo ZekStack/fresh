@@ -3,6 +3,7 @@
 #include "../FreshStorage.h"
 
 #if defined(ESP32)
+#include <sd_pwr_ctrl.h>
 #include <sdmmc_cmd.h>
 #endif
 
@@ -27,10 +28,13 @@ class FreshSDStorage final : public FreshStorage {
 	FreshResult mountSPI();
 	FreshResult mountSDMMC();
 	FreshResult releaseManagedSPIBus();
+	FreshResult initializeManagedSDMMCPower();
+	FreshResult releaseManagedSDMMCPower();
 
 	FreshSDConfig _config;
 #if defined(ESP32)
 	sdmmc_card_t *_card = nullptr;
+	sd_pwr_ctrl_handle_t _sdmmcPowerControl = nullptr;
 #endif
 	bool _spiBusInitialized = false;
 	mutable int _nativeError = 0;

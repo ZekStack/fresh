@@ -173,6 +173,8 @@ storageConfig.interface = FreshSDInterface::SDMMC;
 storageConfig.mountPath = "/sd";
 storageConfig.sdmmc.slot = 1;
 storageConfig.sdmmc.oneBitMode = false;
+storageConfig.sdmmc.powerMode = FreshSDMMCPowerMode::OnChipLDO;
+storageConfig.sdmmc.ldoChannel = 4;
 
 storageConfig.sdmmc.clockPin = GPIO_NUM_43;
 storageConfig.sdmmc.commandPin = GPIO_NUM_44;
@@ -188,7 +190,16 @@ db.init(
 );
 ```
 
-These pins match the onboard TF-card data signals on the Waveshare ESP32-P4-Module-DEV-KIT. Board-specific power, LDO, reset, and voltage-selection setup must be completed by the application before `db.init()`.
+These pins and LDO channel match the onboard TF-card interface on the Waveshare ESP32-P4-Module-DEV-KIT. Fresh creates the ESP-IDF SDMMC power-control handle before mounting and releases it after unmounting. The application must still enable the board's active-low GPIO 45 card-power gate before `db.init()`:
+
+```cpp
+gpio_set_level(GPIO_NUM_45, 0);
+gpio_set_direction(GPIO_NUM_45, GPIO_MODE_OUTPUT);
+```
+
+Leave `powerMode` at `External` and `ldoChannel` at `-1` when SDMMC I/O power is managed outside Fresh. On-chip LDO mode fails with `FreshStatus::UnsupportedOperation` on targets that do not provide the ESP-IDF SDMMC LDO driver.
+
+SD and eMMC volumes use FAT. An existing FAT32 card mounts without conversion. Set `formatOnMountFailure = true` only when destructive first-boot recovery is intentional, or call `Fresh::format()` on an initialized database to recreate the complete volume explicitly.
 
 Fresh does not include or synchronize Arduino's global `SD_MMC` object.
 

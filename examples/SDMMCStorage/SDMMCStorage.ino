@@ -2,6 +2,7 @@
 #include <Fresh.h>
 
 #if defined(ESP32)
+#include <driver/gpio.h>
 #include <driver/sdmmc_host.h>
 #endif
 
@@ -23,7 +24,15 @@ void setup() {
     storageConfig.sdmmc.frequencyHz = 20'000'000;
 
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
-    // Waveshare ESP32-P4-Module-DEV-KIT onboard TF card signals.
+    // Waveshare ESP32-P4-Module-DEV-KIT onboard TF card power and signals.
+    if (gpio_set_level(GPIO_NUM_45, 0) != ESP_OK ||
+        gpio_set_direction(GPIO_NUM_45, GPIO_MODE_OUTPUT) != ESP_OK ||
+        gpio_set_level(GPIO_NUM_45, 0) != ESP_OK) {
+        Serial.println("Failed to enable the onboard TF card power gate");
+        return;
+    }
+    storageConfig.sdmmc.powerMode = FreshSDMMCPowerMode::OnChipLDO;
+    storageConfig.sdmmc.ldoChannel = 4;
     storageConfig.sdmmc.clockPin = GPIO_NUM_43;
     storageConfig.sdmmc.commandPin = GPIO_NUM_44;
     storageConfig.sdmmc.data0Pin = GPIO_NUM_39;

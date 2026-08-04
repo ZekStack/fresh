@@ -53,6 +53,11 @@ enum class FreshSPIBusOwnership : uint8_t {
 	External,
 };
 
+enum class FreshSDMMCPowerMode : uint8_t {
+	External,
+	OnChipLDO,
+};
+
 enum class FreshOpenMode : uint8_t {
 	Read,
 	Write,
@@ -90,6 +95,8 @@ struct FreshSDMMCConfig {
 	bool oneBitMode = false;
 	uint32_t frequencyHz = 20'000'000;
 	uint32_t slotFlags = 0;
+	FreshSDMMCPowerMode powerMode = FreshSDMMCPowerMode::External;
+	int ldoChannel = -1;
 
 #if defined(ESP32)
 	gpio_num_t clockPin = GPIO_NUM_NC;

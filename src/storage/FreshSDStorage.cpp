@@ -7,6 +7,7 @@
 #include <driver/sdspi_host.h>
 #include <esp_err.h>
 #include <esp_vfs_fat.h>
+#include <sd_pwr_ctrl_by_on_chip_ldo.h>
 #include <soc/soc_caps.h>
 #endif
 
@@ -172,6 +173,12 @@ FreshResult FreshSDStorage::mountSDMMC() {
 #endif
 	}
 
+	FreshResult powerInitialized = initializeManagedSDMMCPower();
+	if (!powerInitialized) return powerInitialized;
+#if defined(SOC_SDMMC_IO_POWER_EXTERNAL) && SOC_SDMMC_IO_POWER_EXTERNAL
+	host.pwr_ctrl_handle = _sdmmcPowerControl;
+#endif
+
 	esp_vfs_fat_sdmmc_mount_config_t mountConfig = {};
 	mountConfig.format_if_mount_failed = _config.formatOnMountFailure;
 	mountConfig.max_files = static_cast<int>(_config.maxOpenFiles);
@@ -187,6 +194,15 @@ FreshResult FreshSDStorage::mountSDMMC() {
 	_nativeError = static_cast<int>(mounted);
 	if (mounted != ESP_OK) {
 		_card = nullptr;
+		const int mountError = _nativeError;
+		FreshResult powerReleased = releaseManagedSDMMCPower();
+		_nativeError = mountError;
+		if (!powerReleased) {
+			return FreshResult::failure(
+			    FreshStatus::FileSystemError,
+			    "failed to mount SDMMC storage and release its on-chip LDO"
+			);
+		}
 		return FreshResult::failure(FreshStatus::StorageUnavailable, "failed to mount SDMMC storage");
 	}
 	return FreshResult::success("SDMMC storage mounted");
@@ -217,6 +233,11 @@ FreshResult FreshSDStorage::unmount() {
 		setState(FreshStorageState::Error);
 		return released;
 	}
+	FreshResult powerReleased = releaseManagedSDMMCPower();
+	if (!powerReleased) {
+		setState(FreshStorageState::Error);
+		return powerReleased;
+	}
 
 	setState(FreshStorageState::Uninitialized);
 	_nativeError = 0;
@@ -239,6 +260,77 @@ FreshResult FreshSDStorage::releaseManagedSPIBus() {
 	}
 	_spiBusInitialized = false;
 	return FreshResult::success("SDSPI bus released");
+#endif
+}
+
+FreshResult FreshSDStorage::initializeManagedSDMMCPower() {
+#if !defined(ESP32)
+	return FreshResult::failure(FreshStatus::UnsupportedOperation, "SDMMC power control requires ESP32");
+#else
+	if (_config.sdmmc.powerMode == FreshSDMMCPowerMode::External) {
+		if (_config.sdmmc.ldoChannel >= 0) {
+			return FreshResult::failure(
+			    FreshStatus::InvalidArgument,
+			    "external SDMMC power must not specify an on-chip LDO channel"
+			);
+		}
+		return FreshResult::success("SDMMC power is externally managed");
+	}
+	if (_config.sdmmc.ldoChannel <= 0) {
+		return FreshResult::failure(
+		    FreshStatus::InvalidArgument,
+		    "managed SDMMC power requires a positive on-chip LDO channel"
+		);
+	}
+#if !defined(SOC_SDMMC_IO_POWER_EXTERNAL) || !SOC_SDMMC_IO_POWER_EXTERNAL
+	return FreshResult::failure(
+	    FreshStatus::UnsupportedOperation,
+	    "target does not support SDMMC power through an on-chip LDO"
+	);
+#else
+	if (_sdmmcPowerControl != nullptr) {
+		return FreshResult::success("SDMMC on-chip LDO already initialized");
+	}
+	sd_pwr_ctrl_ldo_config_t config = {};
+	config.ldo_chan_id = _config.sdmmc.ldoChannel;
+	const esp_err_t initialized = sd_pwr_ctrl_new_on_chip_ldo(&config, &_sdmmcPowerControl);
+	_nativeError = static_cast<int>(initialized);
+	if (initialized != ESP_OK) {
+		_sdmmcPowerControl = nullptr;
+		return FreshResult::failure(
+		    initialized == ESP_ERR_NO_MEM ? FreshStatus::OutOfMemory : FreshStatus::FileSystemError,
+		    "failed to initialize SDMMC power through the on-chip LDO"
+		);
+	}
+	return FreshResult::success("SDMMC on-chip LDO initialized");
+#endif
+#endif
+}
+
+FreshResult FreshSDStorage::releaseManagedSDMMCPower() {
+#if !defined(ESP32)
+	return FreshResult::success("SDMMC power control not configured");
+#else
+	if (_sdmmcPowerControl == nullptr) {
+		return FreshResult::success("SDMMC on-chip LDO not owned");
+	}
+#if !defined(SOC_SDMMC_IO_POWER_EXTERNAL) || !SOC_SDMMC_IO_POWER_EXTERNAL
+	return FreshResult::failure(
+	    FreshStatus::UnsupportedOperation,
+	    "target does not support releasing SDMMC on-chip LDO power"
+	);
+#else
+	const esp_err_t released = sd_pwr_ctrl_del_on_chip_ldo(_sdmmcPowerControl);
+	_nativeError = static_cast<int>(released);
+	if (released != ESP_OK) {
+		return FreshResult::failure(
+		    FreshStatus::FileSystemError,
+		    "failed to release SDMMC power through the on-chip LDO"
+		);
+	}
+	_sdmmcPowerControl = nullptr;
+	return FreshResult::success("SDMMC on-chip LDO released");
+#endif
 #endif
 }
 
