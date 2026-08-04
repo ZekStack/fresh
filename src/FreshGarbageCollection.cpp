@@ -336,14 +336,15 @@ FreshResult FreshCollectGarbageStorage(
 		FreshStorageInfo afterInfo;
 		FreshResult afterInfoResult = storage->readInfo(afterInfo);
 		if (!afterInfoResult) return afterInfoResult;
-		const size_t usedBefore = beforeInfo.usedBytes;
-		const size_t usedAfter = afterInfo.usedBytes;
+		const uint64_t usedBefore = beforeInfo.usedBytes;
+		const uint64_t usedAfter = afterInfo.usedBytes;
 		if (usedBefore > usedAfter) {
-			const size_t reclaimed = usedBefore - usedAfter;
-			if (reclaimed > std::numeric_limits<size_t>::max() - result.reclaimedBytes) {
+			const uint64_t reclaimed = usedBefore - usedAfter;
+			const uint64_t remaining = std::numeric_limits<size_t>::max() - result.reclaimedBytes;
+			if (reclaimed > remaining) {
 				result.reclaimedBytes = std::numeric_limits<size_t>::max();
 			} else {
-				result.reclaimedBytes += reclaimed;
+				result.reclaimedBytes += static_cast<size_t>(reclaimed);
 			}
 		}
 

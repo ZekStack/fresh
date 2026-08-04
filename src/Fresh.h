@@ -238,9 +238,9 @@ struct FreshStorageInfo {
 	size_t applicationOpenFileCount = 0;
 	size_t internalOpenFileCount = 0;
 	size_t maxOpenFiles = 0;
-	size_t totalBytes = 0;
-	size_t usedBytes = 0;
-	size_t freeBytes = 0;
+	uint64_t totalBytes = 0;
+	uint64_t usedBytes = 0;
+	uint64_t freeBytes = 0;
 };
 
 struct FreshModelLoadInfo {

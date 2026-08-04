@@ -42,11 +42,11 @@ void setup() {
 
     FreshStorageInfo storage = database.storage().info();
     Serial.printf(
-        "%s total=%u used=%u free=%u\n",
+        "%s total=%llu used=%llu free=%llu\n",
         storage.name.c_str(),
-        static_cast<unsigned>(storage.totalBytes),
-        static_cast<unsigned>(storage.usedBytes),
-        static_cast<unsigned>(storage.freeBytes)
+        static_cast<unsigned long long>(storage.totalBytes),
+        static_cast<unsigned long long>(storage.usedBytes),
+        static_cast<unsigned long long>(storage.freeBytes)
     );
 }
 

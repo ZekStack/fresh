@@ -201,6 +201,8 @@ Leave `powerMode` at `External` and `ldoChannel` at `-1` when SDMMC I/O power is
 
 SD and eMMC volumes use FAT. An existing FAT32 card mounts without conversion. Set `formatOnMountFailure = true` only when destructive first-boot recovery is intentional, or call `Fresh::format()` on an initialized database to recreate the complete volume explicitly.
 
+`FreshStorageInfo` reports total, used, and free capacity with 64-bit byte counters, including on 32-bit ESP32 targets. FAT volumes larger than 4 GiB are therefore reported without saturating at `SIZE_MAX`.
+
 Fresh does not include or synchronize Arduino's global `SD_MMC` object.
 
 ## eMMC

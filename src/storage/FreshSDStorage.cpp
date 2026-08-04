@@ -12,7 +12,6 @@
 #endif
 
 #include <climits>
-#include <limits>
 
 FreshSDStorage::FreshSDStorage(const FreshSDConfig &config)
     : FreshStorage(FreshStorageType::SD, config.mountPath, config.maxOpenFiles), _config(config) {
@@ -355,9 +354,8 @@ FreshResult FreshSDStorage::readInfoBackend(FreshStorageInfo &result) const {
 	if (queried != ESP_OK) {
 		return FreshResult::failure(FreshStatus::FileSystemError, "failed to query SD storage");
 	}
-	const uint64_t maxSize = static_cast<uint64_t>(std::numeric_limits<size_t>::max());
-	result.totalBytes = static_cast<size_t>(totalBytes > maxSize ? maxSize : totalBytes);
-	result.freeBytes = static_cast<size_t>(freeBytes > maxSize ? maxSize : freeBytes);
+	result.totalBytes = totalBytes;
+	result.freeBytes = freeBytes;
 	result.usedBytes = result.totalBytes > result.freeBytes ? result.totalBytes - result.freeBytes : 0;
 	return FreshResult::success("SD storage information read");
 #endif

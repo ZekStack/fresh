@@ -81,10 +81,10 @@ bool FreshStorageFileSystem::rmdir(const char *path) const {
 	return FreshActiveStorage != nullptr && FreshActiveStorage->removeDirectory(path);
 }
 
-size_t FreshStorageFileSystem::totalBytes() const {
+uint64_t FreshStorageFileSystem::totalBytes() const {
 	return FreshActiveStorage != nullptr ? FreshActiveStorage->info().totalBytes : 0;
 }
 
-size_t FreshStorageFileSystem::usedBytes() const {
+uint64_t FreshStorageFileSystem::usedBytes() const {
 	return FreshActiveStorage != nullptr ? FreshActiveStorage->info().usedBytes : 0;
 }

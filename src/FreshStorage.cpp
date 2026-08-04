@@ -554,7 +554,7 @@ FreshResult Fresh::checkFreeSpace(size_t requiredBytes) const {
 	FreshStorageInfo info;
 	FreshResult infoResult = storage->readInfo(info);
 	if (!infoResult) return infoResult;
-	const size_t freeBytes = info.freeBytes;
+	const uint64_t freeBytes = info.freeBytes;
 	if (freeBytes < _config.minFreeBytes || freeBytes - _config.minFreeBytes < requiredBytes) {
 		return FreshResult::failure(FreshStatus::StorageFull, "not enough storage space");
 	}

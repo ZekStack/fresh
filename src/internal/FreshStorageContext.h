@@ -4,6 +4,7 @@
 #include "../FreshStorage.h"
 
 #include <cstddef>
+#include <cstdint>
 
 class FreshStorageFileSystem {
   public:
@@ -12,8 +13,8 @@ class FreshStorageFileSystem {
 	bool mkdir(const char *path) const;
 	bool remove(const char *path) const;
 	bool rmdir(const char *path) const;
-	size_t totalBytes() const;
-	size_t usedBytes() const;
+	uint64_t totalBytes() const;
+	uint64_t usedBytes() const;
 	FreshStorage *storage() const;
 };
 
