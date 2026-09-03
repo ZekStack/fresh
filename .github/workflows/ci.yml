@@ -22,7 +22,7 @@ env:
 
 jobs:
   source-audit:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,7 +38,7 @@ jobs:
         run: python3 scripts/check_version_consistency.py
 
   arduino-lint:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     needs: source-audit
     steps:
       - name: Checkout
@@ -51,7 +51,7 @@ jobs:
           project-type: library
 
   build-examples:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     needs: source-audit
     strategy:
       fail-fast: false
@@ -99,7 +99,7 @@ jobs:
           done
 
   build-hardening-testing:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     needs: source-audit
     steps:
       - name: Checkout
@@ -138,7 +138,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [source-audit, arduino-lint, build-examples, build-hardening-testing, arduino-cli]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     permissions:
       contents: write
     steps:
@@ -188,7 +188,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   arduino-cli:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     needs: source-audit
     strategy:
       fail-fast: false

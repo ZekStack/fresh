@@ -16,7 +16,7 @@ permissions:
 jobs:
   metadata_lint:
     name: Metadata Lint
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
