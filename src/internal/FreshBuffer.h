@@ -18,6 +18,13 @@ class FreshBuffer {
 		allocate(size, placement, category);
 	}
 
+	FreshBuffer(
+	    size_t size,
+	    FreshAllocationCategory category = FreshAllocationCategory::General
+	) {
+		allocate(size, Strata::Placement::PreferExternal, category);
+	}
+
 	~FreshBuffer() {
 		reset();
 	}
@@ -56,6 +63,13 @@ class FreshBuffer {
 		_size = size;
 		_placement = placement;
 		return true;
+	}
+
+	bool allocate(
+	    size_t size,
+	    FreshAllocationCategory category = FreshAllocationCategory::General
+	) {
+		return allocate(size, Strata::Placement::PreferExternal, category);
 	}
 
 	void reset() {
