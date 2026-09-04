@@ -1,36 +1,30 @@
 #pragma once
 
 #include <Arduino.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <strata/freertos/Mutex.h>
 
 class FreshMutex {
   public:
-	FreshMutex() {
-		_handle = xSemaphoreCreateRecursiveMutex();
-	}
-
-	~FreshMutex() {
-		if (_handle != nullptr) {
-			vSemaphoreDelete(_handle);
-		}
+	FreshMutex() noexcept : _mutex(Strata::FreeRTOS::RecursiveMutex::create()) {
 	}
 
 	FreshMutex(const FreshMutex &) = delete;
 	FreshMutex &operator=(const FreshMutex &) = delete;
 
 	bool lock(TickType_t timeout = portMAX_DELAY) {
-		return _handle != nullptr && xSemaphoreTakeRecursive(_handle, timeout) == pdTRUE;
+		return _mutex.lock(timeout);
 	}
 
 	void unlock() {
-		if (_handle != nullptr) {
-			xSemaphoreGiveRecursive(_handle);
-		}
+		_mutex.unlock();
+	}
+
+	bool valid() const {
+		return _mutex.valid();
 	}
 
   private:
-	SemaphoreHandle_t _handle = nullptr;
+	Strata::FreeRTOS::RecursiveMutex _mutex;
 };
 
 class FreshLock {
