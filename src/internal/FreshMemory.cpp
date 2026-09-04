@@ -1,25 +1,11 @@
 #include "FreshMemory.h"
 
-#include <esp_heap_caps.h>
-
 #if defined(FRESH_TESTING)
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
 #endif
 
 namespace {
-
-void *allocateWithCaps(size_t size, uint32_t caps) {
-	return size == 0 ? nullptr : heap_caps_malloc(size, caps);
-}
-
-void *reallocateWithCaps(void *pointer, size_t newSize, uint32_t caps) {
-	if (newSize == 0) {
-		heap_caps_free(pointer);
-		return nullptr;
-	}
-	return heap_caps_realloc(pointer, newSize, caps);
-}
 
 #if defined(FRESH_TESTING)
 struct FreshAllocationFaultState {
@@ -58,10 +44,13 @@ bool shouldFailAllocation(size_t, FreshAllocationCategory) {
 }
 #endif
 
-class FreshPreferPsramJsonAllocator final : public ArduinoJson::Allocator {
+class FreshStrataJsonAllocator final : public ArduinoJson::Allocator {
   public:
+	explicit FreshStrataJsonAllocator(Strata::Placement placement) : _placement(placement) {
+	}
+
 	void *allocate(size_t size) override {
-		return FreshAllocate(size, FreshAllocationCategory::JsonDocument);
+		return FreshAllocate(size, _placement, FreshAllocationCategory::JsonDocument);
 	}
 
 	void deallocate(void *pointer) override {
@@ -69,48 +58,57 @@ class FreshPreferPsramJsonAllocator final : public ArduinoJson::Allocator {
 	}
 
 	void *reallocate(void *pointer, size_t newSize) override {
-		return FreshReallocate(pointer, newSize, FreshAllocationCategory::JsonDocument);
+		return FreshReallocate(
+		    pointer,
+		    newSize,
+		    _placement,
+		    FreshAllocationCategory::JsonDocument
+		);
 	}
+
+  private:
+	Strata::Placement _placement;
 };
 
-FreshPreferPsramJsonAllocator allocator;
+FreshStrataJsonAllocator defaultAllocator(Strata::Placement::Default);
+FreshStrataJsonAllocator internalAllocator(Strata::Placement::Internal);
+FreshStrataJsonAllocator preferExternalAllocator(Strata::Placement::PreferExternal);
+FreshStrataJsonAllocator requireExternalAllocator(Strata::Placement::RequireExternal);
 
 } // namespace
 
-ArduinoJson::Allocator &FreshJsonAllocator() {
-	return allocator;
+ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement) {
+	switch (placement) {
+	case Strata::Placement::Default: return defaultAllocator;
+	case Strata::Placement::Internal: return internalAllocator;
+	case Strata::Placement::PreferExternal: return preferExternalAllocator;
+	case Strata::Placement::RequireExternal: return requireExternalAllocator;
+	}
+	return defaultAllocator;
 }
 
-bool FreshHasPsram() {
-	return heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0;
-}
-
-void *FreshAllocate(size_t size, FreshAllocationCategory category) {
+void *FreshAllocate(
+    size_t size,
+    Strata::Placement placement,
+    FreshAllocationCategory category
+) {
 	if (size == 0) {
 		return nullptr;
 	}
 	if (shouldFailAllocation(size, category)) {
 		return nullptr;
 	}
-
-	if (FreshHasPsram()) {
-		void *pointer = allocateWithCaps(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-		if (pointer != nullptr) {
-			return pointer;
-		}
-	}
-
-	void *pointer = allocateWithCaps(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-	if (pointer != nullptr) {
-		return pointer;
-	}
-
-	return allocateWithCaps(size, MALLOC_CAP_8BIT);
+	return Strata::allocate(size, placement);
 }
 
-void *FreshReallocate(void *pointer, size_t newSize, FreshAllocationCategory category) {
+void *FreshReallocate(
+    void *pointer,
+    size_t newSize,
+    Strata::Placement placement,
+    FreshAllocationCategory category
+) {
 	if (pointer == nullptr) {
-		return FreshAllocate(newSize, category);
+		return FreshAllocate(newSize, placement, category);
 	}
 	if (newSize == 0) {
 		FreshDeallocate(pointer);
@@ -119,34 +117,11 @@ void *FreshReallocate(void *pointer, size_t newSize, FreshAllocationCategory cat
 	if (shouldFailAllocation(newSize, category)) {
 		return nullptr;
 	}
-
-	if (FreshHasPsram()) {
-		void *resized = reallocateWithCaps(
-		    pointer,
-		    newSize,
-		    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
-		);
-		if (resized != nullptr) {
-			return resized;
-		}
-	}
-
-	void *resized = reallocateWithCaps(
-	    pointer,
-	    newSize,
-	    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
-	);
-	if (resized != nullptr) {
-		return resized;
-	}
-
-	return reallocateWithCaps(pointer, newSize, MALLOC_CAP_8BIT);
+	return Strata::reallocate(pointer, newSize, placement);
 }
 
 void FreshDeallocate(void *pointer) {
-	if (pointer != nullptr) {
-		heap_caps_free(pointer);
-	}
+	Strata::free(pointer);
 }
 
 #if defined(FRESH_TESTING)
