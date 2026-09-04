@@ -46,6 +46,9 @@ jobs:
             exit 1
           fi
 
+      - name: Check Strata integration contract
+        run: python3 scripts/check_strata_contract.py
+
       - name: Check version consistency
         run: python3 scripts/check_version_consistency.py
 
