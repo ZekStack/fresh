@@ -525,6 +525,19 @@ class Fresh {
 	friend class FreshBackupPrint;
 	friend class FreshStorageAccess;
 
+	class SyncTaskHandleView {
+	  public:
+		explicit SyncTaskHandleView(const Strata::FreeRTOS::Task &task) noexcept : _task(&task) {
+		}
+
+		operator TaskHandle_t() const noexcept {
+			return _task != nullptr ? _task->handle() : nullptr;
+		}
+
+	  private:
+		const Strata::FreeRTOS::Task *_task = nullptr;
+	};
+
 	enum class Lifecycle : uint8_t {
 		Uninitialized,
 		Running,
@@ -593,6 +606,7 @@ class Fresh {
 	uint64_t _nextPendingSequence = 1;
 	uint64_t _databaseRevision = 1;
 	Strata::FreeRTOS::Task _syncTask;
+	SyncTaskHandleView _syncTaskHandle{_syncTask};
 	Strata::FreeRTOS::BinarySemaphore _syncTaskExited;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> _models;
 	std::unique_ptr<FreshMutex> _mutex;
