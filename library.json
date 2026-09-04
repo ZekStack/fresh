@@ -1,6 +1,6 @@
 {
   "name": "Fresh",
-  "version": "0.2.0-rc.1",
+  "version": "0.2.0",
   "description": "Document database for ESP32 devices with RAM-first writes and pluggable storage.",
   "keywords": [
     "esp32",
@@ -24,7 +24,8 @@
   "frameworks": "arduino",
   "platforms": "espressif32",
   "dependencies": {
-    "bblanchon/ArduinoJson": ">=7.0.0"
+    "bblanchon/ArduinoJson": ">=7.0.0",
+    "Strata": "https://github.com/ZekStack/strata.git#v0.1.2"
   },
   "build": {
     "srcDir": "src",

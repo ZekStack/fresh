@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ArduinoJson.h>
+#include <Strata.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -17,22 +18,31 @@ enum class FreshAllocationCategory : uint8_t {
 	BackupBuffer,
 };
 
-// Fresh uses one process-lifetime ArduinoJson allocator so JsonDocument values
-// can safely outlive the Fresh instance that created them. Allocations prefer
-// external PSRAM and fall back to internal 8-bit capable memory.
-ArduinoJson::Allocator &FreshJsonAllocator();
+// Fresh uses process-lifetime ArduinoJson allocators, one for each Strata
+// placement, so JsonDocument values can safely outlive the Fresh instance that
+// created them while still preserving the placement chosen by that instance.
+ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement);
+
+// Internal compatibility path for code that has not yet threaded an owning
+// Fresh instance through the helper. It preserves Fresh 0.1.x/0.2.0-rc.1's
+// PSRAM-preferred allocation behavior while ownership itself is provided by
+// Strata. New instance-aware code must pass FreshConfig::memory.allocation.
+inline ArduinoJson::Allocator &FreshJsonAllocator() {
+	return FreshJsonAllocator(Strata::Placement::PreferExternal);
+}
 
 void *FreshAllocate(
     size_t size,
+    Strata::Placement placement,
     FreshAllocationCategory category = FreshAllocationCategory::General
 );
 void *FreshReallocate(
     void *pointer,
     size_t newSize,
+    Strata::Placement placement,
     FreshAllocationCategory category = FreshAllocationCategory::General
 );
 void FreshDeallocate(void *pointer);
-bool FreshHasPsram();
 
 #if defined(FRESH_TESTING)
 // Fails the Nth matching allocation. failOnCall is one-based. A category of

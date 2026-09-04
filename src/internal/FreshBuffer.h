@@ -10,11 +10,19 @@ class FreshBuffer {
   public:
 	FreshBuffer() = default;
 
-	explicit FreshBuffer(
+	FreshBuffer(
+	    size_t size,
+	    Strata::Placement placement,
+	    FreshAllocationCategory category = FreshAllocationCategory::General
+	) {
+		allocate(size, placement, category);
+	}
+
+	FreshBuffer(
 	    size_t size,
 	    FreshAllocationCategory category = FreshAllocationCategory::General
 	) {
-		allocate(size, category);
+		allocate(size, Strata::Placement::PreferExternal, category);
 	}
 
 	~FreshBuffer() {
@@ -38,20 +46,30 @@ class FreshBuffer {
 
 	bool allocate(
 	    size_t size,
+	    Strata::Placement placement,
 	    FreshAllocationCategory category = FreshAllocationCategory::General
 	) {
 		reset();
 		if (size == 0) {
+			_placement = placement;
 			return true;
 		}
 
-		_data = static_cast<uint8_t *>(FreshAllocate(size, category));
+		_data = static_cast<uint8_t *>(FreshAllocate(size, placement, category));
 		if (_data == nullptr) {
 			return false;
 		}
 
 		_size = size;
+		_placement = placement;
 		return true;
+	}
+
+	bool allocate(
+	    size_t size,
+	    FreshAllocationCategory category = FreshAllocationCategory::General
+	) {
+		return allocate(size, Strata::Placement::PreferExternal, category);
 	}
 
 	void reset() {
@@ -76,6 +94,14 @@ class FreshBuffer {
 		return _size == 0;
 	}
 
+	Strata::Placement placement() const {
+		return _placement;
+	}
+
+	Strata::Region region() const {
+		return Strata::regionOf(_data);
+	}
+
 	uint8_t &operator[](size_t index) {
 		return _data[index];
 	}
@@ -88,10 +114,12 @@ class FreshBuffer {
 	void moveFrom(FreshBuffer &&other) {
 		_data = other._data;
 		_size = other._size;
+		_placement = other._placement;
 		other._data = nullptr;
 		other._size = 0;
 	}
 
 	uint8_t *_data = nullptr;
 	size_t _size = 0;
+	Strata::Placement _placement = Strata::Placement::Default;
 };
