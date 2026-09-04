@@ -52,10 +52,10 @@ FreshResult FreshResult::failure(FreshStatus status, const char *message, size_t
 }
 
 Fresh::Fresh()
-    : _mutex(std::make_unique<FreshMutex>()),
+    : _syncTaskExited(Strata::FreeRTOS::BinarySemaphore::create()),
+      _mutex(std::make_unique<FreshMutex>()),
       _syncMutex(std::make_unique<FreshMutex>()),
       _backup(std::make_unique<FreshBackupRuntimeState>()) {
-	_syncTaskExited = xSemaphoreCreateBinary();
 }
 
 Fresh::~Fresh() {
@@ -79,15 +79,73 @@ Fresh::~Fresh() {
 		_storage->unmount();
 		_storage.reset();
 	}
-	if (_syncTaskExited != nullptr) {
-		vSemaphoreDelete(_syncTaskExited);
-		_syncTaskExited = nullptr;
+}
+
+FreshTaskStackConstraint Fresh::currentSyncTaskStackConstraint() const {
+	if (_storage != nullptr &&
+	    _storage->syncTaskStackRequirement() == FreshTaskStackRequirement::Internal) {
+		return FreshTaskStackConstraint::StorageRequiresInternal;
 	}
+	return FreshTaskStackConstraint::None;
+}
+
+Strata::Placement Fresh::effectiveSyncTaskStackPlacement() const {
+	return currentSyncTaskStackConstraint() == FreshTaskStackConstraint::StorageRequiresInternal
+	           ? Strata::Placement::Internal
+	           : _config.memory.taskStack;
+}
+
+void Fresh::updateMemoryDiagnostics() {
+	_diagnostics.allocationPlacement = _config.memory.allocation;
+	_diagnostics.requestedSyncTaskStackPlacement = _config.memory.taskStack;
+	_diagnostics.effectiveSyncTaskStackPlacement = effectiveSyncTaskStackPlacement();
+	_diagnostics.syncTaskStackConstraint = currentSyncTaskStackConstraint();
+	_diagnostics.syncTaskStackRegion =
+	    _syncTask.valid() ? _syncTask.stackRegion() : Strata::Region::Unknown;
+	_diagnostics.syncTaskStackHighWaterMarkBytes =
+	    _syncTask.valid() ? _syncTask.stackHighWaterMarkBytes() : 0;
+	_diagnostics.backupBufferPlacement = _backup->buffer.placement();
+	_diagnostics.backupBufferRegion = _backup->buffer.region();
+}
+
+FreshResult Fresh::startSyncTask(const char *failureMessage) {
+	(void)_syncTaskExited.tryTake();
+	_stopTask = false;
+
+	_syncTask = Strata::FreeRTOS::Task::create(
+	    Fresh::syncTaskThunk,
+	    this,
+	    Strata::FreeRTOS::TaskConfig{
+	        .name = "fresh-sync",
+	        .stackBytes = _config.syncTaskStackSize,
+	        .stackPlacement = effectiveSyncTaskStackPlacement(),
+	        .priority = _config.syncTaskPriority,
+	        .affinity = static_cast<std::int32_t>(_config.syncTaskCore),
+	    }
+	);
+	if (!_syncTask.valid()) {
+		_syncTaskStarted = false;
+		return FreshResult::failure(
+		    FreshStatus::InternalError,
+		    failureMessage != nullptr ? failureMessage : "failed to create sync task"
+		);
+	}
+
+	_syncTaskStarted = true;
+	updateMemoryDiagnostics();
+	return FreshResult::success("sync task started");
 }
 
 FreshResult Fresh::validateConfig(const FreshConfig &config) const {
-	if (_syncTaskExited == nullptr) {
+	if (!_syncTaskExited.valid()) {
 		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate sync task exit signal");
+	}
+	if (_mutex == nullptr || !_mutex->valid() || _syncMutex == nullptr || !_syncMutex->valid() ||
+	    _backup == nullptr || !_backup->mutex.valid()) {
+		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate Fresh synchronization primitives");
+	}
+	if (!Strata::validMemoryPolicy(config.memory)) {
+		return FreshResult::failure(FreshStatus::InvalidArgument, "invalid memory policy");
 	}
 	if (config.syncIntervalMS == 0) {
 		return FreshResult::failure(FreshStatus::InvalidArgument, "sync interval must be greater than zero");
@@ -181,6 +239,7 @@ FreshResult Fresh::initWithStorage(
 	}
 
 	auto resetInitState = [this]() {
+		if (_syncTask.valid()) _syncTask.reset();
 		if (_storage) {
 			_storage->setApplicationFileAcceptance(false);
 			_storage->closeAllFiles(false);
@@ -198,7 +257,6 @@ FreshResult Fresh::initWithStorage(
 		_manifestEpoch = 0;
 		_nextPendingSequence = 1;
 		_databaseRevision = 1;
-		_syncTaskHandle = nullptr;
 		_syncTaskStarted = false;
 		_backup->buffer.reset();
 		_backup->head = 0;
@@ -226,7 +284,7 @@ FreshResult Fresh::initWithStorage(
 	_manifestEpoch = 0;
 	_nextPendingSequence = 1;
 	_databaseRevision = 1;
-	xSemaphoreTake(_syncTaskExited, 0);
+	(void)_syncTaskExited.tryTake();
 
 	_storage = std::move(storage);
 	FreshResult storageMounted = _storage->mount();
@@ -238,7 +296,11 @@ FreshResult Fresh::initWithStorage(
 	FreshStorageScope storageScope(_storage.get());
 
 	const size_t backupBytes = std::max<size_t>(_config.backupBufferSize, 512);
-	if (!_backup->buffer.allocate(backupBytes, FreshAllocationCategory::BackupBuffer)) {
+	if (!_backup->buffer.allocate(
+	        backupBytes,
+	        _config.memory.allocation,
+	        FreshAllocationCategory::BackupBuffer
+	    )) {
 		resetInitState();
 		return FreshResult::failure(FreshStatus::OutOfMemory, "failed to allocate backup buffer");
 	}
@@ -293,35 +355,12 @@ FreshResult Fresh::initWithStorage(
 	_diagnostics.garbageCollection.result = startupGarbageCollection;
 
 	_initialized = true;
-	_syncTaskStarted = true;
 	_lifecycle = Lifecycle::Running;
-
-	BaseType_t taskResult = pdFAIL;
-	if (_config.syncTaskCore == tskNO_AFFINITY) {
-		taskResult = xTaskCreate(
-		    Fresh::syncTaskThunk,
-		    "fresh-sync",
-		    _config.syncTaskStackSize,
-		    this,
-		    _config.syncTaskPriority,
-		    &_syncTaskHandle
-		);
-	} else {
-		taskResult = xTaskCreatePinnedToCore(
-		    Fresh::syncTaskThunk,
-		    "fresh-sync",
-		    _config.syncTaskStackSize,
-		    this,
-		    _config.syncTaskPriority,
-		    &_syncTaskHandle,
-		    _config.syncTaskCore
-		);
-	}
-
-	if (taskResult != pdPASS) {
+	FreshResult taskResult = startSyncTask("failed to create sync task");
+	if (!taskResult) {
 		_initialized = false;
 		resetInitState();
-		return FreshResult::failure(FreshStatus::InternalError, "failed to create sync task");
+		return taskResult;
 	}
 
 	if (_diagnostics.degradedModelCount > 0 && _diagnostics.garbageCollection.degraded) {
@@ -388,7 +427,7 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 			_stopping = true;
 			performFinalSync = true;
 		}
-		handle = _syncTaskHandle;
+		handle = _syncTask.handle();
 		taskStarted = _syncTaskStarted;
 	}
 
@@ -440,19 +479,19 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 			_lifecycle = Lifecycle::StopRequested;
 			_stopTask = true;
 		}
-		handle = _syncTaskHandle;
+		handle = _syncTask.handle();
 		taskStarted = _syncTaskStarted;
 	}
 	if (handle != nullptr) xTaskNotifyGive(handle);
 
 	if (taskStarted) {
 		const TickType_t remaining = FreshRemainingTicks(startedAt, options.timeoutMS, expired);
-		if (expired || xSemaphoreTake(_syncTaskExited, remaining) != pdTRUE) {
+		if (expired || !_syncTaskExited.take(remaining)) {
 			FreshLock lock(*_mutex);
 			_lifecycle = Lifecycle::WaitingForTaskExit;
 			return FreshResult::failure(FreshStatus::Timeout, "database deinit timed out waiting for task exit");
 		}
-		if (handle != nullptr) vTaskDelete(handle);
+		_syncTask.reset();
 	}
 
 	if (_storage && _storage->internalOpenFileCount() != 0) {
@@ -483,7 +522,6 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		_initialized = false;
 		_stopping = false;
 		_stopTask = false;
-		_syncTaskHandle = nullptr;
 		_syncTaskStarted = false;
 		_rootPath.clear();
 		_lifecycle = Lifecycle::Stopped;
@@ -533,7 +571,7 @@ void Fresh::syncLoop() {
 		}
 	}
 
-	xSemaphoreGive(_syncTaskExited);
+	(void)_syncTaskExited.give();
 	vTaskSuspend(nullptr);
 }
 
@@ -588,7 +626,14 @@ FreshResult Fresh::storageInfo(FreshStorageInfo &result) const {
 
 FreshDiagnostics Fresh::diagnostics() const {
 	FreshLock lock(*_mutex);
-	return _diagnostics;
+	FreshDiagnostics result = _diagnostics;
+	result.syncTaskStackRegion =
+	    _syncTask.valid() ? _syncTask.stackRegion() : result.syncTaskStackRegion;
+	result.syncTaskStackHighWaterMarkBytes =
+	    _syncTask.valid() ? _syncTask.stackHighWaterMarkBytes() : result.syncTaskStackHighWaterMarkBytes;
+	result.backupBufferPlacement = _backup->buffer.placement();
+	result.backupBufferRegion = _backup->buffer.region();
+	return result;
 }
 
 void Fresh::onSync(FreshSyncCallback callback) {
