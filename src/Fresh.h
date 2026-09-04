@@ -5,6 +5,9 @@
 #include <FS.h>
 #include <Print.h>
 #include <Stream.h>
+#include <Strata.h>
+#include <strata/freertos/BinarySemaphore.h>
+#include <strata/freertos/Task.h>
 #include "FreshStorage.h"
 #include <functional>
 #include <initializer_list>
@@ -18,7 +21,6 @@
 
 #if defined(ESP32)
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <freertos/task.h>
 #endif
 
@@ -85,11 +87,20 @@ enum class FreshLoadStatus : uint8_t {
 	FailedToLoad,
 };
 
+enum class FreshTaskStackConstraint : uint8_t {
+	None,
+	StorageRequiresInternal,
+};
+
 struct FreshConfig {
 	uint32_t syncIntervalMS = 5000;
 	UBaseType_t syncTaskPriority = 1;
 	BaseType_t syncTaskCore = tskNO_AFFINITY;
 	uint32_t syncTaskStackSize = 8192;
+	Strata::MemoryPolicy memory{
+	    .allocation = Strata::Placement::PreferExternal,
+	    .taskStack = Strata::Placement::Internal,
+	};
 	FreshCompressionType compressionType = FreshCompressionType::MessagePack;
 	FreshModelType defaultModelType = FreshModelType::General;
 	uint32_t snapshotRecordThreshold = 128;
@@ -255,6 +266,14 @@ struct FreshDiagnostics {
 	std::vector<FreshModelLoadInfo> modelLoads;
 	size_t degradedModelCount = 0;
 	FreshGarbageCollectionDiagnostics garbageCollection;
+	Strata::Placement allocationPlacement = Strata::Placement::Default;
+	Strata::Placement requestedSyncTaskStackPlacement = Strata::Placement::Internal;
+	Strata::Placement effectiveSyncTaskStackPlacement = Strata::Placement::Internal;
+	Strata::Region syncTaskStackRegion = Strata::Region::Unknown;
+	FreshTaskStackConstraint syncTaskStackConstraint = FreshTaskStackConstraint::None;
+	size_t syncTaskStackHighWaterMarkBytes = 0;
+	Strata::Placement backupBufferPlacement = Strata::Placement::Default;
+	Strata::Region backupBufferRegion = Strata::Region::Unknown;
 };
 
 struct FreshModelInfo {
@@ -522,6 +541,10 @@ class Fresh {
 	uint64_t now();
 	void emitEvent(FreshEvent event);
 	void emitSync(FreshResult result);
+	Strata::Placement effectiveSyncTaskStackPlacement() const;
+	FreshTaskStackConstraint currentSyncTaskStackConstraint() const;
+	FreshResult startSyncTask(const char *failureMessage);
+	void updateMemoryDiagnostics();
 
 	FreshResult validateConfig(const FreshConfig &config) const;
 	FreshResult initWithStorage(
@@ -569,8 +592,8 @@ class Fresh {
 	uint32_t _manifestEpoch = 0;
 	uint64_t _nextPendingSequence = 1;
 	uint64_t _databaseRevision = 1;
-	TaskHandle_t _syncTaskHandle = nullptr;
-	SemaphoreHandle_t _syncTaskExited = nullptr;
+	Strata::FreeRTOS::Task _syncTask;
+	Strata::FreeRTOS::BinarySemaphore _syncTaskExited;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> _models;
 	std::unique_ptr<FreshMutex> _mutex;
 	std::unique_ptr<FreshMutex> _syncMutex;
