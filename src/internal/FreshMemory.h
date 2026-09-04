@@ -23,6 +23,14 @@ enum class FreshAllocationCategory : uint8_t {
 // created them while still preserving the placement chosen by that instance.
 ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement);
 
+// Internal compatibility path for code that has not yet threaded an owning
+// Fresh instance through the helper. It preserves Fresh 0.1.x/0.2.0-rc.1's
+// PSRAM-preferred allocation behavior while ownership itself is provided by
+// Strata. New instance-aware code must pass FreshConfig::memory.allocation.
+inline ArduinoJson::Allocator &FreshJsonAllocator() {
+	return FreshJsonAllocator(Strata::Placement::PreferExternal);
+}
+
 void *FreshAllocate(
     size_t size,
     Strata::Placement placement,
