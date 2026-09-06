@@ -189,8 +189,28 @@ FreshModelType FreshModelTypeFromString(const char *type);
 bool FreshParseJournalOp(uint8_t value, FreshJournalOp &op);
 const char *FreshJournalOpToString(FreshJournalOp op);
 std::string FreshMakeId();
-FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label);
-FreshResult FreshCopyJson(JsonDocument &target, const JsonDocument &source, const char *label = "json");
+FreshResult FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label,
+    Strata::Placement placement
+);
+inline FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) {
+	return FreshCloneJson(target, source, label, Strata::Placement::PreferExternal);
+}
+FreshResult FreshCopyJson(
+    JsonDocument &target,
+    const JsonDocument &source,
+    const char *label,
+    Strata::Placement placement
+);
+inline FreshResult FreshCopyJson(
+    JsonDocument &target,
+    const JsonDocument &source,
+    const char *label = "json"
+) {
+	return FreshCopyJson(target, source, label, Strata::Placement::PreferExternal);
+}
 FreshResult FreshMergePatch(JsonDocument &target, const JsonDocument &patch);
 FreshResult FreshValidateJsonDocument(const JsonDocument &document, const char *label);
 FreshResult FreshNextRevision(uint64_t current, uint64_t &next, const char *label);
