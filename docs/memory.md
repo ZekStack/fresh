@@ -17,17 +17,21 @@ Strata::MemoryPolicy{
 };
 ```
 
-`allocation` controls Fresh-owned bulk allocations that carry an instance policy. `taskStack` is the requested placement for the Fresh synchronization task. Strata owns the actual allocations and reports their observed memory region.
+`allocation` controls Fresh-owned instance-aware JSON clones/results and bulk allocations such as the backup ring. `taskStack` controls the requested placement for the Fresh synchronization task. Strata owns the actual allocations and reports their observed memory region.
 
-## JSON lifetime
+## JSON lifetime and instance policy
 
 Fresh stores long-lived records in ArduinoJson `JsonDocument` values. Fresh provides process-lifetime ArduinoJson allocators backed by Strata so returned documents remain valid even after the originating `Fresh` instance is destroyed.
+
+`Fresh` and `FreshModel` bind their JSON allocator and clone helpers to the owning instance's `FreshConfig::memory.allocation`. This keeps stored documents, CRUD snapshots/results, journal documents, and instance-owned load/inspection clones on the configured placement instead of silently falling back to the legacy PSRAM-preferred allocator.
+
+The no-argument allocator/clone overloads remain an internal compatibility path for helper code with no owning database instance. They retain the historical `PreferExternal` behavior.
 
 The existing deterministic `FRESH_TESTING` allocation-failure categories remain in place. The Fresh allocation layer is therefore still responsible for classifying allocations and injecting failures in tests, while Strata is responsible for placement and ownership.
 
 ## Storage-aware sync-task placement
 
-The synchronization task has an additional storage safety rule. `FreshConfig::memory.taskStack` expresses the requested placement, but the active storage backend may constrain the effective placement.
+The synchronization task has an additional storage safety rule. `FreshConfig::memory.taskStack` expresses the requested placement, but the active storage backend may constrain preferred placement.
 
 `FreshStorage` exposes `FreshTaskStackRequirement`:
 
@@ -38,12 +42,12 @@ Built-in behavior:
 
 | Storage backend | Stack requirement | Result |
 | --- | --- | --- |
-| `FreshLittleFSStorage` | `Internal` | sync-task stack is always internal |
+| `FreshLittleFSStorage` | `Internal` | `Internal` and `PreferExternal` run internally; `RequireExternal` is rejected |
 | `FreshSDStorage` | `Any` | configured placement is honored |
 | `FreshEMMCStorage` | `Any` | configured placement is honored |
 | custom storage | `Any` by default | backend may override the requirement |
 
-LittleFS is deliberately constrained because internal-flash operations must not depend on a PSRAM-backed task stack while flash access is active. The safety constraint takes precedence even when the application requests `Strata::Placement::RequireExternal`; Fresh uses an internal stack instead of failing initialization.
+LittleFS is deliberately constrained because internal-flash operations must not depend on a PSRAM-backed task stack while flash access is active. `PreferExternal` is a preference, so Fresh safely constrains it to an internal stack. `RequireExternal` is a hard requirement: if the selected backend requires an internal stack, `init()` fails with `FreshStatus::InvalidArgument` rather than silently violating the requested contract.
 
 This allows SD/eMMC applications to reclaim internal RAM safely. For example, a system using SD storage may request:
 
@@ -68,7 +72,7 @@ db.init("/fresh", config, std::move(storage));
 - `backupBufferPlacement`;
 - `backupBufferRegion`.
 
-For LittleFS, a request for external task-stack memory therefore reports an internal effective placement plus `FreshTaskStackConstraint::StorageRequiresInternal`. For an unconstrained SD/eMMC backend, requested and effective placements match.
+For LittleFS with `PreferExternal`, diagnostics report the requested external preference, an internal effective placement, and `FreshTaskStackConstraint::StorageRequiresInternal`. For an unconstrained SD/eMMC backend, requested and effective placements match. A LittleFS configuration using `RequireExternal` is rejected before the backend is mounted, so there is no running-task diagnostic state for that invalid combination.
 
 ## Ownership
 
@@ -82,5 +86,5 @@ Strata integration establishes a common ownership and placement layer, but it do
 
 - per-model memory-placement policies;
 - removing the duplicate `JsonDocument` from pending journal records;
-- broader instance-policy threading through temporary checkpoint/retrieval helpers;
+- converting additional ownerless storage scratch helpers to explicit instance placement where worthwhile;
 - bounded visitor/streaming APIs.
