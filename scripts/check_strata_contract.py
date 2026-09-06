@@ -36,6 +36,31 @@ require(
     "FreshConfig must keep the sync-task stack internal by default",
 )
 require(
+    "src/Fresh.h",
+    "return ::FreshJsonAllocator(_config.memory.allocation);",
+    "Fresh-owned JSON allocation must inherit the Fresh instance allocation policy",
+)
+require(
+    "src/Fresh.h",
+    "_owner != nullptr ? _owner->_config.memory.allocation : Strata::Placement::PreferExternal",
+    "FreshModel JSON allocation must inherit its owning Fresh instance allocation policy",
+)
+require(
+    "src/Fresh.h",
+    "FreshBuildJournalRecord(",
+    "journal-record construction must use the FreshModel instance memory policy",
+)
+require(
+    "src/internal/FreshUtils.cpp" if (ROOT / "src/internal/FreshUtils.cpp").exists() else "src/FreshUtils.cpp",
+    "buffer.allocate(payloadBytes, placement, FreshAllocationCategory::JsonCloneBuffer)",
+    "JSON clone scratch buffers must honor the requested Strata placement",
+)
+require(
+    "src/internal/FreshUtils.cpp" if (ROOT / "src/internal/FreshUtils.cpp").exists() else "src/FreshUtils.cpp",
+    "JsonDocument decoded(&FreshJsonAllocator(placement));",
+    "JSON clone results must use the requested Strata allocator",
+)
+require(
     "src/FreshStorage.h",
     "FreshTaskStackRequirement::Any",
     "storage backends must be unconstrained by default",
@@ -47,13 +72,23 @@ require(
 )
 require(
     "src/Fresh.cpp",
+    "config.memory.taskStack == Strata::Placement::RequireExternal",
+    "hard external task-stack requirements must be validated against storage constraints",
+)
+require(
+    "src/Fresh.cpp",
+    "storage->syncTaskStackRequirement() == FreshTaskStackRequirement::Internal",
+    "Fresh must reject storage that conflicts with a hard external task-stack requirement",
+)
+require(
+    "src/Fresh.cpp",
     "_storage->syncTaskStackRequirement() == FreshTaskStackRequirement::Internal",
     "Fresh must resolve storage-imposed sync-task stack constraints",
 )
 require(
     "src/Fresh.cpp",
     "? Strata::Placement::Internal",
-    "storage safety constraints must override the requested sync-task placement",
+    "storage safety constraints must override preferred sync-task placement",
 )
 require(
     "src/Fresh.cpp",
