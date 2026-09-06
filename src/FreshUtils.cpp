@@ -159,7 +159,12 @@ FreshResult FreshValidateJsonDocument(const JsonDocument &document, const char *
 	return FreshResult::success();
 }
 
-FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) {
+FreshResult FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label,
+    Strata::Placement placement
+) {
 	const char *name = label != nullptr ? label : "json";
 	const size_t payloadBytes = measureMsgPack(source);
 	if (payloadBytes == 0) {
@@ -170,7 +175,7 @@ FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const 
 	}
 
 	FreshBuffer buffer;
-	if (!buffer.allocate(payloadBytes, FreshAllocationCategory::JsonCloneBuffer)) {
+	if (!buffer.allocate(payloadBytes, placement, FreshAllocationCategory::JsonCloneBuffer)) {
 		target.clear();
 		std::string message = "failed to allocate ";
 		message += name;
@@ -187,7 +192,7 @@ FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const 
 		return FreshResult::failure(FreshStatus::InternalError, message.c_str());
 	}
 
-	JsonDocument decoded(&FreshJsonAllocator());
+	JsonDocument decoded(&FreshJsonAllocator(placement));
 	const DeserializationError error = deserializeMsgPack(
 	    decoded,
 	    buffer.data(),
@@ -211,8 +216,13 @@ FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const 
 	return FreshResult::success("json cloned");
 }
 
-FreshResult FreshCopyJson(JsonDocument &target, const JsonDocument &source, const char *label) {
-	return FreshCloneJson(target, source.as<JsonVariantConst>(), label);
+FreshResult FreshCopyJson(
+    JsonDocument &target,
+    const JsonDocument &source,
+    const char *label,
+    Strata::Placement placement
+) {
+	return FreshCloneJson(target, source.as<JsonVariantConst>(), label, placement);
 }
 
 FreshResult FreshMergePatch(JsonDocument &target, const JsonDocument &patch) {
