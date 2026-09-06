@@ -45,11 +45,15 @@ config.memory.taskStack = Strata::Placement::PreferExternal;
 
 The allocation policy defaults to `PreferExternal`; the sync-task stack defaults to `Internal`.
 
-The task-stack setting is a requested placement. The configured storage may impose a stricter requirement. `FreshLittleFSStorage` always constrains the effective sync-task stack to internal RAM. `FreshSDStorage` and `FreshEMMCStorage` are unconstrained and therefore honor the configured stack placement.
+Fresh/FreshModel-owned JSON clones and results inherit `config.memory.allocation`, as does the backup buffer. The process-lifetime ArduinoJson allocator remains safe for returned documents that outlive the originating `Fresh` instance.
+
+The task-stack setting distinguishes preferences from hard requirements. The configured storage may impose a stricter safety requirement. `FreshLittleFSStorage` constrains `PreferExternal` to an internal sync-task stack. `FreshSDStorage` and `FreshEMMCStorage` are unconstrained and therefore honor the configured stack placement.
 
 A custom backend may override `FreshStorage::syncTaskStackRequirement()` and return `FreshTaskStackRequirement::Internal` when its I/O path cannot safely execute from a PSRAM-backed task stack.
 
-If `RequireExternal` is requested with LittleFS, Fresh uses an internal stack rather than rejecting initialization. Inspect `Fresh::diagnostics()` when the distinction between requested, effective, and observed placement matters.
+`RequireExternal` is not silently weakened. If a backend declares `FreshTaskStackRequirement::Internal`, configuring `taskStack = Strata::Placement::RequireExternal` causes `init()` to fail with `FreshStatus::InvalidArgument`. Use `PreferExternal` when external RAM is desirable but storage safety may require an internal stack.
+
+Inspect `Fresh::diagnostics()` when the distinction between requested, effective, and observed placement matters.
 
 ## Storage ownership
 
