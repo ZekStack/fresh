@@ -315,6 +315,16 @@ struct FreshBackupRuntimeState;
 struct FreshMutex;
 struct FreshPendingRecord;
 
+// Internal process-lifetime allocation hooks. Fresh and FreshModel shadow these
+// with instance-aware helpers so owned JSON follows FreshConfig::memory.
+ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement);
+FreshResult FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label,
+    Strata::Placement placement
+);
+
 using FreshPredicate = std::function<bool(const JsonDocument &)>;
 using FreshBoolValidator = std::function<bool(const JsonDocument &)>;
 using FreshResultValidator = std::function<FreshValidationResult(const JsonDocument &)>;
@@ -396,6 +406,20 @@ class FreshModel {
 	    bool requireType = false,
 	    FreshModelType requiredType = FreshModelType::General,
 	    const char *unsupportedMessage = "unsupported operation"
+	) const;
+	ArduinoJson::Allocator &FreshJsonAllocator() const;
+	ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement) const;
+	FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) const;
+	FreshResult FreshCloneJson(
+	    JsonDocument &target,
+	    JsonVariantConst source,
+	    const char *label,
+	    Strata::Placement placement
+	) const;
+	FreshResult FreshBuildJournalRecord(
+	    Fresh &owner,
+	    FreshPendingRecord &record,
+	    size_t maxJournalRecordBytes
 	) const;
 
 	Fresh *_owner = nullptr;
@@ -554,6 +578,15 @@ class Fresh {
 	uint64_t now();
 	void emitEvent(FreshEvent event);
 	void emitSync(FreshResult result);
+	ArduinoJson::Allocator &FreshJsonAllocator() const;
+	ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement) const;
+	FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) const;
+	FreshResult FreshCloneJson(
+	    JsonDocument &target,
+	    JsonVariantConst source,
+	    const char *label,
+	    Strata::Placement placement
+	) const;
 	Strata::Placement effectiveSyncTaskStackPlacement() const;
 	FreshTaskStackConstraint currentSyncTaskStackConstraint() const;
 	FreshResult startSyncTask(const char *failureMessage);
@@ -621,6 +654,75 @@ class Fresh {
 	FreshBackupCallback _onBackupError;
 	mutable std::unique_ptr<FreshBackupRuntimeState> _backup;
 };
+
+inline ArduinoJson::Allocator &Fresh::FreshJsonAllocator() const {
+	return ::FreshJsonAllocator(_config.memory.allocation);
+}
+
+inline ArduinoJson::Allocator &Fresh::FreshJsonAllocator(Strata::Placement placement) const {
+	return ::FreshJsonAllocator(placement);
+}
+
+inline FreshResult Fresh::FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label
+) const {
+	return ::FreshCloneJson(target, source, label, _config.memory.allocation);
+}
+
+inline FreshResult Fresh::FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label,
+    Strata::Placement placement
+) const {
+	return ::FreshCloneJson(target, source, label, placement);
+}
+
+inline ArduinoJson::Allocator &FreshModel::FreshJsonAllocator() const {
+	return ::FreshJsonAllocator(
+	    _owner != nullptr ? _owner->_config.memory.allocation : Strata::Placement::PreferExternal
+	);
+}
+
+inline ArduinoJson::Allocator &FreshModel::FreshJsonAllocator(Strata::Placement placement) const {
+	return ::FreshJsonAllocator(placement);
+}
+
+inline FreshResult FreshModel::FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label
+) const {
+	const Strata::Placement placement =
+	    _owner != nullptr ? _owner->_config.memory.allocation : Strata::Placement::PreferExternal;
+	return ::FreshCloneJson(target, source, label, placement);
+}
+
+inline FreshResult FreshModel::FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label,
+    Strata::Placement placement
+) const {
+	return ::FreshCloneJson(target, source, label, placement);
+}
+
+inline FreshResult FreshModel::FreshBuildJournalRecord(
+    Fresh &owner,
+    FreshPendingRecord &record,
+    size_t maxJournalRecordBytes
+) const {
+	JsonDocument recordDoc(&FreshJsonAllocator());
+	FreshResult result = owner.recordToJson(record, recordDoc);
+	if (!result) return result;
+	return owner.checkPayloadSize(
+	    measureMsgPack(recordDoc),
+	    maxJournalRecordBytes,
+	    "journal record"
+	);
+}
 
 #include "storage/FreshLittleFSStorage.h"
 #include "storage/FreshSDStorage.h"
