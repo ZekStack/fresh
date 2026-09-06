@@ -228,6 +228,13 @@ FreshResult Fresh::initWithStorage(
 	}
 	FreshResult configResult = validateConfig(config);
 	if (!configResult) return configResult;
+	if (config.memory.taskStack == Strata::Placement::RequireExternal &&
+	    storage->syncTaskStackRequirement() == FreshTaskStackRequirement::Internal) {
+		return FreshResult::failure(
+		    FreshStatus::InvalidArgument,
+		    "sync task requires external memory but storage requires an internal stack"
+		);
+	}
 
 	FreshLock lock(*_mutex);
 	if (!lock) {
