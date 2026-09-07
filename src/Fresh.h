@@ -5,6 +5,9 @@
 #include <FS.h>
 #include <Print.h>
 #include <Stream.h>
+#include <Strata.h>
+#include <strata/freertos/BinarySemaphore.h>
+#include <strata/freertos/Task.h>
 #include "FreshStorage.h"
 #include <functional>
 #include <initializer_list>
@@ -18,7 +21,6 @@
 
 #if defined(ESP32)
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <freertos/task.h>
 #endif
 
@@ -85,11 +87,20 @@ enum class FreshLoadStatus : uint8_t {
 	FailedToLoad,
 };
 
+enum class FreshTaskStackConstraint : uint8_t {
+	None,
+	StorageRequiresInternal,
+};
+
 struct FreshConfig {
 	uint32_t syncIntervalMS = 5000;
 	UBaseType_t syncTaskPriority = 1;
 	BaseType_t syncTaskCore = tskNO_AFFINITY;
 	uint32_t syncTaskStackSize = 8192;
+	Strata::MemoryPolicy memory{
+	    .allocation = Strata::Placement::PreferExternal,
+	    .taskStack = Strata::Placement::Internal,
+	};
 	FreshCompressionType compressionType = FreshCompressionType::MessagePack;
 	FreshModelType defaultModelType = FreshModelType::General;
 	uint32_t snapshotRecordThreshold = 128;
@@ -255,6 +266,14 @@ struct FreshDiagnostics {
 	std::vector<FreshModelLoadInfo> modelLoads;
 	size_t degradedModelCount = 0;
 	FreshGarbageCollectionDiagnostics garbageCollection;
+	Strata::Placement allocationPlacement = Strata::Placement::Default;
+	Strata::Placement requestedSyncTaskStackPlacement = Strata::Placement::Internal;
+	Strata::Placement effectiveSyncTaskStackPlacement = Strata::Placement::Internal;
+	Strata::Region syncTaskStackRegion = Strata::Region::Unknown;
+	FreshTaskStackConstraint syncTaskStackConstraint = FreshTaskStackConstraint::None;
+	size_t syncTaskStackHighWaterMarkBytes = 0;
+	Strata::Placement backupBufferPlacement = Strata::Placement::Default;
+	Strata::Region backupBufferRegion = Strata::Region::Unknown;
 };
 
 struct FreshModelInfo {
@@ -295,6 +314,16 @@ struct FreshBackupPlan;
 struct FreshBackupRuntimeState;
 struct FreshMutex;
 struct FreshPendingRecord;
+
+// Internal process-lifetime allocation hooks. Fresh and FreshModel shadow these
+// with instance-aware helpers so owned JSON follows FreshConfig::memory.
+ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement);
+FreshResult FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label,
+    Strata::Placement placement
+);
 
 using FreshPredicate = std::function<bool(const JsonDocument &)>;
 using FreshBoolValidator = std::function<bool(const JsonDocument &)>;
@@ -377,6 +406,20 @@ class FreshModel {
 	    bool requireType = false,
 	    FreshModelType requiredType = FreshModelType::General,
 	    const char *unsupportedMessage = "unsupported operation"
+	) const;
+	ArduinoJson::Allocator &FreshJsonAllocator() const;
+	ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement) const;
+	FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) const;
+	FreshResult FreshCloneJson(
+	    JsonDocument &target,
+	    JsonVariantConst source,
+	    const char *label,
+	    Strata::Placement placement
+	) const;
+	FreshResult FreshBuildJournalRecord(
+	    Fresh &owner,
+	    FreshPendingRecord &record,
+	    size_t maxJournalRecordBytes
 	) const;
 
 	Fresh *_owner = nullptr;
@@ -506,6 +549,19 @@ class Fresh {
 	friend class FreshBackupPrint;
 	friend class FreshStorageAccess;
 
+	class SyncTaskHandleView {
+	  public:
+		explicit SyncTaskHandleView(const Strata::FreeRTOS::Task &task) noexcept : _task(&task) {
+		}
+
+		operator TaskHandle_t() const noexcept {
+			return _task != nullptr ? _task->handle() : nullptr;
+		}
+
+	  private:
+		const Strata::FreeRTOS::Task *_task = nullptr;
+	};
+
 	enum class Lifecycle : uint8_t {
 		Uninitialized,
 		Running,
@@ -522,6 +578,19 @@ class Fresh {
 	uint64_t now();
 	void emitEvent(FreshEvent event);
 	void emitSync(FreshResult result);
+	ArduinoJson::Allocator &FreshJsonAllocator() const;
+	ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement) const;
+	FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) const;
+	FreshResult FreshCloneJson(
+	    JsonDocument &target,
+	    JsonVariantConst source,
+	    const char *label,
+	    Strata::Placement placement
+	) const;
+	Strata::Placement effectiveSyncTaskStackPlacement() const;
+	FreshTaskStackConstraint currentSyncTaskStackConstraint() const;
+	FreshResult startSyncTask(const char *failureMessage);
+	void updateMemoryDiagnostics();
 
 	FreshResult validateConfig(const FreshConfig &config) const;
 	FreshResult initWithStorage(
@@ -569,8 +638,9 @@ class Fresh {
 	uint32_t _manifestEpoch = 0;
 	uint64_t _nextPendingSequence = 1;
 	uint64_t _databaseRevision = 1;
-	TaskHandle_t _syncTaskHandle = nullptr;
-	SemaphoreHandle_t _syncTaskExited = nullptr;
+	Strata::FreeRTOS::Task _syncTask;
+	SyncTaskHandleView _syncTaskHandle{_syncTask};
+	Strata::FreeRTOS::BinarySemaphore _syncTaskExited;
 	std::map<std::string, std::shared_ptr<FreshModel::State>> _models;
 	std::unique_ptr<FreshMutex> _mutex;
 	std::unique_ptr<FreshMutex> _syncMutex;
@@ -584,6 +654,75 @@ class Fresh {
 	FreshBackupCallback _onBackupError;
 	mutable std::unique_ptr<FreshBackupRuntimeState> _backup;
 };
+
+inline ArduinoJson::Allocator &Fresh::FreshJsonAllocator() const {
+	return ::FreshJsonAllocator(_config.memory.allocation);
+}
+
+inline ArduinoJson::Allocator &Fresh::FreshJsonAllocator(Strata::Placement placement) const {
+	return ::FreshJsonAllocator(placement);
+}
+
+inline FreshResult Fresh::FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label
+) const {
+	return ::FreshCloneJson(target, source, label, _config.memory.allocation);
+}
+
+inline FreshResult Fresh::FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label,
+    Strata::Placement placement
+) const {
+	return ::FreshCloneJson(target, source, label, placement);
+}
+
+inline ArduinoJson::Allocator &FreshModel::FreshJsonAllocator() const {
+	return ::FreshJsonAllocator(
+	    _owner != nullptr ? _owner->_config.memory.allocation : Strata::Placement::PreferExternal
+	);
+}
+
+inline ArduinoJson::Allocator &FreshModel::FreshJsonAllocator(Strata::Placement placement) const {
+	return ::FreshJsonAllocator(placement);
+}
+
+inline FreshResult FreshModel::FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label
+) const {
+	const Strata::Placement placement =
+	    _owner != nullptr ? _owner->_config.memory.allocation : Strata::Placement::PreferExternal;
+	return ::FreshCloneJson(target, source, label, placement);
+}
+
+inline FreshResult FreshModel::FreshCloneJson(
+    JsonDocument &target,
+    JsonVariantConst source,
+    const char *label,
+    Strata::Placement placement
+) const {
+	return ::FreshCloneJson(target, source, label, placement);
+}
+
+inline FreshResult FreshModel::FreshBuildJournalRecord(
+    Fresh &owner,
+    FreshPendingRecord &record,
+    size_t maxJournalRecordBytes
+) const {
+	JsonDocument recordDoc(&FreshJsonAllocator());
+	FreshResult result = owner.recordToJson(record, recordDoc);
+	if (!result) return result;
+	return owner.checkPayloadSize(
+	    measureMsgPack(recordDoc),
+	    maxJournalRecordBytes,
+	    "journal record"
+	);
+}
 
 #include "storage/FreshLittleFSStorage.h"
 #include "storage/FreshSDStorage.h"

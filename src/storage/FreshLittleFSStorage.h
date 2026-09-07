@@ -19,6 +19,9 @@ class FreshLittleFSStorage final : public FreshStorage {
   private:
 	FreshResult mount() override;
 	FreshResult unmount() override;
+	FreshTaskStackRequirement syncTaskStackRequirement() const override {
+		return FreshTaskStackRequirement::Internal;
+	}
 	bool supportsFormat() const override {
 		return true;
 	}

@@ -34,6 +34,11 @@ enum class FreshStorageType : uint8_t {
 	Custom,
 };
 
+enum class FreshTaskStackRequirement : uint8_t {
+	Any,
+	Internal,
+};
+
 enum class FreshStorageState : uint8_t {
 	Uninitialized,
 	Mounting,
@@ -227,6 +232,9 @@ class FreshStorage {
 
 	virtual FreshResult mount() = 0;
 	virtual FreshResult unmount() = 0;
+	virtual FreshTaskStackRequirement syncTaskStackRequirement() const {
+		return FreshTaskStackRequirement::Any;
+	}
 	virtual bool supportsFormat() const {
 		return false;
 	}

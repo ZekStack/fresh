@@ -252,7 +252,7 @@ FreshResult Fresh::format() {
 		_lifecycle = Lifecycle::Formatting;
 		_stopTask = true;
 		_forceSyncRequested = false;
-		taskHandle = _syncTaskHandle;
+		taskHandle = _syncTask.handle();
 		taskStarted = _syncTaskStarted;
 	}
 
@@ -280,10 +280,7 @@ FreshResult Fresh::format() {
 
 	if (taskHandle != nullptr) xTaskNotifyGive(taskHandle);
 	if (taskStarted) {
-		if (xSemaphoreTake(
-		        _syncTaskExited,
-		        pdMS_TO_TICKS(FreshFormatStopTimeoutMS)
-		    ) != pdTRUE) {
+		if (!_syncTaskExited.take(pdMS_TO_TICKS(FreshFormatStopTimeoutMS))) {
 			FreshLock lock(*_mutex);
 			_lifecycle = Lifecycle::WaitingForTaskExit;
 			return FreshResult::failure(
@@ -291,12 +288,11 @@ FreshResult Fresh::format() {
 			    "database format timed out waiting for the sync task"
 			);
 		}
-		if (taskHandle != nullptr) vTaskDelete(taskHandle);
+		_syncTask.reset();
 	}
 
 	{
 		FreshLock lock(*_mutex);
-		_syncTaskHandle = nullptr;
 		_syncTaskStarted = false;
 	}
 
@@ -334,53 +330,23 @@ FreshResult Fresh::format() {
 		_initialized = false;
 		_stopping = true;
 		_stopTask = false;
-		_syncTaskHandle = nullptr;
 		_syncTaskStarted = false;
 		_lifecycle = Lifecycle::Stopped;
 	};
 
-	auto startSyncTask = [this]() -> FreshResult {
+	auto restartSyncTask = [this]() -> FreshResult {
 		FreshLock lock(*_mutex);
 		if (!lock) {
 			return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
 		}
-		xSemaphoreTake(_syncTaskExited, 0);
-		_stopTask = false;
-		TaskHandle_t handle = nullptr;
-		BaseType_t taskResult = pdFAIL;
-		if (_config.syncTaskCore == tskNO_AFFINITY) {
-			taskResult = xTaskCreate(
-			    Fresh::syncTaskThunk,
-			    "fresh-sync",
-			    _config.syncTaskStackSize,
-			    this,
-			    _config.syncTaskPriority,
-			    &handle
-			);
-		} else {
-			taskResult = xTaskCreatePinnedToCore(
-			    Fresh::syncTaskThunk,
-			    "fresh-sync",
-			    _config.syncTaskStackSize,
-			    this,
-			    _config.syncTaskPriority,
-			    &handle,
-			    _config.syncTaskCore
-			);
-		}
-		if (taskResult != pdPASS) {
-			_syncTaskHandle = nullptr;
+		FreshResult taskResult = startSyncTask("failed to restart sync task after format");
+		if (!taskResult) {
 			_syncTaskStarted = false;
 			_initialized = false;
 			_stopping = true;
 			_lifecycle = Lifecycle::Stopped;
-			return FreshResult::failure(
-			    FreshStatus::InternalError,
-			    "failed to restart sync task after format"
-			);
+			return taskResult;
 		}
-		_syncTaskHandle = handle;
-		_syncTaskStarted = true;
 		_initialized = true;
 		_storage->setApplicationFileAcceptance(true);
 		_stopping = false;
@@ -388,9 +354,9 @@ FreshResult Fresh::format() {
 		return FreshResult::success("sync task restarted");
 	};
 
-	auto recoverBeforeFormat = [this, &startSyncTask](const FreshResult &failure) -> FreshResult {
+	auto recoverBeforeFormat = [this, &restartSyncTask](const FreshResult &failure) -> FreshResult {
 		FreshResult backupReset = FreshResetBackupAfterFormat(*_backup);
-		FreshResult restarted = startSyncTask();
+		FreshResult restarted = restartSyncTask();
 		if (!restarted) return restarted;
 		return backupReset ? failure : backupReset;
 	};
@@ -448,7 +414,7 @@ FreshResult Fresh::format() {
 									operation = ensureDir(FreshJoinPath(_rootPath, "models"));
 								}
 								if (operation) {
-									JsonDocument manifest(&FreshJsonAllocator());
+									JsonDocument manifest(&FreshJsonAllocator(_config.memory.allocation));
 									operation = FreshJsonSet(
 									    manifest["version"],
 									    FreshManifestVersion,
@@ -500,7 +466,7 @@ FreshResult Fresh::format() {
 		markStopped();
 		return backupReset;
 	}
-	FreshResult restarted = startSyncTask();
+	FreshResult restarted = restartSyncTask();
 	if (!restarted) return restarted;
 	return FreshResult::success("storage formatted", modelCount);
 }
