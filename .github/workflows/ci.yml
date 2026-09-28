@@ -70,6 +70,7 @@ jobs:
     needs: source-audit
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         board: [esp32dev, esp32-s3-devkitc-1, esp32-c3-devkitm-1, esp32-p4-evboard]
     steps:
@@ -116,7 +117,7 @@ jobs:
 
   build-hardening-testing:
     runs-on: [self-hosted, zekstack-ci]
-    needs: source-audit
+    needs: build-examples
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -206,9 +207,10 @@ jobs:
 
   arduino-cli:
     runs-on: [self-hosted, zekstack-ci]
-    needs: source-audit
+    needs: build-hardening-testing
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         board:
           - fqbn: esp32:esp32:esp32
