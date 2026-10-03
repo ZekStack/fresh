@@ -277,7 +277,7 @@ FreshResult FreshSPIFlashStorage::inspectPartitionBlank(bool &blank) const {
 	std::array<uint8_t, FreshBlankProbeBytes> buffer{};
 	size_t offset = 0;
 	while (offset < _partition->size) {
-		const size_t length = std::min(buffer.size(), _partition->size - offset);
+		const size_t length = std::min(buffer.size(), static_cast<size_t>(_partition->size) - offset);
 		const esp_err_t read =
 		    esp_partition_read(_partition, offset, buffer.data(), length);
 		_nativeError = static_cast<int>(read);
