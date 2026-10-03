@@ -11,7 +11,7 @@ example = (ROOT / "examples/SPIFlashStorage/SPIFlashStorage.ino").read_text(enco
 assert "FreshStorageType::SPIFlash" in source
 assert "SPIFlash" in storage_header
 assert "FreshSPIBusOwnership::Managed" in header
-assert "FreshSPIBusOwnership::External" in source
+assert "busOwnership != FreshSPIBusOwnership::Managed" in source
 assert "formatIfBlank" in header
 assert "formatOnMountFailure" in header
 
