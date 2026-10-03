@@ -60,9 +60,10 @@ Each backend owns its own configuration type:
 | `FreshSDStorage` with SPI | `FreshSDConfig` + `FreshSDSPIConfig` |
 | `FreshSDStorage` with SDMMC | `FreshSDConfig` + `FreshSDMMCConfig` |
 | `FreshEMMCStorage` | `FreshEMMCConfig` |
+| `FreshSPIFlashStorage` | `FreshSPIFlashConfig` |
 | Custom backend | User-defined constructor parameters |
 
-Formatting is disabled by default. Production applications should normally keep `formatOnMountFailure = false` so a wiring, power, or media failure cannot erase data automatically.
+Formatting is disabled by default. Production applications should normally keep `formatOnMountFailure = false` so a wiring, power, or media failure cannot erase data automatically. `FreshSPIFlashConfig::formatIfBlank` is a narrower factory-provisioning option that formats only when the complete configured raw partition is still erased.
 
 `FreshSDMMCConfig::powerMode` defaults to `FreshSDMMCPowerMode::External`. Set it to `OnChipLDO` with a positive `ldoChannel` when the ESP32 target routes SDMMC I/O power through an on-chip LDO. Fresh owns that power-control handle for the mounted backend lifecycle; board-specific enable/reset GPIOs remain application responsibilities.
 
