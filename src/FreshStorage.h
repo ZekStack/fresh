@@ -31,8 +31,8 @@ enum class FreshStorageType : uint8_t {
 	LittleFS,
 	SD,
 	EMMC,
-	SPIFlash,
 	Custom,
+	SPIFlash,
 };
 
 enum class FreshTaskStackRequirement : uint8_t {
