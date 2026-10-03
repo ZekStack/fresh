@@ -10,6 +10,7 @@ All examples are under [`../examples`](../examples).
 | `SDSPIStorage` | ESP-IDF SD card storage over a managed SPI bus. |
 | `SDMMCStorage` | ESP-IDF SDMMC card configuration, including the Waveshare ESP32-P4-Module-DEV-KIT pins, power gate, and LDO channel. |
 | `EMMCStorage` | Dedicated 1/4/8-bit eMMC backend configuration. |
+| `SPIFlashStorage` | External SPI NOR with dynamic partition registration, FATFS, and wear levelling. |
 | `SameFilesystemBackup` | Stream a Fresh backup into an application file on the active backend. |
 | `CustomStorage` | Implement an owned custom backend over an independently owned memory volume. |
 | `StorageLifecycleRegressionTest` | Database-root protection, open-file shutdown blocking, and repeated initialization. |
@@ -49,4 +50,4 @@ FreshResult opened = database.storage().open(
 
 ## Hardware examples
 
-SD and eMMC examples compile across the CI target matrix but still require matching physical wiring, media, bus ownership, and board-level power/reset setup before runtime validation.
+SD, eMMC, and SPI-flash examples compile across the CI target matrix but still require matching physical wiring, media, bus ownership, and board-level power/reset setup before runtime validation.

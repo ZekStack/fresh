@@ -110,7 +110,7 @@ Physical VFS paths:
 /littlefs/backups/system.fresh
 ```
 
-Switching to SD or eMMC changes the physical mount point, not database or application paths.
+Switching to SD, eMMC, or external SPI flash changes the physical mount point, not database or application paths.
 
 ## LittleFS
 
@@ -233,6 +233,48 @@ db.init(
 ```
 
 The backend supports 1-, 4-, and 8-bit widths. Board-specific power and reset sequencing remains outside Fresh and must complete before initialization.
+
+## External SPI NOR flash
+
+Include the dedicated backend:
+
+```cpp
+#include <FreshSPIFlashStorage.h>
+```
+
+`FreshSPIFlashStorage` uses ESP-IDF's external `esp_flash` driver, registers the selected flash range as a dynamic FAT data partition, and mounts FATFS through ESP-IDF wear levelling.
+
+```cpp
+FreshSPIFlashConfig storageConfig;
+storageConfig.mountPath = "/flash";
+storageConfig.partitionLabel = "fresh-flash";
+storageConfig.maxOpenFiles = 16;
+storageConfig.allocationUnitSize = 4 * 1024;
+storageConfig.formatIfBlank = true;
+storageConfig.formatOnMountFailure = false;
+
+storageConfig.host = SPI2_HOST;
+storageConfig.chipSelectPin = GPIO_NUM_10;
+storageConfig.clockPin = GPIO_NUM_12;
+storageConfig.mosiPin = GPIO_NUM_11;
+storageConfig.misoPin = GPIO_NUM_13;
+storageConfig.frequencyHz = 20'000'000;
+storageConfig.busOwnership = FreshSPIBusOwnership::Managed;
+
+db.init(
+    "/fresh",
+    FreshConfig(),
+    FreshSPIFlashStorage(storageConfig)
+);
+```
+
+`Managed` initializes and releases the SPI bus. `External` attaches the flash device to a bus initialized by the application and never frees the bus. The flash device handle, dynamic partition, wear-levelling handle, and FATFS mount are owned by the Fresh backend in both modes.
+
+The initial backend uses single-I/O fast reads, so it only requires clock, MOSI, MISO, and a dedicated chip-select. `partitionOffset` and `partitionSize` select a sector-aligned region of the chip; a zero partition size uses the remainder of the detected device.
+
+`formatIfBlank` is a provisioning option. Before wear levelling is mounted, Fresh scans the complete configured raw partition and permits mount-time formatting only when every byte is erased (`0xFF`). `formatOnMountFailure` is broader and potentially destructive, so it remains disabled by default. Explicit `Fresh::format()` uses the ESP-IDF wear-levelled SPI-flash formatter.
+
+External SPI flash is unconstrained for sync-task stack placement; applications may use PSRAM-backed task stacks when their platform supports them.
 
 ## Custom backends
 

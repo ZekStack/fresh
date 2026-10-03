@@ -7,6 +7,7 @@
 #include "storage/FreshEMMCStorage.h"
 #include "storage/FreshLittleFSStorage.h"
 #include "storage/FreshSDStorage.h"
+#include "storage/FreshSPIFlashStorage.h"
 
 #if defined(ESP32)
 extern "C" {
@@ -202,6 +203,61 @@ FreshResult FreshSDStorage::formatBackend() {
 	    _config.allocationUnitSize,
 	    _nativeError
 	);
+#endif
+}
+
+FreshResult FreshSPIFlashStorage::formatBackend() {
+#if !defined(ESP32)
+	return FreshResult::failure(FreshStatus::UnsupportedOperation, "SPI flash storage requires ESP32");
+#else
+	if (!_filesystemMounted || _wlHandle == WL_INVALID_HANDLE) {
+		return FreshResult::failure(
+		    FreshStatus::StorageUnavailable,
+		    "SPI flash storage is not mounted"
+		);
+	}
+
+	esp_vfs_fat_mount_config_t config = {};
+	config.format_if_mount_failed = false;
+	config.max_files = static_cast<int>(_config.maxOpenFiles);
+	config.allocation_unit_size = _config.allocationUnitSize;
+
+	const esp_err_t formatted = esp_vfs_fat_spiflash_format_cfg_rw_wl(
+	    mountPath(),
+	    _partitionLabel.c_str(),
+	    &config
+	);
+	_nativeError = static_cast<int>(formatted);
+	if (formatted != ESP_OK) {
+		uint64_t totalBytes = 0;
+		uint64_t freeBytes = 0;
+		if (esp_vfs_fat_info(mountPath(), &totalBytes, &freeBytes) == ESP_OK) {
+			_filesystemMounted = true;
+			setState(FreshStorageState::Mounted);
+		} else {
+			_filesystemMounted = false;
+			_wlHandle = WL_INVALID_HANDLE;
+		}
+		return FreshResult::failure(
+		    formatted == ESP_ERR_NO_MEM ? FreshStatus::OutOfMemory : FreshStatus::FileSystemError,
+		    "failed to format SPI flash storage"
+		);
+	}
+
+	uint64_t totalBytes = 0;
+	uint64_t freeBytes = 0;
+	const esp_err_t inspected =
+	    esp_vfs_fat_info(mountPath(), &totalBytes, &freeBytes);
+	_nativeError = static_cast<int>(inspected);
+	if (inspected != ESP_OK) {
+		return FreshResult::failure(
+		    FreshStatus::FileSystemError,
+		    "formatted SPI flash storage could not be verified"
+		);
+	}
+
+	_nativeError = 0;
+	return FreshResult::success("SPI flash storage formatted");
 #endif
 }
 
