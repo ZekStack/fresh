@@ -1,8 +1,8 @@
-# Migrating to Fresh 0.2.0
+# Migrating to Fresh 0.2.1
 
-Fresh 0.2.0 intentionally breaks the pre-release storage API. The branch does not provide deprecated aliases, factory adapters, borrowed backends, or Arduino filesystem compatibility shims.
+Fresh 0.2.1 intentionally breaks the pre-release storage API. The branch does not provide deprecated aliases, factory adapters, borrowed backends, or Arduino filesystem compatibility shims.
 
-Fresh 0.2.0 also depends on Strata v0.1.2 for placement-aware memory ownership and Fresh-owned FreeRTOS primitives.
+Fresh 0.2.1 also depends on Strata v0.1.2 for placement-aware memory ownership and Fresh-owned FreeRTOS primitives.
 
 ## Storage selection
 
@@ -113,7 +113,7 @@ Fresh mounts built-in storage through ESP-IDF and exposes application files thro
 
 ## Removed compatibility code
 
-The 0.2.0 redesign removes:
+The 0.2.1 redesign removes:
 
 - storage selection from `FreshConfig`;
 - `FreshStorageFactory`;

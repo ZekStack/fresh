@@ -1,6 +1,6 @@
-# Fresh 0.2.0 release notes
+# Fresh 0.2.1 release notes
 
-Fresh 0.2.0 introduces owned, pluggable storage, a unified application-file API, and Strata-backed memory/FreeRTOS ownership.
+Fresh 0.2.1 introduces owned, pluggable storage, a unified application-file API, and Strata-backed memory/FreeRTOS ownership.
 
 ## Strata integration
 

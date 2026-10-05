@@ -1,6 +1,6 @@
 # Configuration
 
-Fresh 0.2.0 separates database configuration from storage configuration.
+Fresh 0.2.1 separates database configuration from storage configuration.
 
 ```cpp
 FreshConfig config;

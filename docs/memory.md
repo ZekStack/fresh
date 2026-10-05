@@ -1,6 +1,6 @@
 # Fresh memory behavior
 
-Fresh 0.2.0 routes Fresh-owned placement-sensitive memory and FreeRTOS ownership through Strata v0.1.2. Applications configure the default policy through `FreshConfig::memory`.
+Fresh 0.2.1 routes Fresh-owned placement-sensitive memory and FreeRTOS ownership through Strata v0.1.2. Applications configure the default policy through `FreshConfig::memory`.
 
 ```cpp
 FreshConfig config;

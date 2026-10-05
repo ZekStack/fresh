@@ -1,6 +1,6 @@
 # Storage
 
-Fresh 0.2.0 uses an object-based storage API. `FreshConfig` configures database behavior only; the storage backend configures mounting, filesystem options, media transport, pins, and bus ownership.
+Fresh 0.2.1 uses an object-based storage API. `FreshConfig` configures database behavior only; the storage backend configures mounting, filesystem options, media transport, pins, and bus ownership.
 
 ## Initialization
 
@@ -39,7 +39,7 @@ FreshInitResult result = db.init(
 );
 ```
 
-Fresh mounts the backend during `init()`, uses it for database and application files, unmounts it during `deinit()`, and destroys it with the database. There is no borrowed-storage initialization mode in 0.2.0.
+Fresh mounts the backend during `init()`, uses it for database and application files, unmounts it during `deinit()`, and destroys it with the database. There is no borrowed-storage initialization mode in 0.2.1.
 
 ## Application files
 
@@ -296,6 +296,6 @@ After `deinit()`, another `MemoryStorage(volume)` can mount the same external vo
 
 ## Failure and removal behavior
 
-Fresh 0.2.0 fails closed when storage operations fail. Short writes, read failures, sync failures, close failures, capacity-query failures, and unavailable media are returned as `FreshResult` failures.
+Fresh 0.2.1 fails closed when storage operations fail. Short writes, read failures, sync failures, close failures, capacity-query failures, and unavailable media are returned as `FreshResult` failures.
 
 Automatic removable-media remount and hot-swap recovery are not implemented. Applications should treat card removal while Fresh is active as a storage failure and perform a controlled shutdown or restart before reinitializing the backend.

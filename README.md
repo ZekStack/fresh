@@ -242,9 +242,9 @@ Regression sketches are compiled in CI but require manual execution on hardware.
 - [Formatting storage](docs/format.md)
 - [API reference](docs/api.md)
 - [Examples](docs/examples.md)
-- [Migrating to 0.2.0](docs/migration-0.2.0.md)
-- [0.2.0 release notes](docs/release-notes-0.2.0.md)
-- [Storage implementation progress](docs/0.2.0-storage-progress.md)
+- [Migrating to 0.2.1](docs/migration-0.2.1.md)
+- [0.2.1 release notes](docs/release-notes-0.2.1.md)
+- [Storage implementation progress](docs/0.2.1-storage-progress.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Release hardening](docs/release-hardening.md)
 
@@ -258,13 +258,13 @@ Regression sketches are compiled in CI but require manual execution on hardware.
 | Persistence encoding | ArduinoJson MessagePack |
 | PSRAM | Used for eligible internal allocations when available |
 | Exceptions | Not used by the Fresh API |
-| Status | `0.2.0` pre-release |
+| Status | `0.2.1` pre-release |
 
 ## Limitations
 
 Fresh is not intended for large datasets, high-frequency telemetry, SQL-style queries, multi-device concurrency, or data that must be durable after every public mutation.
 
-Automatic SD hot-swap recovery, automatic remount, and multiple simultaneously managed volumes are not part of 0.2.0-rc.1.
+Automatic SD hot-swap recovery, automatic remount, and multiple simultaneously managed volumes are not part of 0.2.1-rc.1.
 
 ## License
 

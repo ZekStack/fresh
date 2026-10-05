@@ -1,6 +1,6 @@
-# Fresh 0.2.0 release hardening
+# Fresh 0.2.1 release hardening
 
-Fresh 0.2.0 preserves one manifest, snapshot, journal, and backup format across supported storage backends. The storage redesign changes source APIs and lifecycle ownership, not the durable database model.
+Fresh 0.2.1 preserves one manifest, snapshot, journal, and backup format across supported storage backends. The storage redesign changes source APIs and lifecycle ownership, not the durable database model.
 
 ## Completeness metadata
 
@@ -117,7 +117,7 @@ CI validates:
 
 ## Physical validation
 
-Before tagging v0.2.0, execute runtime qualification for:
+Before tagging v0.2.1, execute runtime qualification for:
 
 - LittleFS two-boot persistence;
 - managed and external SDSPI;

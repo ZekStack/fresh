@@ -36,7 +36,7 @@ Formatting can erase data. Keep it disabled unless destructive recovery is inten
 
 ## Arduino `LittleFS`, `SD`, or `SD_MMC` says the filesystem is not mounted
 
-Fresh 0.2.0 uses ESP-IDF drivers directly and does not initialize Arduino filesystem singleton objects.
+Fresh 0.2.1 uses ESP-IDF drivers directly and does not initialize Arduino filesystem singleton objects.
 
 Use:
 
