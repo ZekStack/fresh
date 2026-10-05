@@ -8,6 +8,7 @@
     "littlefs",
     "sd",
     "arduinojson",
+    "spi-flash",
     "storage"
   ],
   "repository": {

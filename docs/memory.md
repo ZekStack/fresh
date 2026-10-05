@@ -45,6 +45,7 @@ Built-in behavior:
 | `FreshLittleFSStorage` | `Internal` | `Internal` and `PreferExternal` run internally; `RequireExternal` is rejected |
 | `FreshSDStorage` | `Any` | configured placement is honored |
 | `FreshEMMCStorage` | `Any` | configured placement is honored |
+| `FreshSPIFlashStorage` | `Any` | configured placement is honored |
 | custom storage | `Any` by default | backend may override the requirement |
 
 LittleFS is deliberately constrained because internal-flash operations must not depend on a PSRAM-backed task stack while flash access is active. `PreferExternal` is a preference, so Fresh safely constrains it to an internal stack. `RequireExternal` is a hard requirement: if the selected backend requires an internal stack, `init()` fails with `FreshStatus::InvalidArgument` rather than silently violating the requested contract.
@@ -72,7 +73,7 @@ db.init("/fresh", config, std::move(storage));
 - `backupBufferPlacement`;
 - `backupBufferRegion`.
 
-For LittleFS with `PreferExternal`, diagnostics report the requested external preference, an internal effective placement, and `FreshTaskStackConstraint::StorageRequiresInternal`. For an unconstrained SD/eMMC backend, requested and effective placements match. A LittleFS configuration using `RequireExternal` is rejected before the backend is mounted, so there is no running-task diagnostic state for that invalid combination.
+For LittleFS with `PreferExternal`, diagnostics report the requested external preference, an internal effective placement, and `FreshTaskStackConstraint::StorageRequiresInternal`. For an unconstrained SD/eMMC/external-SPI-flash backend, requested and effective placements match. A LittleFS configuration using `RequireExternal` is rejected before the backend is mounted, so there is no running-task diagnostic state for that invalid combination.
 
 ## Ownership
 

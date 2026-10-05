@@ -12,7 +12,7 @@ Fresh keeps small document collections and append-style logs in RAM while a back
 
 - RAM-first create, update, delete, and append operations.
 - General JSON document models and append-style stream models.
-- Owned LittleFS, SDSPI, SDMMC, eMMC, and custom storage backends.
+- Owned LittleFS, SDSPI, SDMMC, eMMC, external SPI NOR flash, and custom storage backends.
 - Application-file access through `db.storage()`.
 - Destructive whole-volume formatting through `db.format()`.
 - Background persistence, forced sync, streaming backup, and restore.
@@ -130,6 +130,7 @@ Supported built-in backends:
 - `FreshSDStorage` with SDSPI
 - `FreshSDStorage` with SDMMC
 - `FreshEMMCStorage`
+- `FreshSPIFlashStorage` with FATFS and wear levelling
 
 Custom classes can derive from `FreshStorage`.
 
@@ -223,6 +224,7 @@ Additional lifecycle rules:
 | `SDSPIStorage` | SD card over SPI. |
 | `SDMMCStorage` | SD card over SDMMC, including Waveshare ESP32-P4 pins and power setup. |
 | `EMMCStorage` | Dedicated eMMC backend. |
+| `SPIFlashStorage` | External SPI NOR flash with FATFS and wear levelling. |
 | `SameFilesystemBackup` | Write a backup archive through `db.storage()`. |
 | `CustomStorage` | Owned custom backend over an external medium. |
 | `StorageLifecycleRegressionTest` | Storage ownership, path protection, and shutdown. |
@@ -252,7 +254,7 @@ Regression sketches are compiled in CI but require manual execution on hardware.
 | --- | --- |
 | Framework | Arduino as an ESP-IDF component / Arduino ESP32 |
 | Language | C++20 |
-| Storage drivers | ESP-IDF LittleFS, SDSPI, SDMMC, eMMC, custom |
+| Storage drivers | ESP-IDF LittleFS, SDSPI, SDMMC, eMMC, external SPI NOR, custom |
 | Persistence encoding | ArduinoJson MessagePack |
 | PSRAM | Used for eligible internal allocations when available |
 | Exceptions | Not used by the Fresh API |

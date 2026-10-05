@@ -52,6 +52,9 @@ jobs:
       - name: Check version consistency
         run: python3 scripts/check_version_consistency.py
 
+      - name: Check SPI flash storage contract
+        run: python3 scripts/check_spi_flash_storage_contract.py
+
   arduino-lint:
     runs-on: [self-hosted, zekstack-ci]
     needs: source-audit
