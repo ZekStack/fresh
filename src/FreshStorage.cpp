@@ -1108,6 +1108,12 @@ FreshResult Fresh::recordToJson(const FreshPendingRecord &record, JsonDocument &
 }
 
 FreshResult Fresh::syncDirty(bool force) {
+	// Preserve the pre-existing shutdown/format barrier through callback dispatch.
+	// Application callbacks must not invoke blocking persistence operations.
+	FreshLock completionBarrier(*_syncMutex);
+	if (!completionBarrier) {
+		return FreshResult::failure(FreshStatus::InternalError, "failed to lock sync completion barrier");
+	}
 	FreshSyncReport report;
 	bool hadWork = false;
 	FreshResult result = syncDirtyImpl(force, report, hadWork);
