@@ -10,6 +10,19 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+
+#if defined(FRESH_TESTING)
+#include <atomic>
+#include "internal/FreshPersistenceTesting.h"
+
+namespace {
+std::atomic<bool> injectPersistedSizeMismatch{false};
+}
+
+void FreshTestInjectPersistedSizeMismatch() {
+	injectPersistedSizeMismatch.store(true);
+}
+#endif
 #include <set>
 #include <utility>
 
@@ -100,7 +113,11 @@ FreshResult FreshSerializePayload(
 	if (!valid) {
 		return valid;
 	}
-	const size_t payloadBytes = measureMsgPack(payload);
+	size_t payloadBytes = measureMsgPack(payload);
+#if defined(FRESH_TESTING)
+	// Test the defensive boundary without mutating real persisted JSON.
+	if (injectPersistedSizeMismatch.exchange(false)) ++payloadBytes;
+#endif
 	if (expectedPayloadBytes != 0 && payloadBytes != expectedPayloadBytes) {
 		return FreshResult::failure(
 		    FreshStatus::InternalError,
