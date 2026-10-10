@@ -4,6 +4,7 @@
 
 #if defined(FRESH_TESTING)
 #include <internal/FreshMemory.h>
+#include <internal/FreshPersistenceTesting.h>
 #endif
 
 #include <atomic>
@@ -205,7 +206,103 @@ bool testTimedOutFinalSyncIntentIsPreserved() {
 	return persisted;
 }
 
+bool testSnapshotPreflightIsReportedAndRetryable() {
+	const std::string path = testPath("snapshot_preflight");
+	FreshConfig config;
+	config.syncIntervalMS = 60000;
+	config.maxDocumentBytes = 256;
+	config.maxJournalRecordBytes = 512;
+	config.maxSnapshotBytes = 768;
+	Fresh db;
+	if (!expectResult(db.init(path.c_str(), config), "init snapshot preflight")) return false;
+	FreshModelResult model = db.createModel("Oversized");
+	if (!expect(static_cast<bool>(model), "create oversized model")) return false;
+
+	std::string largeValue(120, 'x');
+	for (int index = 0; index < 6; ++index) {
+		JsonDocument doc;
+		doc["_id"] = std::string("record-") + std::to_string(index);
+		doc["data"] = largeValue;
+		if (!expectResult(model.model.create(doc), "create snapshot record")) return false;
+	}
+
+	int legacyCallbacks = 0;
+	int detailedCallbacks = 0;
+	bool callbackCanInspect = false;
+	FreshSyncReport last;
+	db.onSync([&](FreshResult) {
+		legacyCallbacks++;
+		callbackCanInspect = db.diagnostics().syncAttempts > 0;
+	});
+	db.onSyncDetailed([&](const FreshSyncReport &report) {
+		detailedCallbacks++;
+		last = report;
+	});
+	FreshResult failed = db.forceSync();
+	FreshDiagnostics diagnostics = db.diagnostics();
+	const bool correctlyReported = expect(!failed && failed.status == FreshStatus::SizeLimitExceeded,
+	                                      "oversized snapshot was not rejected") &&
+	    expect(legacyCallbacks == 1 && detailedCallbacks == 1,
+	           "preflight failure did not dispatch exactly one callback of each type") &&
+	    expect(callbackCanInspect, "callback could not inspect database diagnostics") &&
+	    expect(last.stage == FreshSyncStage::Preflight &&
+	           last.payload == FreshSyncPayload::Snapshot &&
+	           last.modelName == "Oversized" &&
+	           last.actualBytes > config.maxSnapshotBytes &&
+	           last.limitBytes == config.maxSnapshotBytes,
+	           "preflight report did not identify the oversized model") &&
+	    expect(diagnostics.syncFailures == 1 && diagnostics.consecutiveSyncFailures == 1,
+	           "sync diagnostics did not count preflight failure");
+
+	for (int index = 1; index < 6; ++index) {
+		const std::string id = std::string("record-") + std::to_string(index);
+		if (!expectResult(model.model.deleteById(id.c_str()), "remove oversized snapshot record")) return false;
+	}
+	FreshResult recovered = db.forceSync();
+	FreshDiagnostics recoveredDiagnostics = db.diagnostics();
+	const bool ok = correctlyReported && expectResult(recovered, "retry after reducing snapshot") &&
+	    expect(recoveredDiagnostics.syncSuccesses == 1 &&
+	           recoveredDiagnostics.consecutiveSyncFailures == 0,
+	           "successful retry did not reset failure streak");
+	(void)db.deinit(FreshDeinitOptions{.sync = false});
+	return ok;
+}
+
 #if defined(FRESH_TESTING)
+bool testPersistedSizeMismatchIsRejected() {
+	const std::string path = testPath("size_mismatch");
+	Fresh db;
+	FreshModelResult items = prepareModel(db, path.c_str());
+	if (!items) return false;
+
+	FreshSyncReport report;
+	int callbacks = 0;
+	db.onSyncDetailed([&](const FreshSyncReport &value) {
+		report = value;
+		callbacks++;
+	});
+	FreshTestInjectPersistedSizeMismatch();
+	FreshResult failed = db.forceSync();
+	const bool rejected = expect(!failed && failed.status == FreshStatus::InternalError,
+	                             "injected serialization size mismatch was accepted") &&
+	    expect(callbacks == 1 && report.stage == FreshSyncStage::SnapshotWrite &&
+	           report.payload == FreshSyncPayload::Snapshot &&
+	           report.modelName == "Items" &&
+	           report.actualBytes != report.expectedBytes,
+	           "size mismatch failure was not reported with observed bytes");
+	FreshResult retry = db.forceSync();
+	const bool recovered = expectResult(retry, "retry after injected size mismatch");
+	(void)db.deinit(FreshDeinitOptions{.sync = false});
+	FreshConfig config;
+	config.syncIntervalMS = 60000;
+	if (!expectResult(db.init(path.c_str(), config), "reopen after mismatch retry")) return false;
+	FreshResult found = db.model("Items").findById("item-1");
+	const bool durable = expectResult(found, "recover item after injected size mismatch") &&
+	                     expect((found.doc["value"] | 0) == 1, "recovered document is incorrect");
+	(void)db.deinit(FreshDeinitOptions{.sync = false});
+	return rejected && recovered && durable;
+}
+
 bool testAllocationFailureIsRetryable() {
 	const std::string path = testPath("allocation");
 	Fresh db;
@@ -260,8 +357,10 @@ void setup() {
 	runTest("invalid patch is atomic", testInvalidPatchIsAtomic);
 	runTest("predicate reentrancy returns busy", testPredicateReentrancyReturnsBusy);
 	runTest("failed final sync is retryable", testFailedFinalSyncIsRetryable);
+	runTest("snapshot preflight is reported and retryable", testSnapshotPreflightIsReportedAndRetryable);
 	runTest("timed-out final sync intent is preserved", testTimedOutFinalSyncIntentIsPreserved);
 #if defined(FRESH_TESTING)
+	runTest("persisted size mismatch fails closed", testPersistedSizeMismatchIsRejected);
 	runTest("allocation failure is retryable", testAllocationFailureIsRetryable);
 #endif
 
