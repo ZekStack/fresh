@@ -624,7 +624,8 @@ void Fresh::emitSync(FreshResult result, const FreshSyncReport &report) {
 			detailed = _onSyncDetailed;
 		}
 	}
-	// Never call application hooks under either the database or sync mutex.
+	// Hooks run without the database mutex. The sync completion barrier remains
+	// held to preserve final-sync and shutdown ordering.
 	if (callback) callback(result);
 	if (detailed) detailed(report);
 }
