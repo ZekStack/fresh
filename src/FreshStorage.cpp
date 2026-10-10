@@ -457,7 +457,11 @@ FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch, bool &snap
 	return FreshResult::success("snapshot written");
 }
 
-FreshModelSyncResult FreshWriteActiveModelBatch(const FreshModelSyncBatch &batch, FreshSyncReport &report) {
+FreshModelSyncResult FreshWriteActiveModelBatch(
+    const FreshModelSyncBatch &batch,
+    FreshSyncReport &report,
+    size_t maxJournalRecordBytes
+) {
 	FreshModelSyncResult result;
 	result.result = FreshResult::success("model synced");
 
@@ -467,7 +471,7 @@ FreshModelSyncResult FreshWriteActiveModelBatch(const FreshModelSyncBatch &batch
 		report.modelName = batch.name;
 		report.expectedBytes = record.payload.size();
 		report.actualBytes = record.payload.size();
-		report.limitBytes = FreshMaxPersistedPayloadBytes;
+		report.limitBytes = maxJournalRecordBytes;
 		report.attemptedWrite = true;
 		FreshResult writeResult = FreshWriteJournalRecord(batch, record);
 		if (!writeResult) {
@@ -1180,6 +1184,9 @@ FreshResult Fresh::syncDirtyImpl(bool force, FreshSyncReport &report, bool &hadW
 		shouldWriteManifest = _manifestDirty;
 		manifestEpoch = _manifestEpoch;
 		if (shouldWriteManifest) {
+			report.stage = FreshSyncStage::Preflight;
+			report.payload = FreshSyncPayload::Manifest;
+			report.modelName.clear();
 			size_t modelCount = 0;
 			for (const auto &entry : _models) {
 				if (!entry.second->dropped) modelCount++;
@@ -1250,6 +1257,13 @@ FreshResult Fresh::syncDirtyImpl(bool force, FreshSyncReport &report, bool &hadW
 			if (!state->dirty && state->pending.empty() && !state->snapshotRequired) {
 				continue;
 			}
+			report.stage = FreshSyncStage::Preflight;
+			report.payload = FreshSyncPayload::None;
+			report.modelName = state->name;
+			report.expectedBytes = 0;
+			report.actualBytes = 0;
+			report.limitBytes = 0;
+			report.attemptedWrite = false;
 
 			FreshModelSyncBatch batch;
 			batch.state = std::static_pointer_cast<void>(state);
@@ -1456,7 +1470,7 @@ FreshResult Fresh::syncDirtyImpl(bool force, FreshSyncReport &report, bool &hadW
 
 	// Active storage is made durable before a manifest can point at it.
 	for (const FreshModelSyncBatch &batch : activeBatches) {
-		FreshModelSyncResult syncResult = FreshWriteActiveModelBatch(batch, report);
+		FreshModelSyncResult syncResult = FreshWriteActiveModelBatch(batch, report, _config.maxJournalRecordBytes);
 		{
 			FreshLock lock(*_mutex);
 			auto state = std::static_pointer_cast<FreshModel::State>(batch.state);
