@@ -1503,7 +1503,6 @@ FreshResult Fresh::syncDirtyImpl(bool force, FreshSyncReport &report, bool &hadW
 			}
 		}
 		if (!last) {
-			emitSync(last);
 			return last;
 		}
 	}
@@ -1536,7 +1535,6 @@ FreshResult Fresh::syncDirtyImpl(bool force, FreshSyncReport &report, bool &hadW
 		}
 		last = syncResult.result;
 		if (!last) {
-			emitSync(last);
 			return last;
 		}
 	}
