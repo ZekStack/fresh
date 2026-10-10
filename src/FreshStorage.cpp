@@ -90,12 +90,24 @@ FreshResult FreshAllocateBuffer(
 	return FreshResult::success();
 }
 
-FreshResult FreshSerializePayload(const JsonDocument &payload, FreshBuffer &bytes, const char *label) {
+FreshResult FreshSerializePayload(
+    const JsonDocument &payload,
+    FreshBuffer &bytes,
+    const char *label,
+    size_t expectedPayloadBytes
+) {
 	FreshResult valid = FreshValidateJsonDocument(payload, "persisted payload");
 	if (!valid) {
 		return valid;
 	}
 	const size_t payloadBytes = measureMsgPack(payload);
+	if (expectedPayloadBytes != 0 && payloadBytes != expectedPayloadBytes) {
+		return FreshResult::failure(
+		    FreshStatus::InternalError,
+		    "persisted payload size changed between preflight and serialization",
+		    payloadBytes
+		);
+	}
 	if (payloadBytes == 0) {
 		return FreshResult::failure(FreshStatus::FileSystemError, label);
 	}
@@ -248,11 +260,12 @@ FreshResult writeDurableSlot(
     const JsonDocument &payload,
     uint64_t currentGeneration,
     size_t maxPayloadBytes,
+    size_t expectedPayloadBytes,
     JsonDocument *verifiedPayload = nullptr,
     uint64_t *committedGeneration = nullptr
 ) {
 	FreshBuffer bytes;
-	FreshResult serializeResult = FreshSerializePayload(payload, bytes, "failed to serialize durable slot");
+	FreshResult serializeResult = FreshSerializePayload(payload, bytes, "failed to serialize durable slot", expectedPayloadBytes);
 	if (!serializeResult) {
 		return serializeResult;
 	}
@@ -400,6 +413,7 @@ FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch, bool &snap
 	    batch.snapshot,
 	    slot.generation,
 	    batch.maxSnapshotBytes,
+	    batch.snapshotPayloadBytes,
 	    &verified
 	);
 	if (!writeResult) {
@@ -426,11 +440,18 @@ FreshResult FreshWriteSnapshotBatch(const FreshModelSyncBatch &batch, bool &snap
 	return FreshResult::success("snapshot written");
 }
 
-FreshModelSyncResult FreshWriteActiveModelBatch(const FreshModelSyncBatch &batch) {
+FreshModelSyncResult FreshWriteActiveModelBatch(const FreshModelSyncBatch &batch, FreshSyncReport &report) {
 	FreshModelSyncResult result;
 	result.result = FreshResult::success("model synced");
 
 	for (const FreshJournalSyncRecord &record : batch.records) {
+		report.stage = FreshSyncStage::JournalWrite;
+		report.payload = FreshSyncPayload::Journal;
+		report.modelName = batch.name;
+		report.expectedBytes = record.payload.size();
+		report.actualBytes = record.payload.size();
+		report.limitBytes = FreshMaxPersistedPayloadBytes;
+		report.attemptedWrite = true;
 		FreshResult writeResult = FreshWriteJournalRecord(batch, record);
 		if (!writeResult) {
 			result.result = writeResult;
@@ -441,10 +462,20 @@ FreshModelSyncResult FreshWriteActiveModelBatch(const FreshModelSyncBatch &batch
 	}
 
 	if (batch.writeSnapshot) {
+		report.stage = FreshSyncStage::SnapshotWrite;
+		report.payload = FreshSyncPayload::Snapshot;
+		report.modelName = batch.name;
+		report.expectedBytes = batch.snapshotPayloadBytes;
+		report.actualBytes = batch.snapshotPayloadBytes;
+		report.limitBytes = batch.maxSnapshotBytes;
+		report.attemptedWrite = true;
 		bool snapshotWritten = false;
 		FreshResult snapshotResult = FreshWriteSnapshotBatch(batch, snapshotWritten);
 		result.snapshotWritten = snapshotWritten;
 		if (!snapshotResult) {
+			if (snapshotResult.message == "persisted payload size changed between preflight and serialization") {
+				report.actualBytes = snapshotResult.affectedCount;
+			}
 			result.result = snapshotResult;
 			return result;
 		}
@@ -641,7 +672,7 @@ FreshResult Fresh::readManifest() {
 	return FreshResult::success();
 }
 
-FreshResult Fresh::writeManifest(const JsonDocument &manifest) {
+FreshResult Fresh::writeManifest(const JsonDocument &manifest, size_t expectedPayloadBytes) {
 	FreshResult valid = FreshValidateManifestPayload(manifest);
 	if (!valid) {
 		return valid;
@@ -651,6 +682,13 @@ FreshResult Fresh::writeManifest(const JsonDocument &manifest) {
 		return dirResult;
 	}
 	const size_t payloadBytes = measureMsgPack(manifest);
+	if (expectedPayloadBytes != 0 && payloadBytes != expectedPayloadBytes) {
+		return FreshResult::failure(
+		    FreshStatus::InternalError,
+		    "manifest size changed between preflight and write",
+		    payloadBytes
+		);
+	}
 	FreshResult sizeResult = checkPayloadSize(payloadBytes, FreshMaxPersistedPayloadBytes, "manifest");
 	if (!sizeResult) {
 		return sizeResult;
@@ -671,6 +709,7 @@ FreshResult Fresh::writeManifest(const JsonDocument &manifest) {
 	    manifest,
 	    slot.generation,
 	    FreshMaxPersistedPayloadBytes,
+	    payloadBytes,
 	    &verified
 	);
 	if (!writeResult) {
@@ -1052,6 +1091,21 @@ FreshResult Fresh::recordToJson(const FreshPendingRecord &record, JsonDocument &
 }
 
 FreshResult Fresh::syncDirty(bool force) {
+	FreshSyncReport report;
+	bool hadWork = false;
+	FreshResult result = syncDirtyImpl(force, report, hadWork);
+	if (hadWork || !result) {
+		report.status = result.status;
+		report.message = result.message;
+		if (!result && report.stage == FreshSyncStage::None) {
+			report.stage = FreshSyncStage::Preflight;
+		}
+		emitSync(result, report);
+	}
+	return result;
+}
+
+FreshResult Fresh::syncDirtyImpl(bool force, FreshSyncReport &report, bool &hadWork) {
 	if (!_storage || !_storage->isMounted()) {
 		return FreshResult::failure(FreshStatus::StorageUnavailable, "storage is unavailable");
 	}
@@ -1064,6 +1118,7 @@ FreshResult Fresh::syncDirty(bool force) {
 	JsonDocument manifest(&FreshJsonAllocator());
 	bool shouldWriteManifest = false;
 	uint32_t manifestEpoch = 0;
+	size_t manifestPayloadBytes = 0;
 	size_t requiredBytes = 0;
 	std::vector<FreshModelSyncBatch> activeBatches;
 	std::vector<FreshModelSyncBatch> droppedBatches;
@@ -1145,7 +1200,14 @@ FreshResult Fresh::syncDirty(bool force) {
 			}
 			jsonResult = FreshValidateManifestPayload(manifest);
 			if (!jsonResult) return jsonResult;
-			const size_t manifestPayloadBytes = measureMsgPack(manifest);
+			manifestPayloadBytes = measureMsgPack(manifest);
+			report.stage = FreshSyncStage::Preflight;
+			report.payload = FreshSyncPayload::Manifest;
+			report.modelName.clear();
+			report.expectedBytes = manifestPayloadBytes;
+			report.actualBytes = manifestPayloadBytes;
+			report.limitBytes = FreshMaxPersistedPayloadBytes;
+			report.attemptedWrite = false;
 			FreshResult manifestSize = checkPayloadSize(
 			    manifestPayloadBytes,
 			    FreshMaxPersistedPayloadBytes,
@@ -1191,6 +1253,13 @@ FreshResult Fresh::syncDirty(bool force) {
 					return recordResult;
 				}
 				const size_t recordBytes = measureMsgPack(recordDoc);
+				report.stage = FreshSyncStage::Preflight;
+				report.payload = FreshSyncPayload::Journal;
+				report.modelName = batch.name;
+				report.expectedBytes = recordBytes;
+				report.actualBytes = recordBytes;
+				report.limitBytes = _config.maxJournalRecordBytes;
+				report.attemptedWrite = false;
 				FreshResult sizeResult = checkPayloadSize(
 				    recordBytes,
 				    _config.maxJournalRecordBytes,
@@ -1318,6 +1387,13 @@ FreshResult Fresh::syncDirty(bool force) {
 				);
 				if (!jsonResult) return jsonResult;
 				batch.snapshotPayloadBytes = measureMsgPack(batch.snapshot);
+				report.stage = FreshSyncStage::Preflight;
+				report.payload = FreshSyncPayload::Snapshot;
+				report.modelName = batch.name;
+				report.expectedBytes = batch.snapshotPayloadBytes;
+				report.actualBytes = batch.snapshotPayloadBytes;
+				report.limitBytes = _config.maxSnapshotBytes;
+				report.attemptedWrite = false;
 				FreshResult snapshotSizeResult = checkPayloadSize(
 				    batch.snapshotPayloadBytes,
 				    _config.maxSnapshotBytes,
@@ -1337,20 +1413,27 @@ FreshResult Fresh::syncDirty(bool force) {
 		if (!shouldWriteManifest && activeBatches.empty() && droppedBatches.empty()) {
 			return FreshResult::success("nothing dirty");
 		}
+		hadWork = true;
 	}
 
 	emitEvent({.type = FreshEventType::SyncStarted, .result = FreshResult::success("sync started")});
 
 	FreshResult last = FreshResult::success("nothing dirty");
+	report.stage = FreshSyncStage::Preflight;
+	report.payload = FreshSyncPayload::None;
+	report.modelName.clear();
+	report.expectedBytes = requiredBytes;
+	report.actualBytes = requiredBytes;
+	report.limitBytes = 0;
+	report.attemptedWrite = false;
 	FreshResult spaceResult = checkFreeSpace(requiredBytes);
 	if (!spaceResult) {
-		emitSync(spaceResult);
 		return spaceResult;
 	}
 
 	// Active storage is made durable before a manifest can point at it.
 	for (const FreshModelSyncBatch &batch : activeBatches) {
-		FreshModelSyncResult syncResult = FreshWriteActiveModelBatch(batch);
+		FreshModelSyncResult syncResult = FreshWriteActiveModelBatch(batch, report);
 		{
 			FreshLock lock(*_mutex);
 			auto state = std::static_pointer_cast<FreshModel::State>(batch.state);
@@ -1395,14 +1478,24 @@ FreshResult Fresh::syncDirty(bool force) {
 
 		last = syncResult.result;
 		if (!last) {
-			emitSync(last);
 			return last;
 		}
 	}
 
 	// The manifest is the commit point for create, rename, drop, and import.
 	if (shouldWriteManifest) {
-		last = writeManifest(manifest);
+		report.stage = FreshSyncStage::ManifestWrite;
+		report.payload = FreshSyncPayload::Manifest;
+		report.modelName.clear();
+		report.expectedBytes = manifestPayloadBytes;
+		report.actualBytes = manifestPayloadBytes;
+		report.limitBytes = FreshMaxPersistedPayloadBytes;
+		report.attemptedWrite = true;
+		last = writeManifest(manifest, manifestPayloadBytes);
+		if (last.message == "manifest size changed between preflight and write" ||
+		    last.message == "persisted payload size changed between preflight and serialization") {
+			report.actualBytes = last.affectedCount;
+		}
 		{
 			FreshLock lock(*_mutex);
 			if (last && _manifestEpoch == manifestEpoch) {
@@ -1418,6 +1511,13 @@ FreshResult Fresh::syncDirty(bool force) {
 	// Once the committed manifest no longer references a dropped model, its
 	// immutable storage directory can be removed without risking data loss.
 	for (const FreshModelSyncBatch &batch : droppedBatches) {
+		report.stage = FreshSyncStage::Cleanup;
+		report.payload = FreshSyncPayload::None;
+		report.modelName = batch.name;
+		report.expectedBytes = 0;
+		report.actualBytes = 0;
+		report.limitBytes = 0;
+		report.attemptedWrite = true;
 		FreshModelSyncResult syncResult = FreshDeleteModelBatch(batch);
 		{
 			FreshLock lock(*_mutex);
@@ -1442,7 +1542,6 @@ FreshResult Fresh::syncDirty(bool force) {
 	}
 
 	emitEvent({.type = FreshEventType::SyncFinished, .result = last});
-	emitSync(last);
 	return last;
 }
 
