@@ -191,9 +191,11 @@ not durable records. No database document values are included.
 
 A sync attempt that has dirty work produces exactly one pair of callbacks.
 Early failures are reported too; no-op successful flushes do not emit callbacks.
-Callbacks are invoked **after** release of the database and sync locks, so a
-callback may safely call read-only inspection methods such as `diagnostics()`.
-Avoid blocking the callback because the task initiating sync waits for it.
+Callbacks are invoked without holding the database mutex, so a callback may
+safely call read-only inspection methods such as `diagnostics()`. Fresh keeps
+the recursive synchronization completion barrier until callbacks return to
+preserve shutdown and final-sync ordering. Do not call blocking persistence or
+lifecycle operations from a callback, or block it unnecessarily.
 
 A snapshot whose entire serialized model exceeds `maxSnapshotBytes` is rejected
 with `SizeLimitExceeded`, even if every individual record is smaller than
