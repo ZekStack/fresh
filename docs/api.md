@@ -175,6 +175,34 @@ FreshDiagnostics diagnostics() const;
 
 `flush()` writes captured pending journal data. `forceSync()` also forces checkpoint processing.
 
+### Structured sync diagnostics
+
+The existing `onSync(FreshSyncCallback)` callback remains supported. Applications
+may additionally register `onSyncDetailed(FreshSyncDetailedCallback)` to receive
+an owned `FreshSyncReport` with the failing stage (`Preflight`,
+`JournalWrite`, `SnapshotWrite`, `ManifestWrite`, or `Cleanup`), payload
+kind, model name (empty for database-wide failures), expected and observed
+MessagePack byte counts, size limit, and error message/status.
+
+`FreshDiagnostics` also exposes `syncAttempts`, `syncSuccesses`,
+`syncFailures`, `consecutiveSyncFailures`, `lastSuccessfulSyncMs` (uptime
+milliseconds), and `lastSyncFailure`. These values are in-memory diagnostics,
+not durable records. No database document values are included.
+
+A sync attempt that has dirty work produces exactly one pair of callbacks.
+Early failures are reported too; no-op successful flushes do not emit callbacks.
+Callbacks are invoked without holding the database mutex, so a callback may
+safely call read-only inspection methods such as `diagnostics()`. Fresh keeps
+the recursive synchronization completion barrier until callbacks return to
+preserve shutdown and final-sync ordering. Do not call blocking persistence or
+lifecycle operations from a callback, or block it unnecessarily.
+
+A snapshot whose entire serialized model exceeds `maxSnapshotBytes` is rejected
+with `SizeLimitExceeded`, even if every individual record is smaller than
+`maxDocumentBytes`. This change does not split a model into multiple snapshots
+or increase the current size limits. A preflight/write size disagreement is
+reported as `InternalError` before the durable slot is written.
+
 ## Backup
 
 ```cpp

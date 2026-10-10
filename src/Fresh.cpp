@@ -515,6 +515,7 @@ FreshResult Fresh::deinit(const FreshDeinitOptions &options) {
 		_models.clear();
 		_diagnostics = FreshDiagnostics();
 		_onSync = nullptr;
+		_onSyncDetailed = nullptr;
 		_onEvent = nullptr;
 		_onTimeGet = nullptr;
 		_onBackupStart = nullptr;
@@ -603,13 +604,30 @@ void Fresh::emitEvent(FreshEvent event) {
 	if (callback) callback(event);
 }
 
-void Fresh::emitSync(FreshResult result) {
+void Fresh::emitSync(FreshResult result, const FreshSyncReport &report) {
 	FreshSyncCallback callback;
+	FreshSyncDetailedCallback detailed;
 	{
 		FreshLock lock(*_mutex);
-		callback = _onSync;
+		if (lock) {
+			_diagnostics.syncAttempts++;
+			if (result) {
+				_diagnostics.syncSuccesses++;
+				_diagnostics.consecutiveSyncFailures = 0;
+				_diagnostics.lastSuccessfulSyncMs = millis();
+			} else {
+				_diagnostics.syncFailures++;
+				_diagnostics.consecutiveSyncFailures++;
+				_diagnostics.lastSyncFailure = report;
+			}
+			callback = _onSync;
+			detailed = _onSyncDetailed;
+		}
 	}
+	// Hooks run without the database mutex. The sync completion barrier remains
+	// held to preserve final-sync and shutdown ordering.
 	if (callback) callback(result);
+	if (detailed) detailed(report);
 }
 
 FreshStorageInfo Fresh::storageInfo() const {
@@ -646,6 +664,11 @@ FreshDiagnostics Fresh::diagnostics() const {
 void Fresh::onSync(FreshSyncCallback callback) {
 	FreshLock lock(*_mutex);
 	_onSync = callback;
+}
+
+void Fresh::onSyncDetailed(FreshSyncDetailedCallback callback) {
+	FreshLock lock(*_mutex);
+	_onSyncDetailed = callback;
 }
 
 void Fresh::onEvent(FreshEventCallback callback) {

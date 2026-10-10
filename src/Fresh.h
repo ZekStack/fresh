@@ -132,6 +132,37 @@ struct FreshResult {
 	static FreshResult failure(FreshStatus status, const char *message, size_t affectedCount = 0);
 };
 
+// Describes the persistence phase and payload responsible for the most recent
+// sync outcome. No document contents or credentials are retained.
+enum class FreshSyncStage : uint8_t {
+	None,
+	Preflight,
+	JournalWrite,
+	SnapshotWrite,
+	ManifestWrite,
+	Verification,
+	Cleanup,
+};
+
+enum class FreshSyncPayload : uint8_t {
+	None,
+	Journal,
+	Snapshot,
+	Manifest,
+};
+
+struct FreshSyncReport {
+	FreshStatus status = FreshStatus::Ok;
+	FreshSyncStage stage = FreshSyncStage::None;
+	FreshSyncPayload payload = FreshSyncPayload::None;
+	std::string modelName;
+	std::string message;
+	size_t expectedBytes = 0;
+	size_t actualBytes = 0;
+	size_t limitBytes = 0;
+	bool attemptedWrite = false;
+};
+
 using FreshInitResult = FreshResult;
 
 struct FreshValidationResult {
@@ -266,6 +297,12 @@ struct FreshDiagnostics {
 	std::vector<FreshModelLoadInfo> modelLoads;
 	size_t degradedModelCount = 0;
 	FreshGarbageCollectionDiagnostics garbageCollection;
+	uint64_t syncAttempts = 0;
+	uint64_t syncSuccesses = 0;
+	uint64_t syncFailures = 0;
+	uint64_t consecutiveSyncFailures = 0;
+	uint32_t lastSuccessfulSyncMs = 0;
+	FreshSyncReport lastSyncFailure;
 	Strata::Placement allocationPlacement = Strata::Placement::Default;
 	Strata::Placement requestedSyncTaskStackPlacement = Strata::Placement::Internal;
 	Strata::Placement effectiveSyncTaskStackPlacement = Strata::Placement::Internal;
@@ -330,6 +367,7 @@ using FreshBoolValidator = std::function<bool(const JsonDocument &)>;
 using FreshResultValidator = std::function<FreshValidationResult(const JsonDocument &)>;
 using FreshEventCallback = std::function<void(FreshEvent)>;
 using FreshSyncCallback = std::function<void(FreshResult)>;
+using FreshSyncDetailedCallback = std::function<void(const FreshSyncReport &)>;
 using FreshBackupCallback = std::function<void(FreshBackupInfo)>;
 using FreshTimeCallback = std::function<uint64_t()>;
 
@@ -528,6 +566,7 @@ class Fresh {
 	);
 
 	void onSync(FreshSyncCallback callback);
+	void onSyncDetailed(FreshSyncDetailedCallback callback);
 	void onEvent(FreshEventCallback callback);
 	void onTimeGet(FreshTimeCallback callback);
 	void onBackupStart(FreshBackupCallback callback);
@@ -577,7 +616,7 @@ class Fresh {
 	void syncLoop();
 	uint64_t now();
 	void emitEvent(FreshEvent event);
-	void emitSync(FreshResult result);
+	void emitSync(FreshResult result, const FreshSyncReport &report);
 	ArduinoJson::Allocator &FreshJsonAllocator() const;
 	ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement) const;
 	FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) const;
@@ -607,12 +646,13 @@ class Fresh {
 	FreshResult ensureDir(const std::string &path);
 	FreshResult checkFreeSpace(size_t requiredBytes) const;
 	FreshResult readManifest();
-	FreshResult writeManifest(const JsonDocument &manifest);
+	FreshResult writeManifest(const JsonDocument &manifest, size_t expectedPayloadBytes = 0);
 	FreshResult applyRecord(const std::shared_ptr<FreshModel::State> &state, const FreshPendingRecord &record);
 	FreshResult loadSnapshot(const std::shared_ptr<FreshModel::State> &state);
 	FreshResult loadJournal(const std::shared_ptr<FreshModel::State> &state);
 	FreshResult loadModel(const std::shared_ptr<FreshModel::State> &state);
 	FreshResult syncDirty(bool force);
+	FreshResult syncDirtyImpl(bool force, FreshSyncReport &report, bool &hadWork);
 
 	bool backupWriteByte(uint8_t byte);
 	void runBackupIfRequested();
@@ -646,6 +686,7 @@ class Fresh {
 	std::unique_ptr<FreshMutex> _syncMutex;
 
 	FreshSyncCallback _onSync;
+	FreshSyncDetailedCallback _onSyncDetailed;
 	FreshEventCallback _onEvent;
 	FreshTimeCallback _onTimeGet;
 	FreshBackupCallback _onBackupStart;
