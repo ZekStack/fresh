@@ -249,7 +249,8 @@ bool testSnapshotPreflightIsReportedAndRetryable() {
 	           last.payload == FreshSyncPayload::Snapshot &&
 	           last.modelName == "Oversized" &&
 	           last.actualBytes > config.maxSnapshotBytes &&
-	           last.limitBytes == config.maxSnapshotBytes,
+	           last.limitBytes == config.maxSnapshotBytes &&
+	           !last.attemptedWrite,
 	           "preflight report did not identify the oversized model") &&
 	    expect(diagnostics.syncFailures == 1 && diagnostics.consecutiveSyncFailures == 1,
 	           "sync diagnostics did not count preflight failure");
@@ -288,7 +289,8 @@ bool testPersistedSizeMismatchIsRejected() {
 	    expect(callbacks == 1 && report.stage == FreshSyncStage::SnapshotWrite &&
 	           report.payload == FreshSyncPayload::Snapshot &&
 	           report.modelName == "Items" &&
-	           report.actualBytes != report.expectedBytes,
+	           report.actualBytes != report.expectedBytes &&
+	           !report.attemptedWrite,
 	           "size mismatch failure was not reported with observed bytes");
 	FreshResult retry = db.forceSync();
 	const bool recovered = expectResult(retry, "retry after injected size mismatch");
@@ -301,6 +303,106 @@ bool testPersistedSizeMismatchIsRejected() {
 	                     expect((found.doc["value"] | 0) == 1, "recovered document is incorrect");
 	(void)db.deinit(FreshDeinitOptions{.sync = false});
 	return rejected && recovered && durable;
+}
+
+
+bool testFailedNewModelSnapshotPreservesCommittedManifest() {
+	const std::string path = testPath("manifest_baseline");
+	Fresh db;
+	FreshModelResult items = prepareModel(db, path.c_str());
+	if (!items || !expectResult(db.forceSync(), "persist baseline manifest")) return false;
+
+	FreshModelResult staged = db.createModel("Staged");
+	if (!expect(static_cast<bool>(staged), "create staged model")) return false;
+	FreshSyncReport report;
+	db.onSyncDetailed([&](const FreshSyncReport &value) { report = value; });
+	FreshTestInjectPersistedSizeMismatch();
+	FreshResult failed = db.forceSync();
+	const bool failureCorrect = expect(!failed && failed.status == FreshStatus::InternalError,
+	                                  "new-model snapshot mismatch was not rejected") &&
+	    expect(report.stage == FreshSyncStage::SnapshotWrite &&
+	           report.modelName == "Staged" && !report.attemptedWrite,
+	           "new model was written despite serialization mismatch");
+	(void)db.deinit(FreshDeinitOptions{.sync = false});
+
+	FreshConfig config;
+	config.syncIntervalMS = 60000;
+	if (!expectResult(db.init(path.c_str(), config), "reopen previous manifest")) return false;
+	FreshResult baseline = db.model("Items").findById("item-1");
+	const bool recovered = expectResult(baseline, "recovered previously committed model") &&
+	    expect((baseline.doc["value"] | 0) == 1, "committed document changed on failed snapshot") &&
+	    expect(!static_cast<bool>(db.model("Staged")), "uncommitted model appeared after reboot");
+	(void)db.deinit(FreshDeinitOptions{.sync = false});
+	return failureCorrect && recovered;
+}
+
+bool testJournalReplayAfterFailedSnapshotWithoutRetry() {
+	const std::string path = testPath("journal_replay");
+	Fresh db;
+	FreshModelResult items = prepareModel(db, path.c_str());
+	if (!items || !expectResult(db.forceSync(), "persist journal replay baseline")) return false;
+
+	JsonDocument patch;
+	patch["value"] = 2;
+	if (!expectResult(items.model.updateById("item-1", patch), "stage journal replay update")) return false;
+	FreshSyncReport report;
+	db.onSyncDetailed([&](const FreshSyncReport &value) { report = value; });
+	FreshTestInjectPersistedSizeMismatch();
+	FreshResult failed = db.forceSync();
+	const bool failureCorrect = expect(!failed && failed.status == FreshStatus::InternalError,
+	                                  "failed snapshot was not reported") &&
+	    expect(report.stage == FreshSyncStage::SnapshotWrite &&
+	           report.payload == FreshSyncPayload::Snapshot &&
+	           report.modelName == "Items" && !report.attemptedWrite,
+	           "failed snapshot was incorrectly reported as a completed write");
+	(void)db.deinit(FreshDeinitOptions{.sync = false});
+
+	FreshConfig config;
+	config.syncIntervalMS = 60000;
+	if (!expectResult(db.init(path.c_str(), config), "reopen durable journal")) return false;
+	FreshResult replayed = db.model("Items").findById("item-1");
+	const bool durable = expectResult(replayed, "replay journal after snapshot failure") &&
+	    expect((replayed.doc["value"] | 0) == 2,
+	           "durable journal record was not replayed after snapshot failure");
+	(void)db.deinit(FreshDeinitOptions{.sync = false});
+	return failureCorrect && durable;
+}
+
+bool testOutOfMemorySyncDiagnostics() {
+	const std::string path = testPath("sync_allocation");
+	Fresh db;
+	FreshModelResult items = prepareModel(db, path.c_str());
+	if (!items) return false;
+
+	int legacyCallbacks = 0;
+	int detailedCallbacks = 0;
+	FreshStatus observed = FreshStatus::Ok;
+	db.onSync([&](FreshResult result) {
+		legacyCallbacks++;
+		observed = result.status;
+	});
+	db.onSyncDetailed([&](const FreshSyncReport &report) {
+		detailedCallbacks++;
+		if (report.status != FreshStatus::OutOfMemory) observed = report.status;
+	});
+	FreshTestConfigureAllocationFailure(1, FreshAllocationCategory::DurableSlotPayload, 0, true);
+	FreshResult failure = db.forceSync();
+	FreshTestResetAllocationFailure();
+	FreshDiagnostics diagnostics = db.diagnostics();
+	const bool diagnosed = expect(!failure && failure.status == FreshStatus::OutOfMemory,
+	                             "durable payload allocation failure was not reported") &&
+	    expect(legacyCallbacks == 1 && detailedCallbacks == 1 && observed == FreshStatus::OutOfMemory,
+	           "allocation failure was not delivered once to both callbacks") &&
+	    expect(diagnostics.syncFailures == 1 && diagnostics.consecutiveSyncFailures == 1 &&
+	           diagnostics.lastSyncFailure.status == FreshStatus::OutOfMemory &&
+	           diagnostics.lastSyncFailure.modelName == "Items",
+	           "allocation failure diagnostics were lost");
+	FreshResult retry = db.forceSync();
+	const bool retried = expectResult(retry, "retry after durable buffer allocation failure") &&
+	    expect(db.diagnostics().consecutiveSyncFailures == 0,
+	           "successful retry did not clear out-of-memory failure streak");
+	(void)db.deinit(FreshDeinitOptions{.sync = false});
+	return diagnosed && retried;
 }
 
 bool testAllocationFailureIsRetryable() {
@@ -361,6 +463,9 @@ void setup() {
 	runTest("timed-out final sync intent is preserved", testTimedOutFinalSyncIntentIsPreserved);
 #if defined(FRESH_TESTING)
 	runTest("persisted size mismatch fails closed", testPersistedSizeMismatchIsRejected);
+	runTest("failed new model preserves manifest", testFailedNewModelSnapshotPreservesCommittedManifest);
+	runTest("journal replays after failed snapshot", testJournalReplayAfterFailedSnapshotWithoutRetry);
+	runTest("OOM synchronization diagnostics", testOutOfMemorySyncDiagnostics);
 	runTest("allocation failure is retryable", testAllocationFailureIsRetryable);
 #endif
 
