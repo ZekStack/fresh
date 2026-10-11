@@ -485,11 +485,15 @@ FreshResult FreshWriteSnapshotBatch(
 	report.expectedBytes = 0;
 	report.actualBytes = 0;
 	report.limitBytes = 0;
+	report.attemptedWrite = false;
 	bool journalExists = false;
 	FreshResult journalExistsResult = FreshFS.exists(batch.journalPath.c_str(), journalExists);
 	if (!journalExistsResult) return journalExistsResult;
-	if (journalExists && !FreshFS.remove(batch.journalPath.c_str())) {
-		return FreshResult::failure(FreshStatus::FileSystemError, "snapshot written but journal cleanup failed");
+	if (journalExists) {
+		report.attemptedWrite = true;
+		if (!FreshFS.remove(batch.journalPath.c_str())) {
+			return FreshResult::failure(FreshStatus::FileSystemError, "snapshot written but journal cleanup failed");
+		}
 	}
 	return FreshResult::success("snapshot written");
 }
