@@ -197,6 +197,25 @@ the recursive synchronization completion barrier until callbacks return to
 preserve shutdown and final-sync ordering. Do not call blocking persistence or
 lifecycle operations from a callback, or block it unnecessarily.
 
+`FreshSyncReport` retains the library's existing `std::string` convention. On a
+failed synchronization the report is moved into `FreshDiagnostics::lastSyncFailure`
+instead of copying its strings. The detailed callback receives a `const` reference
+valid only during that callback; copy values that must be retained. On
+`OutOfMemory`, `FreshSyncReport::message` is intentionally empty to avoid adding
+another string copy during failure reporting; `FreshResult::message` remains
+available through `onSync` or the synchronous method's return value. The numeric
+status, payload, stage, model name already captured before the failure, and byte
+counts remain available. This avoids extra diagnostic-string copies, but it does
+not claim all `std::string` or callback allocations are OOM-safe.
+
+`attemptedWrite` is true only after the relevant persistent mutation begins:
+a successful writable-file open (which may already truncate a slot), or the
+start of cleanup/removal. Serialization and preflight rejections before opening
+a writable file leave it false. `Verification` identifies failures during the
+read-back verification of a written durable slot; `Cleanup` identifies removal
+and journal-cleanup failures. `attemptedWrite` describes the reported phase,
+not whether an earlier phase in the same synchronization wrote any data.
+
 A snapshot whose entire serialized model exceeds `maxSnapshotBytes` is rejected
 with `SizeLimitExceeded`, even if every individual record is smaller than
 `maxDocumentBytes`. This change does not split a model into multiple snapshots
