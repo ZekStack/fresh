@@ -616,7 +616,7 @@ class Fresh {
 	void syncLoop();
 	uint64_t now();
 	void emitEvent(FreshEvent event);
-	void emitSync(FreshResult result, const FreshSyncReport &report);
+	void emitSync(const FreshResult &result, FreshSyncReport report);
 	ArduinoJson::Allocator &FreshJsonAllocator() const;
 	ArduinoJson::Allocator &FreshJsonAllocator(Strata::Placement placement) const;
 	FreshResult FreshCloneJson(JsonDocument &target, JsonVariantConst source, const char *label) const;
@@ -646,7 +646,11 @@ class Fresh {
 	FreshResult ensureDir(const std::string &path);
 	FreshResult checkFreeSpace(size_t requiredBytes) const;
 	FreshResult readManifest();
-	FreshResult writeManifest(const JsonDocument &manifest, size_t expectedPayloadBytes = 0);
+	FreshResult writeManifest(
+	    const JsonDocument &manifest,
+	    size_t expectedPayloadBytes = 0,
+	    FreshSyncReport *report = nullptr
+	);
 	FreshResult applyRecord(const std::shared_ptr<FreshModel::State> &state, const FreshPendingRecord &record);
 	FreshResult loadSnapshot(const std::shared_ptr<FreshModel::State> &state);
 	FreshResult loadJournal(const std::shared_ptr<FreshModel::State> &state);
