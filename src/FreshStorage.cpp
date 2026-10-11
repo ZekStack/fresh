@@ -17,10 +17,15 @@
 
 namespace {
 std::atomic<bool> injectPersistedSizeMismatch{false};
+std::atomic<bool> injectDurableVerificationFailure{false};
 }
 
 void FreshTestInjectPersistedSizeMismatch() {
 	injectPersistedSizeMismatch.store(true);
+}
+
+void FreshTestInjectDurableVerificationFailure() {
+	injectDurableVerificationFailure.store(true);
 }
 #endif
 #include <set>
@@ -326,6 +331,11 @@ FreshResult writeDurableSlot(
 	if (!durabilityResult) return durabilityResult;
 
 	if (report != nullptr) report->stage = FreshSyncStage::Verification;
+#if defined(FRESH_TESTING)
+	if (injectDurableVerificationFailure.exchange(false)) {
+		return FreshResult::failure(FreshStatus::FileSystemError, "injected durable slot verification failure");
+	}
+#endif
 	JsonDocument verified(&FreshJsonAllocator());
 	uint64_t verifiedGeneration = 0;
 	FreshResult verifyResult = FreshReadSlotFile(targetPath, verified, verifiedGeneration, maxPayloadBytes);
