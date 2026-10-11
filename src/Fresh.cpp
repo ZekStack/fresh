@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <utility>
 
 FreshResult FreshCollectGarbageStorage(
     const std::string &rootPath,
@@ -604,9 +605,10 @@ void Fresh::emitEvent(FreshEvent event) {
 	if (callback) callback(event);
 }
 
-void Fresh::emitSync(FreshResult result, const FreshSyncReport &report) {
+void Fresh::emitSync(const FreshResult &result, FreshSyncReport report) {
 	FreshSyncCallback callback;
 	FreshSyncDetailedCallback detailed;
+	const FreshSyncReport *completedReport = &report;
 	{
 		FreshLock lock(*_mutex);
 		if (lock) {
@@ -618,7 +620,8 @@ void Fresh::emitSync(FreshResult result, const FreshSyncReport &report) {
 			} else {
 				_diagnostics.syncFailures++;
 				_diagnostics.consecutiveSyncFailures++;
-				_diagnostics.lastSyncFailure = report;
+				_diagnostics.lastSyncFailure = std::move(report);
+				completedReport = &_diagnostics.lastSyncFailure;
 			}
 			callback = _onSync;
 			detailed = _onSyncDetailed;
@@ -627,7 +630,7 @@ void Fresh::emitSync(FreshResult result, const FreshSyncReport &report) {
 	// Hooks run without the database mutex. The sync completion barrier remains
 	// held to preserve final-sync and shutdown ordering.
 	if (callback) callback(result);
-	if (detailed) detailed(report);
+	if (detailed) detailed(*completedReport);
 }
 
 FreshStorageInfo Fresh::storageInfo() const {
