@@ -127,7 +127,18 @@ Inspect `FreshDiagnostics::lastSyncFailure` and the `onSyncDetailed` callback:
 - `SnapshotWrite / ManifestWrite`: durable serialization or filesystem I/O
   failed. A report containing different expected and observed byte counts
   indicates a persistence consistency problem rather than ordinary growth.
+- `Verification`: durable bytes were written but read-back verification failed;
+  inspect the payload kind and `attemptedWrite`, and avoid assuming the write
+  was rolled back.
+- `Cleanup`: a snapshot journal or dropped-model storage could not be cleaned up.
 - `Preflight + None`: check storage availability or free-space results.
+
+`attemptedWrite=false` means the reported phase did not reach a writable-file
+open or removal operation. It does not guarantee earlier journal records from
+the same synchronization were not persisted. Reports retain `std::string`
+fields, and `message` may be empty for `OutOfMemory` to avoid an additional
+allocation on the failure path. Use the `FreshStatus` and structured fields
+as the primary diagnostic contract.
 
 Fresh retains pending records for retry when a sync fails. A successful RAM-first
 mutation is **not proof of persistence**. Avoid power cycling or formatting a
