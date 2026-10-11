@@ -368,6 +368,38 @@ bool testJournalReplayAfterFailedSnapshotWithoutRetry() {
 	return failureCorrect && durable;
 }
 
+
+bool testVerificationFailureIsReportedAfterWrite() {
+	const std::string path = testPath("verification_failure");
+	Fresh db;
+	FreshModelResult items = prepareModel(db, path.c_str());
+	if (!items || !expectResult(db.forceSync(), "persist verification baseline")) return false;
+
+	JsonDocument patch;
+	patch["value"] = 4;
+	if (!expectResult(items.model.updateById("item-1", patch), "stage verification update")) return false;
+	FreshSyncReport report;
+	db.onSyncDetailed([&](const FreshSyncReport &value) { report = value; });
+	FreshTestInjectDurableVerificationFailure();
+	FreshResult failed = db.forceSync();
+	const bool correctlyReported = expect(!failed && failed.status == FreshStatus::FileSystemError,
+	                                      "verification fault did not fail synchronization") &&
+	    expect(report.stage == FreshSyncStage::Verification &&
+	           report.payload == FreshSyncPayload::Snapshot &&
+	           report.modelName == "Items" && report.attemptedWrite,
+	           "verification failure was not classified after durable write");
+	(void)db.deinit(FreshDeinitOptions{.sync = false});
+
+	FreshConfig config;
+	config.syncIntervalMS = 60000;
+	if (!expectResult(db.init(path.c_str(), config), "reopen after verification fault")) return false;
+	FreshResult found = db.model("Items").findById("item-1");
+	const bool recovered = expectResult(found, "read verified snapshot after injected failure") &&
+	    expect((found.doc["value"] | 0) == 4, "persisted update missing after verification fault");
+	(void)db.deinit(FreshDeinitOptions{.sync = false});
+	return correctlyReported && recovered;
+}
+
 bool testOutOfMemorySyncDiagnostics() {
 	const std::string path = testPath("sync_allocation");
 	Fresh db;
@@ -466,6 +498,7 @@ void setup() {
 	runTest("failed new model preserves manifest", testFailedNewModelSnapshotPreservesCommittedManifest);
 	runTest("journal replays after failed snapshot", testJournalReplayAfterFailedSnapshotWithoutRetry);
 	runTest("OOM synchronization diagnostics", testOutOfMemorySyncDiagnostics);
+	runTest("verification failure stage and recovery", testVerificationFailureIsReportedAfterWrite);
 	runTest("allocation failure is retryable", testAllocationFailureIsRetryable);
 #endif
 
