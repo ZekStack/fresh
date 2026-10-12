@@ -603,6 +603,10 @@ void setup() {
 		Serial.println("Failed to enable the SDMMC TF-card power gate");
 		return;
 	}
+	if (!psramFound()) {
+		Serial.println("Core-equivalent ESP32-P4 PSRAM is unavailable");
+		return;
+	}
 #endif
 	// Stable for reopen tests, unpredictable across boots: never reuse prior test data.
 	testRunId = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
