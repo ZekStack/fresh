@@ -3,6 +3,7 @@
 #include "internal/FreshMemory.h"
 
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <esp_system.h>
 #include <limits>
@@ -177,19 +178,20 @@ FreshResult FreshCloneJson(
 	FreshBuffer buffer;
 	if (!buffer.allocate(payloadBytes, placement, FreshAllocationCategory::JsonCloneBuffer)) {
 		target.clear();
-		std::string message = "failed to allocate ";
-		message += name;
-		message += " clone buffer";
-		return FreshResult::failure(FreshStatus::OutOfMemory, message.c_str());
+		char message[192] = {};
+		std::snprintf(message, sizeof(message),
+		              "failed to allocate %s clone buffer (bytes=%zu)", name, payloadBytes);
+		return FreshResult::failure(FreshStatus::OutOfMemory, message);
 	}
 
 	const size_t written = serializeMsgPack(source, buffer.data(), buffer.size());
 	if (written != payloadBytes) {
 		target.clear();
-		std::string message = "failed to serialize ";
-		message += name;
-		message += " clone";
-		return FreshResult::failure(FreshStatus::InternalError, message.c_str());
+		char message[192] = {};
+		std::snprintf(message, sizeof(message),
+		              "failed to serialize %s clone (expected=%zu, written=%zu)",
+		              name, payloadBytes, written);
+		return FreshResult::failure(FreshStatus::InternalError, message);
 	}
 
 	JsonDocument decoded(&FreshJsonAllocator(placement));
@@ -200,15 +202,16 @@ FreshResult FreshCloneJson(
 	);
 	if (error || decoded.overflowed()) {
 		target.clear();
-		std::string message = "failed to deserialize ";
-		message += name;
-		message += " clone";
-		return FreshResult::failure(
+		const FreshStatus status =
 		    error == DeserializationError::NoMemory || decoded.overflowed()
 		        ? FreshStatus::OutOfMemory
-		        : FreshStatus::InternalError,
-		    message.c_str()
-		);
+		        : FreshStatus::InternalError;
+		char message[192] = {};
+		std::snprintf(message, sizeof(message),
+		              "failed to deserialize %s clone (bytes=%zu, error=%s, overflow=%u)",
+		              name, payloadBytes, error.c_str(),
+		              static_cast<unsigned>(decoded.overflowed()));
+		return FreshResult::failure(status, message);
 	}
 	decoded.shrinkToFit();
 

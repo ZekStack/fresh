@@ -500,6 +500,8 @@ bool testAllocationFailureIsRetryable() {
 	FreshResult changed = items.model.findById("item-1");
 	const bool ok = expect(!failedUpdate && failedUpdate.status == FreshStatus::OutOfMemory,
 	                       "injected allocation failure was not reported") &&
+	                expect(failedUpdate.message.find("update target clone buffer (bytes=") != std::string::npos,
+	                       "clone error did not identify failed stage and payload size") &&
 	                expectResult(unchanged, "find after injected failure") &&
 	                expect((unchanged.doc["value"] | 0) == 1,
 	                       "injected failure partially committed") &&
