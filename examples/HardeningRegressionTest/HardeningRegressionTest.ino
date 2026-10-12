@@ -8,20 +8,81 @@
 #endif
 
 #include <atomic>
+#include <cstdint>
 #include <string>
+#include <esp_system.h>
+
+#if defined(FRESH_HARDENING_SDMMC)
+#if !defined(CONFIG_IDF_TARGET_ESP32P4)
+#error "FRESH_HARDENING_SDMMC requires an ESP32-P4 with the Core SDMMC wiring"
+#endif
+#include <driver/gpio.h>
+#include <driver/sdmmc_host.h>
+#endif
 
 namespace {
 
 int passed = 0;
 int failed = 0;
 uint32_t testSequence = 0;
+uint64_t testRunId = 0;
+bool backendReported = false;
 
 std::string testPath(const char* name) {
 	std::string path = "/fresh_hardening_";
 	path += name;
 	path += "_";
+	path += std::to_string(testRunId);
+	path += "_";
 	path += std::to_string(++testSequence);
 	return path;
+}
+
+
+// All reinitializations within a test use the same actual storage backend.
+// With FRESH_HARDENING_SDMMC, this matches the Core ESP32-P4 SDMMC setup.
+FreshResult initTestDatabase(Fresh &db, const char *path, FreshConfig config = FreshConfig()) {
+#if defined(FRESH_HARDENING_SDMMC)
+	config.memory.allocation = Strata::Placement::PreferExternal;
+	config.memory.taskStack = Strata::Placement::PreferExternal;
+
+	FreshSDConfig storageConfig;
+	storageConfig.interface = FreshSDInterface::SDMMC;
+	storageConfig.mountPath = "/sd";
+	storageConfig.maxOpenFiles = 16;
+	storageConfig.allocationUnitSize = 16 * 1024;
+	storageConfig.formatOnMountFailure = false;
+	storageConfig.sdmmc.slot = SDMMC_HOST_SLOT_0;
+	storageConfig.sdmmc.oneBitMode = false;
+	storageConfig.sdmmc.frequencyHz = 20'000'000;
+	storageConfig.sdmmc.slotFlags = SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+	storageConfig.sdmmc.powerMode = FreshSDMMCPowerMode::OnChipLDO;
+	storageConfig.sdmmc.ldoChannel = 4;
+	storageConfig.sdmmc.clockPin = GPIO_NUM_43;
+	storageConfig.sdmmc.commandPin = GPIO_NUM_44;
+	storageConfig.sdmmc.data0Pin = GPIO_NUM_39;
+	storageConfig.sdmmc.data1Pin = GPIO_NUM_40;
+	storageConfig.sdmmc.data2Pin = GPIO_NUM_41;
+	storageConfig.sdmmc.data3Pin = GPIO_NUM_42;
+
+	FreshResult result = db.init(path, config, FreshSDStorage(storageConfig));
+	const char *expectedBackend = "SDMMC";
+#else
+	FreshResult result = db.init(path, config);
+	const char *expectedBackend = "LittleFS";
+#endif
+
+	if (result && !backendReported) {
+		FreshStorageInfo info = db.storage().info();
+		if (info.state != FreshStorageState::Mounted || info.name != expectedBackend) {
+			(void)db.deinit(FreshDeinitOptions{.sync = false});
+			return FreshResult::failure(FreshStatus::InternalError, "unexpected hardening storage backend");
+		}
+		Serial.print("Hardening storage backend: ");
+		Serial.println(info.name.c_str());
+		backendReported = true;
+	}
+	return result;
 }
 
 bool expect(bool condition, const char *message) {
@@ -45,7 +106,7 @@ FreshModelResult prepareModel(Fresh &db, const char* path) {
 	FreshConfig config;
 	config.syncIntervalMS = 60000;
 	config.snapshotRecordThreshold = 1000;
-	FreshResult init = db.init(path, config);
+	FreshResult init = initTestDatabase(db, path, config);
 	if (!init) {
 		Serial.print("    init failed: ");
 		Serial.println(init.message.c_str());
@@ -100,7 +161,7 @@ bool testDirectIdMutationWithOtherDocuments() {
     FreshResult durable = db.forceSync();
     ok = expectResult(durable, "persist direct ID operations") && ok;
     (void)db.deinit(FreshDeinitOptions{.sync = false});
-    if (!expectResult(db.init(path.c_str()), "reopen direct ID operations")) return false;
+    if (!expectResult(initTestDatabase(db, path.c_str()), "reopen direct ID operations")) return false;
     FreshModel reloaded = db.model("Items");
     FreshResult afterReboot = reloaded.findById("item-1");
     FreshResult removedAfterReboot = reloaded.findById("other-3");
@@ -166,7 +227,7 @@ bool testFailedFinalSyncIsRetryable() {
 	config.syncIntervalMS = 60000;
 	config.minFreeBytes = SIZE_MAX;
 	Fresh db;
-	if (!expectResult(db.init(path.c_str(), config), "init storage-full test")) return false;
+	if (!expectResult(initTestDatabase(db, path.c_str(), config), "init storage-full test")) return false;
 	FreshModelResult items = db.createModel("Items");
 	if (!items) return false;
 	JsonDocument doc;
@@ -242,7 +303,7 @@ bool testTimedOutFinalSyncIntentIsPreserved() {
 
 	FreshConfig config;
 	config.syncIntervalMS = 60000;
-	if (!expectResult(db.init(path.c_str(), config), "reinitialize after timed-out final sync")) return false;
+	if (!expectResult(initTestDatabase(db, path.c_str(), config), "reinitialize after timed-out final sync")) return false;
 	FreshResult found = db.model("Items").findById("item-1");
 	const bool persisted = expectResult(found, "reload data after timed-out final sync") &&
 	                       expect((found.doc["value"] | 0) == 3,
@@ -259,7 +320,7 @@ bool testSnapshotPreflightIsReportedAndRetryable() {
 	config.maxJournalRecordBytes = 512;
 	config.maxSnapshotBytes = 768;
 	Fresh db;
-	if (!expectResult(db.init(path.c_str(), config), "init snapshot preflight")) return false;
+	if (!expectResult(initTestDatabase(db, path.c_str(), config), "init snapshot preflight")) return false;
 	FreshModelResult model = db.createModel("Oversized");
 	if (!expect(static_cast<bool>(model), "create oversized model")) return false;
 
@@ -342,7 +403,7 @@ bool testPersistedSizeMismatchIsRejected() {
 	(void)db.deinit(FreshDeinitOptions{.sync = false});
 	FreshConfig config;
 	config.syncIntervalMS = 60000;
-	if (!expectResult(db.init(path.c_str(), config), "reopen after mismatch retry")) return false;
+	if (!expectResult(initTestDatabase(db, path.c_str(), config), "reopen after mismatch retry")) return false;
 	FreshResult found = db.model("Items").findById("item-1");
 	const bool durable = expectResult(found, "recover item after injected size mismatch") &&
 	                     expect((found.doc["value"] | 0) == 1, "recovered document is incorrect");
@@ -372,7 +433,7 @@ bool testFailedNewModelSnapshotPreservesCommittedManifest() {
 
 	FreshConfig config;
 	config.syncIntervalMS = 60000;
-	if (!expectResult(db.init(path.c_str(), config), "reopen previous manifest")) return false;
+	if (!expectResult(initTestDatabase(db, path.c_str(), config), "reopen previous manifest")) return false;
 	FreshResult baseline = db.model("Items").findById("item-1");
 	const bool recovered = expectResult(baseline, "recovered previously committed model") &&
 	    expect((baseline.doc["value"] | 0) == 1, "committed document changed on failed snapshot") &&
@@ -404,7 +465,7 @@ bool testJournalReplayAfterFailedSnapshotWithoutRetry() {
 
 	FreshConfig config;
 	config.syncIntervalMS = 60000;
-	if (!expectResult(db.init(path.c_str(), config), "reopen durable journal")) return false;
+	if (!expectResult(initTestDatabase(db, path.c_str(), config), "reopen durable journal")) return false;
 	FreshResult replayed = db.model("Items").findById("item-1");
 	const bool durable = expectResult(replayed, "replay journal after snapshot failure") &&
 	    expect((replayed.doc["value"] | 0) == 2,
@@ -437,7 +498,7 @@ bool testVerificationFailureIsReportedAfterWrite() {
 
 	FreshConfig config;
 	config.syncIntervalMS = 60000;
-	if (!expectResult(db.init(path.c_str(), config), "reopen after verification fault")) return false;
+	if (!expectResult(initTestDatabase(db, path.c_str(), config), "reopen after verification fault")) return false;
 	FreshResult found = db.model("Items").findById("item-1");
 	const bool recovered = expectResult(found, "read verified snapshot after injected failure") &&
 	    expect((found.doc["value"] | 0) == 4, "persisted update missing after verification fault");
@@ -534,6 +595,19 @@ void runTest(const char *name, bool (*test)()) {
 void setup() {
 	Serial.begin(115200);
 	delay(500);
+#if defined(FRESH_HARDENING_SDMMC)
+	// Match Core's active-low TF-card power gate. Never autoformat a test card.
+	if (gpio_set_level(GPIO_NUM_45, 0) != ESP_OK ||
+	    gpio_set_direction(GPIO_NUM_45, GPIO_MODE_OUTPUT) != ESP_OK ||
+	    gpio_set_level(GPIO_NUM_45, 0) != ESP_OK) {
+		Serial.println("Failed to enable the SDMMC TF-card power gate");
+		return;
+	}
+#endif
+	// Stable for reopen tests, unpredictable across boots: never reuse prior test data.
+	testRunId = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
+	if (testRunId == 0) testRunId = 1;
+	Serial.printf("Hardening run ID: %llu\n", static_cast<unsigned long long>(testRunId));
 
 	runTest("direct ID operations retain journal semantics", testDirectIdMutationWithOtherDocuments);
 	runTest("invalid patch is atomic", testInvalidPatchIsAtomic);
