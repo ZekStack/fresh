@@ -435,14 +435,135 @@ FreshResult FreshModel::updateById(
     const JsonDocument &patch,
     FreshReturn returnMode
 ) {
-	return updateOne(
-	    [id](const JsonDocument &doc) {
-		    const char *docId = doc["_id"] | "";
-		    return id == docId;
-	    },
-	    patch,
-	    returnMode
-	);
+    if (_owner == nullptr || _state == nullptr) {
+        return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
+    }
+    if (id.empty()) {
+        return FreshResult::failure(FreshStatus::InvalidArgument, "id is required");
+    }
+    if (!patch.is<JsonObjectConst>()) {
+        return FreshResult::failure(FreshStatus::InvalidArgument, "patch must be an object");
+    }
+    // AllDocs explicitly asks to materialize the complete model. Preserve that
+    // contract through the predicate implementation; the normal ID paths do not.
+    if (returnMode == FreshReturn::AllDocs) {
+        return updateOne(
+            [id](const JsonDocument &doc) {
+                const char *docId = doc["_id"] | "";
+                return id == docId;
+            },
+            patch,
+            returnMode
+        );
+    }
+
+    const uint64_t updateTime = _owner->now();
+    uint64_t capturedRevision = 0;
+    uint64_t capturedSequence = 0;
+    FreshResultValidator validator;
+    JsonDocument candidate(&FreshJsonAllocator());
+    {
+        FreshLock lock(*_owner->_mutex);
+        if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+        FreshResult valid = validateLocked(
+            true, FreshModelType::General, "update is only valid for general models"
+        );
+        if (!valid) return valid;
+        const auto found = _state->docs.find(id);
+        if (found == _state->docs.end()) {
+            return FreshResult::failure(FreshStatus::DocumentNotFound, "document not found");
+        }
+        if (_owner->_nextPendingSequence == UINT64_MAX) {
+            return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
+        }
+        FreshResult clone = FreshCloneJson(
+            candidate, found->second.as<JsonVariantConst>(), "update target"
+        );
+        if (!clone) return clone;
+        capturedRevision = _state->revision;
+        capturedSequence = _owner->_nextPendingSequence;
+        validator = _state->validator;
+    }
+
+    FreshResult result = FreshMergePatch(candidate, patch);
+    if (!result) return result;
+    result = FreshJsonSet(candidate["_id"], id, candidate, "document id");
+    if (!result) return result;
+    result = FreshJsonSet(candidate["updatedAt"], updateTime, candidate, "updatedAt");
+    if (!result) return result;
+    result = _owner->checkPayloadSize(
+        measureMsgPack(candidate), _owner->_config.maxDocumentBytes, "document"
+    );
+    if (!result) return result;
+    if (validator) {
+        FreshValidationResult validation = validator(candidate);
+        if (!validation) {
+            return FreshResult::failure(FreshStatus::ValidationFailed, validation.message.c_str());
+        }
+    }
+
+    FreshPendingRecord record;
+    record.op = FreshJournalOp::Update;
+    record.sequence = capturedSequence;
+    record.id = id;
+    result = FreshCloneJson(record.doc, candidate.as<JsonVariantConst>(), "journal document");
+    if (!result) return result;
+    result = FreshBuildJournalRecord(*_owner, record, _owner->_config.maxJournalRecordBytes);
+    if (!result) return result;
+
+    JsonDocument resultDoc(&FreshJsonAllocator());
+    if (returnMode == FreshReturn::ChangedDocs) {
+        JsonArray array = resultDoc.to<JsonArray>();
+        if (array.isNull() || resultDoc.overflowed()) {
+            return FreshJsonAllocationFailure("update result");
+        }
+        result = FreshJsonAdd(
+            array, candidate.as<JsonVariantConst>(), resultDoc, "changed documents result"
+        );
+        if (!result) return result;
+        resultDoc.shrinkToFit();
+    }
+
+    FreshEvent event;
+    {
+        FreshLock lock(*_owner->_mutex);
+        if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+        FreshResult valid = validateLocked(
+            true, FreshModelType::General, "update is only valid for general models"
+        );
+        if (!valid) return valid;
+        if (_state->revision != capturedRevision ||
+            _owner->_nextPendingSequence != capturedSequence) {
+            return FreshResult::failure(FreshStatus::Busy, "model changed while update was committing");
+        }
+        const auto found = _state->docs.find(id);
+        if (found == _state->docs.end()) {
+            return FreshResult::failure(FreshStatus::Busy, "document changed while update was committing");
+        }
+        uint64_t nextRevision = 0;
+        result = FreshNextRevision(_state->revision, nextRevision, "model revision");
+        if (!result) return result;
+
+        _owner->_nextPendingSequence++;
+        _state->lastSequence = record.sequence;
+        found->second = std::move(candidate);
+        _state->pending.push_back(std::move(record));
+        _state->dirty = true;
+        _state->revision = nextRevision;
+        result = FreshResult::success("documents updated", 1);
+        if (returnMode == FreshReturn::ChangedDocs) {
+            result.doc = std::move(resultDoc);
+        }
+        event = {
+            .type = FreshEventType::DocumentUpdated,
+            .modelName = _state->name,
+            .documentId = id,
+            .affectedCount = 1,
+            .result = FreshResult::success("document updated", 1)
+        };
+    }
+    _owner->emitEvent(event);
+    return result;
 }
 
 FreshResult FreshModel::updateOne(
@@ -663,12 +784,58 @@ FreshResult FreshModel::deleteById(const char *id) {
 }
 
 FreshResult FreshModel::deleteById(const std::string &id) {
-	return deleteOne(
-	    [id](const JsonDocument &doc) {
-		    const char *docId = doc["_id"] | "";
-		    return id == docId;
-	    }
-	);
+    if (_owner == nullptr || _state == nullptr) {
+        return FreshResult::failure(FreshStatus::InvalidModel, "invalid model");
+    }
+    if (id.empty()) {
+        return FreshResult::failure(FreshStatus::InvalidArgument, "id is required");
+    }
+
+    FreshEvent event;
+    {
+        FreshLock lock(*_owner->_mutex);
+        if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
+        FreshResult valid = validateLocked(
+            true, FreshModelType::General, "delete is only valid for general models"
+        );
+        if (!valid) return valid;
+        const auto found = _state->docs.find(id);
+        if (found == _state->docs.end()) {
+            return FreshResult::success("no documents deleted", 0);
+        }
+        if (_owner->_nextPendingSequence == UINT64_MAX) {
+            return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
+        }
+        uint64_t nextRevision = 0;
+        FreshResult revisionResult = FreshNextRevision(_state->revision, nextRevision, "model revision");
+        if (!revisionResult) return revisionResult;
+
+        FreshPendingRecord record;
+        record.op = FreshJournalOp::Delete;
+        record.sequence = _owner->_nextPendingSequence;
+        record.id = id;
+        FreshResult journal = FreshBuildJournalRecord(
+            *_owner, record, _owner->_config.maxJournalRecordBytes
+        );
+        if (!journal) return journal;
+
+        // All fallible preparation precedes changes to the model and journal.
+        _state->pending.push_back(std::move(record));
+        _owner->_nextPendingSequence++;
+        _state->lastSequence = _owner->_nextPendingSequence - 1;
+        _state->docs.erase(found);
+        _state->dirty = true;
+        _state->revision = nextRevision;
+        event = {
+            .type = FreshEventType::DocumentDeleted,
+            .modelName = _state->name,
+            .documentId = id,
+            .affectedCount = 1,
+            .result = FreshResult::success("document deleted", 1)
+        };
+    }
+    _owner->emitEvent(event);
+    return FreshResult::success("documents deleted", 1);
 }
 
 FreshResult FreshModel::deleteOne(FreshPredicate predicate) {

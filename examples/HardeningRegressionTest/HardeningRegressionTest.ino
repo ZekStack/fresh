@@ -67,6 +67,48 @@ FreshModelResult prepareModel(Fresh &db, const char* path) {
 	return model;
 }
 
+bool testDirectIdMutationWithOtherDocuments() {
+    const std::string path = testPath("direct_id");
+    Fresh db;
+    FreshModelResult items = prepareModel(db, path.c_str());
+    if (!items) return false;
+    for (int i = 0; i < 12; ++i) {
+        JsonDocument doc;
+        doc["_id"] = std::string("other-") + std::to_string(i);
+        doc["payload"] = std::string(100, 'z');
+        if (!expectResult(items.model.create(doc), "create neighboring record")) return false;
+    }
+    JsonDocument patch;
+    patch["value"] = 42;
+    FreshResult updated = items.model.updateById("item-1", patch, FreshReturn::ChangedDocs);
+    FreshResult removed = items.model.deleteById("other-3");
+    FreshResult missing = items.model.findById("other-3");
+    FreshResult untouched = items.model.findById("other-4");
+    FreshResult changed = items.model.findById("item-1");
+    bool ok = expectResult(updated, "direct ID update") &&
+        expect(updated.affectedCount == 1 && updated.doc.is<JsonArrayConst>() &&
+               updated.doc.as<JsonArrayConst>().size() == 1, "changed-doc return contract") &&
+        expectResult(removed, "direct ID delete") &&
+        expect(removed.affectedCount == 1, "direct ID delete affected count") &&
+        expect(!missing && missing.status == FreshStatus::DocumentNotFound, "deleted record remains") &&
+        expectResult(untouched, "neighbor survived") &&
+        expectResult(changed, "target survived") &&
+        expect((changed.doc["value"] | 0) == 42, "update was not applied");
+    FreshResult durable = db.forceSync();
+    ok = expectResult(durable, "persist direct ID operations") && ok;
+    (void)db.deinit(FreshDeinitOptions{.sync = false});
+    if (!expectResult(db.init(path.c_str()), "reopen direct ID operations")) return false;
+    FreshModel reloaded = db.model("Items");
+    FreshResult afterReboot = reloaded.findById("item-1");
+    FreshResult removedAfterReboot = reloaded.findById("other-3");
+    ok = expectResult(afterReboot, "reloaded updated record") &&
+        expect((afterReboot.doc["value"] | 0) == 42, "reloaded value mismatch") &&
+        expect(!removedAfterReboot && removedAfterReboot.status == FreshStatus::DocumentNotFound,
+               "deleted record reappeared") && ok;
+    (void)db.deinit(FreshDeinitOptions{.sync = false});
+    return ok;
+}
+
 bool testInvalidPatchIsAtomic() {
 	const std::string path = testPath("invalid_patch");
 	Fresh db;
@@ -488,6 +530,7 @@ void setup() {
 	Serial.begin(115200);
 	delay(500);
 
+	runTest("direct ID operations retain journal semantics", testDirectIdMutationWithOtherDocuments);
 	runTest("invalid patch is atomic", testInvalidPatchIsAtomic);
 	runTest("predicate reentrancy returns busy", testPredicateReentrancyReturnsBusy);
 	runTest("failed final sync is retryable", testFailedFinalSyncIsRetryable);
