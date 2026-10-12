@@ -471,7 +471,8 @@ FreshResult FreshModel::updateById(
         if (!valid) return valid;
         const auto found = _state->docs.find(id);
         if (found == _state->docs.end()) {
-            return FreshResult::failure(FreshStatus::DocumentNotFound, "document not found");
+            // Preserve updateOne() semantics for absent IDs.
+            return FreshResult::success("no documents updated", 0);
         }
         if (_owner->_nextPendingSequence == UINT64_MAX) {
             return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");

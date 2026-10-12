@@ -81,11 +81,14 @@ bool testDirectIdMutationWithOtherDocuments() {
     JsonDocument patch;
     patch["value"] = 42;
     FreshResult updated = items.model.updateById("item-1", patch, FreshReturn::ChangedDocs);
+    FreshResult notUpdated = items.model.updateById("missing-id", patch, FreshReturn::None);
     FreshResult removed = items.model.deleteById("other-3");
     FreshResult missing = items.model.findById("other-3");
     FreshResult untouched = items.model.findById("other-4");
     FreshResult changed = items.model.findById("item-1");
-    bool ok = expectResult(updated, "direct ID update") &&
+    bool ok = expectResult(notUpdated, "missing ID update is successful no-op") &&
+        expect(notUpdated.affectedCount == 0, "missing ID update count") &&
+        expectResult(updated, "direct ID update") &&
         expect(updated.affectedCount == 1 && updated.doc.is<JsonArrayConst>() &&
                updated.doc.as<JsonArrayConst>().size() == 1, "changed-doc return contract") &&
         expectResult(removed, "direct ID delete") &&
