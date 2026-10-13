@@ -539,8 +539,37 @@ bool testOutOfMemorySyncDiagnostics() {
 	const bool retried = expectResult(retry, "retry after durable buffer allocation failure") &&
 	    expect(db.diagnostics().consecutiveSyncFailures == 0,
 	           "successful retry did not clear out-of-memory failure streak");
+
+	// Fail the first journal JSON allocation, before MessagePack size measurement.
+	JsonDocument patch;
+	patch["value"] = 2;
+	if (!expectResult(items.model.updateById("item-1", patch), "stage journal preflight OOM")) {
+		(void)db.deinit(FreshDeinitOptions{.sync = false});
+		return false;
+	}
+	FreshTestConfigureAllocationFailure(1, FreshAllocationCategory::JsonDocument, 0, true);
+	FreshResult preflightFailure = db.forceSync();
+	FreshTestResetAllocationFailure();
+	FreshDiagnostics preflightDiagnostics = db.diagnostics();
+	const FreshSyncReport &preflightReport = preflightDiagnostics.lastSyncFailure;
+	const bool preflightDiagnosed = expect(!preflightFailure && preflightFailure.status == FreshStatus::OutOfMemory,
+	                                      "journal JSON preflight allocation failure was not reported") &&
+	    expect(legacyCallbacks == 3 && detailedCallbacks == 3,
+	           "journal preflight allocation failure callbacks were not delivered") &&
+	    expect(preflightReport.status == FreshStatus::OutOfMemory &&
+	           preflightReport.stage == FreshSyncStage::Preflight &&
+	           preflightReport.payload == FreshSyncPayload::Journal &&
+	           preflightReport.modelName == "Items" &&
+	           preflightReport.expectedBytes == 0 && preflightReport.actualBytes == 0 &&
+	           preflightReport.limitBytes == FreshConfig().maxJournalRecordBytes &&
+	           !preflightReport.attemptedWrite,
+	           "journal JSON preflight allocation failure lost diagnostic context");
+	FreshResult preflightRetry = db.forceSync();
+	const bool preflightRetried = expectResult(preflightRetry, "retry after journal preflight OOM") &&
+	    expect(db.diagnostics().consecutiveSyncFailures == 0,
+	           "successful journal retry did not reset failure streak");
 	(void)db.deinit(FreshDeinitOptions{.sync = false});
-	return diagnosed && retried;
+	return diagnosed && retried && preflightDiagnosed && preflightRetried;
 }
 
 bool testAllocationFailureIsRetryable() {
