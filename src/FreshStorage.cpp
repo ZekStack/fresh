@@ -1330,19 +1330,22 @@ FreshResult Fresh::syncDirtyImpl(bool force, FreshSyncReport &report, bool &hadW
 
 			size_t pendingBytes = 0;
 			for (const FreshPendingRecord &pending : state->pending) {
+				// Identify the journal payload before JSON construction can fail.
+				report.stage = FreshSyncStage::Preflight;
+				report.payload = FreshSyncPayload::Journal;
+				report.modelName = batch.name;
+				report.expectedBytes = 0;
+				report.actualBytes = 0;
+				report.limitBytes = _config.maxJournalRecordBytes;
+				report.attemptedWrite = false;
 				JsonDocument recordDoc(&FreshJsonAllocator());
 				FreshResult recordResult = recordToJson(pending, recordDoc);
 				if (!recordResult) {
 					return recordResult;
 				}
 				const size_t recordBytes = measureMsgPack(recordDoc);
-				report.stage = FreshSyncStage::Preflight;
-				report.payload = FreshSyncPayload::Journal;
-				report.modelName = batch.name;
 				report.expectedBytes = recordBytes;
 				report.actualBytes = recordBytes;
-				report.limitBytes = _config.maxJournalRecordBytes;
-				report.attemptedWrite = false;
 				FreshResult sizeResult = checkPayloadSize(
 				    recordBytes,
 				    _config.maxJournalRecordBytes,
@@ -1392,6 +1395,14 @@ FreshResult Fresh::syncDirtyImpl(bool force, FreshSyncReport &report, bool &hadW
 			        _config.snapshotBytesThreshold
 			    );
 			if (batch.writeSnapshot) {
+				// Identify the snapshot payload before JSON construction can fail.
+				report.stage = FreshSyncStage::Preflight;
+				report.payload = FreshSyncPayload::Snapshot;
+				report.modelName = batch.name;
+				report.expectedBytes = 0;
+				report.actualBytes = 0;
+				report.limitBytes = _config.maxSnapshotBytes;
+				report.attemptedWrite = false;
 				batch.snapshotRecordCount = state->type == FreshModelType::Stream
 				                                ? state->streamEntries.size()
 				                                : state->docs.size();
@@ -1470,13 +1481,8 @@ FreshResult Fresh::syncDirtyImpl(bool force, FreshSyncReport &report, bool &hadW
 				);
 				if (!jsonResult) return jsonResult;
 				batch.snapshotPayloadBytes = measureMsgPack(batch.snapshot);
-				report.stage = FreshSyncStage::Preflight;
-				report.payload = FreshSyncPayload::Snapshot;
-				report.modelName = batch.name;
 				report.expectedBytes = batch.snapshotPayloadBytes;
 				report.actualBytes = batch.snapshotPayloadBytes;
-				report.limitBytes = _config.maxSnapshotBytes;
-				report.attemptedWrite = false;
 				FreshResult snapshotSizeResult = checkPayloadSize(
 				    batch.snapshotPayloadBytes,
 				    _config.maxSnapshotBytes,
