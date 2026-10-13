@@ -61,8 +61,6 @@ class HardeningRun:
 
         if line.startswith("[TEST] "):
             name = line[len("[TEST] "):]
-            if self.backend is None:
-                raise ValueError("test started before mounted backend confirmation")
             if self.current_test is not None:
                 raise ValueError(f"missing result for {self.current_test!r}")
             if name not in EXPECTED_TESTS:
@@ -75,6 +73,8 @@ class HardeningRun:
         if line in ("PASS", "FAIL"):
             if self.current_test is None:
                 raise ValueError(f"{line} without a preceding [TEST] line")
+            if self.backend is None:
+                raise ValueError("test result before mounted backend confirmation")
             self.results[self.current_test] = line == "PASS"
             self.current_test = None
             return False
