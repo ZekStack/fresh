@@ -6,8 +6,10 @@ from run_hardening_serial import EXPECTED_TESTS, HardeningRun
 
 
 def successful_lines(backend="SDMMC"):
-    lines = [f"Hardening storage backend: {backend}"]
-    for name in sorted(EXPECTED_TESTS):
+    # The sketch starts the first test before initTestDatabase() reports its backend.
+    first = "direct ID operations retain journal semantics"
+    lines = [f"[TEST] {first}", f"Hardening storage backend: {backend}", "  PASS"]
+    for name in sorted(EXPECTED_TESTS - {first}):
         lines.extend((f"[TEST] {name}", "  PASS"))
     lines.append(f"Hardening regression summary: {len(EXPECTED_TESTS)} passed, 0 failed")
     return lines
@@ -29,13 +31,13 @@ class HardeningSerialTests(unittest.TestCase):
 
     def test_missing_test_fails(self):
         lines = successful_lines()
-        del lines[1:3]
+        del lines[3:5]
         with self.assertRaisesRegex(ValueError, "incomplete regression suite"):
             parse(lines)
 
     def test_duplicate_test_fails(self):
         lines = successful_lines()
-        lines[3:3] = lines[1:3]
+        lines[3:3] = (lines[0], lines[2])
         with self.assertRaisesRegex(ValueError, "duplicate regression test"):
             parse(lines)
 
@@ -45,7 +47,7 @@ class HardeningSerialTests(unittest.TestCase):
 
     def test_missing_outcome_fails(self):
         lines = successful_lines()
-        del lines[2]
+        del lines[4]
         with self.assertRaisesRegex(ValueError, "missing result"):
             parse(lines)
 
@@ -64,13 +66,20 @@ class HardeningSerialTests(unittest.TestCase):
 
     def test_unknown_test_fails(self):
         lines = successful_lines()
-        lines[1] = "[TEST] unexpected test name"
+        lines[0] = "[TEST] unexpected test name"
         with self.assertRaisesRegex(ValueError, "unexpected regression test"):
             parse(lines)
 
-    def test_requires_mounted_backend(self):
-        with self.assertRaisesRegex(ValueError, "before mounted backend confirmation"):
-            parse(successful_lines()[1:])
+    def test_backend_before_first_test_still_passes(self):
+        lines = successful_lines()
+        lines.insert(0, lines.pop(1))
+        self.assertTrue(parse(lines).complete)
+
+    def test_requires_mounted_backend_before_result(self):
+        lines = successful_lines()
+        del lines[1]
+        with self.assertRaisesRegex(ValueError, "result before mounted backend confirmation"):
+            parse(lines)
 
 
 if __name__ == "__main__":
