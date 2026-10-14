@@ -52,6 +52,9 @@ jobs:
       - name: Check version consistency
         run: python3 scripts/check_version_consistency.py
 
+      - name: Test hardware serial result validation
+        run: python3 -m unittest discover -s scripts -p 'test_run_hardening_serial.py'
+
       - name: Check SPI flash storage contract
         run: python3 scripts/check_spi_flash_storage_contract.py
 
@@ -155,6 +158,16 @@ jobs:
             --project-option "lib_deps=https://github.com/ZekStack/strata.git#${STRATA_VERSION}" \
             --project-option "build_unflags=-std=gnu++11" \
             --project-option "build_flags=-std=gnu++20 -DFRESH_TESTING"
+
+      - name: Build hardening regression with Core ESP32-P4 SDMMC backend
+        run: |
+          pio ci examples/HardeningRegressionTest \
+            --board esp32-p4-evboard \
+            --lib="." \
+            --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
+            --project-option "lib_deps=https://github.com/ZekStack/strata.git#${STRATA_VERSION}" \
+            --project-option "build_unflags=-std=gnu++11" \
+            --project-option "build_flags=-std=gnu++20 -DFRESH_TESTING -DFRESH_HARDENING_SDMMC"
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

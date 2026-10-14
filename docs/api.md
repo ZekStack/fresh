@@ -175,6 +175,53 @@ FreshDiagnostics diagnostics() const;
 
 `flush()` writes captured pending journal data. `forceSync()` also forces checkpoint processing.
 
+### Structured sync diagnostics
+
+The existing `onSync(FreshSyncCallback)` callback remains supported. Applications
+may additionally register `onSyncDetailed(FreshSyncDetailedCallback)` to receive
+an owned `FreshSyncReport` with the failing stage (`Preflight`,
+`JournalWrite`, `SnapshotWrite`, `ManifestWrite`, or `Cleanup`), payload
+kind, model name (empty for database-wide failures), expected and observed
+MessagePack byte counts, size limit, and error message/status.
+
+`FreshDiagnostics` also exposes `syncAttempts`, `syncSuccesses`,
+`syncFailures`, `consecutiveSyncFailures`, `lastSuccessfulSyncMs` (uptime
+milliseconds), and `lastSyncFailure`. These values are in-memory diagnostics,
+not durable records. No database document values are included.
+
+A sync attempt that has dirty work produces exactly one pair of callbacks.
+Early failures are reported too; no-op successful flushes do not emit callbacks.
+Callbacks are invoked without holding the database mutex, so a callback may
+safely call read-only inspection methods such as `diagnostics()`. Fresh keeps
+the recursive synchronization completion barrier until callbacks return to
+preserve shutdown and final-sync ordering. Do not call blocking persistence or
+lifecycle operations from a callback, or block it unnecessarily.
+
+`FreshSyncReport` retains the library's existing `std::string` convention. On a
+failed synchronization the report is moved into `FreshDiagnostics::lastSyncFailure`
+instead of copying its strings. The detailed callback receives a `const` reference
+valid only during that callback; copy values that must be retained. On
+`OutOfMemory`, `FreshSyncReport::message` is intentionally empty to avoid adding
+another string copy during failure reporting; `FreshResult::message` remains
+available through `onSync` or the synchronous method's return value. The numeric
+status, payload, stage, model name already captured before the failure, and byte
+counts remain available. This avoids extra diagnostic-string copies, but it does
+not claim all `std::string` or callback allocations are OOM-safe.
+
+`attemptedWrite` is true only after the relevant persistent mutation begins:
+a successful writable-file open (which may already truncate a slot), or the
+start of cleanup/removal. Serialization and preflight rejections before opening
+a writable file leave it false. `Verification` identifies failures during the
+read-back verification of a written durable slot; `Cleanup` identifies removal
+and journal-cleanup failures. `attemptedWrite` describes the reported phase,
+not whether an earlier phase in the same synchronization wrote any data.
+
+A snapshot whose entire serialized model exceeds `maxSnapshotBytes` is rejected
+with `SizeLimitExceeded`, even if every individual record is smaller than
+`maxDocumentBytes`. This change does not split a model into multiple snapshots
+or increase the current size limits. A preflight/write size disagreement is
+reported as `InternalError` before the durable slot is written.
+
 ## Backup
 
 ```cpp
