@@ -19,7 +19,7 @@ env:
   PIOARDUINO_PLATFORM_URL: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.39/platform-espressif32.zip
   PIOARDUINO_PLATFORM_VERSION: 55.03.39
   PIOARDUINO_VERSION: 6.1.19
-  STRATA_VERSION: v0.1.2
+  STRATA_VERSION: v0.1.4
 
 jobs:
   source-audit:

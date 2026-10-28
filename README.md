@@ -1,5 +1,7 @@
 # Fresh
 
+> Current release target: **v0.3.0**; Strata dependency pinned to **v0.1.4**.
+
 Fresh is a RAM-first document database for ESP32 with owned, pluggable storage.
 
 Fresh keeps small document collections and append-style logs in RAM while a background task persists them through a selected ESP-IDF storage backend.
@@ -258,7 +260,7 @@ Regression sketches are compiled in CI but require manual execution on hardware.
 | Persistence encoding | ArduinoJson MessagePack |
 | PSRAM | Used for eligible internal allocations when available |
 | Exceptions | Not used by the Fresh API |
-| Status | `0.2.1` pre-release |
+| Status | `0.3.0` |
 
 ## Limitations
 

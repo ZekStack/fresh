@@ -22,8 +22,8 @@ def reject_tree(needle: str, message: str) -> None:
 
 require(
     "library.json",
-    '"Strata": "https://github.com/ZekStack/strata.git#v0.1.2"',
-    "Fresh 0.2.1 must pin Strata v0.1.2",
+    '"Strata": "https://github.com/ZekStack/strata.git#v0.1.4"',
+    "Fresh must pin Strata v0.1.4",
 )
 require(
     "src/Fresh.h",
