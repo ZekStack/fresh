@@ -217,13 +217,13 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 			return FreshResult::failure(FreshStatus::Busy, "model changed while validator was running");
 		}
 		const uint64_t commitSequence = _owner->_nextPendingSequence;
-        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, 1);
-        if (!sequenceCheck) return sequenceCheck;
-        sequenceCheck = FreshCheckPreparedJournalSize(
-            record, commitSequence, _owner->_config.maxJournalRecordBytes
-        );
-        if (!sequenceCheck) return sequenceCheck;
-        uint64_t nextRevision = 0;
+		FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, 1);
+		if (!sequenceCheck) return sequenceCheck;
+		sequenceCheck = FreshCheckPreparedJournalSize(
+			record, commitSequence, _owner->_config.maxJournalRecordBytes
+		);
+		if (!sequenceCheck) return sequenceCheck;
+		uint64_t nextRevision = 0;
 		result = FreshNextRevision(_state->revision, nextRevision, "model revision");
 		if (!result) return result;
 
@@ -307,13 +307,13 @@ FreshResult FreshModel::append(JsonDocument &doc, const FreshStreamAppendOptions
 			return FreshResult::failure(FreshStatus::Busy, "model changed while append was being prepared");
 		}
 		const uint64_t commitSequence = _owner->_nextPendingSequence;
-        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, 1);
-        if (!sequenceCheck) return sequenceCheck;
-        sequenceCheck = FreshCheckPreparedJournalSize(
-            record, commitSequence, _owner->_config.maxJournalRecordBytes
-        );
-        if (!sequenceCheck) return sequenceCheck;
-        uint64_t nextRevision = 0;
+		FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, 1);
+		if (!sequenceCheck) return sequenceCheck;
+		sequenceCheck = FreshCheckPreparedJournalSize(
+			record, commitSequence, _owner->_config.maxJournalRecordBytes
+		);
+		if (!sequenceCheck) return sequenceCheck;
+		uint64_t nextRevision = 0;
 		result = FreshNextRevision(_state->revision, nextRevision, "model revision");
 		if (!result) return result;
 
@@ -744,22 +744,22 @@ FreshResult FreshModel::update(
 			return FreshResult::failure(FreshStatus::Busy, "model changed while predicate was running");
 		}
 		const uint64_t commitSequence = _owner->_nextPendingSequence;
-        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, candidates.size());
-        if (!sequenceCheck) return sequenceCheck;
-        for (size_t i = 0; i < candidates.size(); ++i) {
-            sequenceCheck = FreshCheckPreparedJournalSize(
-                candidates[i].record, commitSequence + i, _owner->_config.maxJournalRecordBytes
-            );
-            if (!sequenceCheck) return sequenceCheck;
-        }
-        // A batch must not advance the sequence or mutate any record unless
-        // every selected target is still present.
-        for (const FreshUpdateCandidate &candidate : candidates) {
-            if (_state->docs.find(candidate.id) == _state->docs.end()) {
-                return FreshResult::failure(FreshStatus::Busy, "model changed while update was committing");
-            }
-        }
-        uint64_t nextRevision = _state->revision;
+		FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, candidates.size());
+		if (!sequenceCheck) return sequenceCheck;
+		for (size_t i = 0; i < candidates.size(); ++i) {
+			sequenceCheck = FreshCheckPreparedJournalSize(
+				candidates[i].record, commitSequence + i, _owner->_config.maxJournalRecordBytes
+			);
+			if (!sequenceCheck) return sequenceCheck;
+		}
+		// A batch must not advance the sequence or mutate any record unless
+		// every selected target is still present.
+		for (const FreshUpdateCandidate &candidate : candidates) {
+			if (_state->docs.find(candidate.id) == _state->docs.end()) {
+				return FreshResult::failure(FreshStatus::Busy, "model changed while update was committing");
+			}
+		}
+		uint64_t nextRevision = _state->revision;
 		if (!candidates.empty()) {
 			FreshResult revisionResult = FreshNextRevision(_state->revision, nextRevision, "model revision");
 			if (!revisionResult) return revisionResult;
@@ -767,9 +767,9 @@ FreshResult FreshModel::update(
 
 		_owner->_nextPendingSequence += candidates.size();
 		size_t journalIndex = 0;
-        for (FreshUpdateCandidate &candidate : candidates) {
-            candidate.record.sequence = commitSequence + journalIndex++;
-            auto found = _state->docs.find(candidate.id);
+		for (FreshUpdateCandidate &candidate : candidates) {
+			candidate.record.sequence = commitSequence + journalIndex++;
+			auto found = _state->docs.find(candidate.id);
 			if (found == _state->docs.end()) {
 				return FreshResult::failure(FreshStatus::Busy, "model changed while update was committing");
 			}
@@ -937,21 +937,21 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 			return FreshResult::failure(FreshStatus::Busy, "model changed while predicate was running");
 		}
 		const uint64_t commitSequence = _owner->_nextPendingSequence;
-        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, records.size());
-        if (!sequenceCheck) return sequenceCheck;
-        for (size_t i = 0; i < records.size(); ++i) {
-            sequenceCheck = FreshCheckPreparedJournalSize(
-                records[i], commitSequence + i, _owner->_config.maxJournalRecordBytes
-            );
-            if (!sequenceCheck) return sequenceCheck;
-        }
-        // Check the entire batch before deleting the first record.
-        for (const FreshPendingRecord &record : records) {
-            if (_state->docs.find(record.id) == _state->docs.end()) {
-                return FreshResult::failure(FreshStatus::Busy, "model changed while delete was committing");
-            }
-        }
-        uint64_t nextRevision = _state->revision;
+		FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, records.size());
+		if (!sequenceCheck) return sequenceCheck;
+		for (size_t i = 0; i < records.size(); ++i) {
+			sequenceCheck = FreshCheckPreparedJournalSize(
+				records[i], commitSequence + i, _owner->_config.maxJournalRecordBytes
+			);
+			if (!sequenceCheck) return sequenceCheck;
+		}
+		// Check the entire batch before deleting the first record.
+		for (const FreshPendingRecord &record : records) {
+			if (_state->docs.find(record.id) == _state->docs.end()) {
+				return FreshResult::failure(FreshStatus::Busy, "model changed while delete was committing");
+			}
+		}
+		uint64_t nextRevision = _state->revision;
 		if (!records.empty()) {
 			FreshResult revisionResult = FreshNextRevision(_state->revision, nextRevision, "model revision");
 			if (!revisionResult) return revisionResult;
@@ -959,9 +959,9 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 
 		_owner->_nextPendingSequence += records.size();
 		size_t journalIndex = 0;
-        for (FreshPendingRecord &record : records) {
-            record.sequence = commitSequence + journalIndex++;
-            if (_state->docs.erase(record.id) != 1) {
+		for (FreshPendingRecord &record : records) {
+			record.sequence = commitSequence + journalIndex++;
+			if (_state->docs.erase(record.id) != 1) {
 				return FreshResult::failure(FreshStatus::Busy, "model changed while delete was committing");
 			}
 			_state->lastSequence = record.sequence;
