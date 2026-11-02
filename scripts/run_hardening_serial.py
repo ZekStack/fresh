@@ -17,6 +17,7 @@ EXPECTED_TESTS = frozenset(
     (
         "direct ID operations retain journal semantics",
         "invalid patch is atomic",
+        "cross-model mutations preserve journal",
         "predicate reentrancy returns busy",
         "failed final sync is retryable",
         "snapshot preflight is reported and retryable",
