@@ -38,10 +38,48 @@ enum class FreshJournalOp : uint8_t {
 struct FreshPendingRecord {
 	FreshJournalOp op = FreshJournalOp::Create;
 	uint64_t sequence = 0;
+	size_t preparedJournalBytes = 0; // transient preflight only; never serialized
 	std::string id;
 	JsonDocument doc;
 	size_t maxEntries = 0;
 };
+
+// Journal records are prepared outside Fresh's database mutex. Their global
+// sequences are finalized at the RAM commit boundary.
+inline size_t FreshMessagePackSequenceBytes(uint64_t value) {
+    if (value <= 0x7f) return 1;
+    if (value <= 0xff) return 2;
+    if (value <= 0xffff) return 3;
+    if (value <= 0xffffffffULL) return 5;
+    return 9;
+}
+
+inline FreshResult FreshCheckJournalSequenceRange(uint64_t next, size_t count) {
+    if (count == 0) return FreshResult::success();
+    if (next == UINT64_MAX || static_cast<uint64_t>(count) > UINT64_MAX - next) {
+        return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
+    }
+    return FreshResult::success();
+}
+
+inline FreshResult FreshCheckPreparedJournalSize(
+    const FreshPendingRecord &record, uint64_t sequence, size_t limit
+) {
+    if (record.preparedJournalBytes == 0 || record.sequence == 0 ||
+        record.preparedJournalBytes < FreshMessagePackSequenceBytes(record.sequence) ||
+        sequence == 0 || sequence == UINT64_MAX) {
+        return FreshResult::failure(FreshStatus::InternalError, "invalid prepared journal record");
+    }
+    const size_t actualBytes =
+        record.preparedJournalBytes - FreshMessagePackSequenceBytes(record.sequence) +
+        FreshMessagePackSequenceBytes(sequence);
+    if (actualBytes > limit) {
+        return FreshResult::failure(
+            FreshStatus::SizeLimitExceeded, "journal record exceeds configured size limit"
+        );
+    }
+    return FreshResult::success();
+}
 
 struct FreshSlotReadResult {
 	FreshResult result = FreshResult::success("slot missing");
