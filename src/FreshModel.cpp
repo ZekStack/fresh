@@ -769,10 +769,8 @@ FreshResult FreshModel::update(
 		size_t journalIndex = 0;
 		for (FreshUpdateCandidate &candidate : candidates) {
 			candidate.record.sequence = commitSequence + journalIndex++;
+			// Every target was checked above, under the same database lock.
 			auto found = _state->docs.find(candidate.id);
-			if (found == _state->docs.end()) {
-				return FreshResult::failure(FreshStatus::Busy, "model changed while update was committing");
-			}
 			_state->lastSequence = candidate.record.sequence;
 			found->second = std::move(candidate.doc);
 			_state->pending.push_back(std::move(candidate.record));
@@ -961,9 +959,8 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 		size_t journalIndex = 0;
 		for (FreshPendingRecord &record : records) {
 			record.sequence = commitSequence + journalIndex++;
-			if (_state->docs.erase(record.id) != 1) {
-				return FreshResult::failure(FreshStatus::Busy, "model changed while delete was committing");
-			}
+			// Every target was checked above, under the same database lock.
+			_state->docs.erase(record.id);
 			_state->lastSequence = record.sequence;
 			const std::string id = record.id;
 			_state->pending.push_back(std::move(record));
