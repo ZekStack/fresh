@@ -752,6 +752,13 @@ FreshResult FreshModel::update(
             );
             if (!sequenceCheck) return sequenceCheck;
         }
+        // A batch must not advance the sequence or mutate any record unless
+        // every selected target is still present.
+        for (const FreshUpdateCandidate &candidate : candidates) {
+            if (_state->docs.find(candidate.id) == _state->docs.end()) {
+                return FreshResult::failure(FreshStatus::Busy, "model changed while update was committing");
+            }
+        }
         uint64_t nextRevision = _state->revision;
 		if (!candidates.empty()) {
 			FreshResult revisionResult = FreshNextRevision(_state->revision, nextRevision, "model revision");
@@ -937,6 +944,12 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
                 records[i], commitSequence + i, _owner->_config.maxJournalRecordBytes
             );
             if (!sequenceCheck) return sequenceCheck;
+        }
+        // Check the entire batch before deleting the first record.
+        for (const FreshPendingRecord &record : records) {
+            if (_state->docs.find(record.id) == _state->docs.end()) {
+                return FreshResult::failure(FreshStatus::Busy, "model changed while delete was committing");
+            }
         }
         uint64_t nextRevision = _state->revision;
 		if (!records.empty()) {
