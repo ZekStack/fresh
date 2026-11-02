@@ -3,7 +3,7 @@
 The CI build matrix compiles `examples/HardeningRegressionTest` for supported
 targets and compiles the fault-injection variant for both ESP32 and ESP32-P4
 (Core-compatible SDMMC). **Compilation is not execution.** Recovery tests must
-run on real mounted storage. The serial checker requires all 12 named
+run on real mounted storage. The serial checker requires all 13 named
 `FRESH_TESTING` regressions and a runtime-confirmed backend.
 
 ## Hardware prerequisites
@@ -79,10 +79,10 @@ formats the media for these tests.
 
 ## Recovery scenarios
 
-The 12 `FRESH_TESTING` regressions cover:
+The 13 `FRESH_TESTING` regressions cover:
 
 - Direct-ID update/delete and reopen durability
-- Invalid-patch atomicity and predicate revision conflicts
+- Invalid-patch atomicity, cross-model isolation and predicate revision conflicts
 - Failed final sync retry and timed-out shutdown preservation
 - Snapshot-size preflight rejection and recovery
 - Preflight callbacks, counters and in-memory diagnostics
