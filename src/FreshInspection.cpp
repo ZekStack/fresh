@@ -239,13 +239,13 @@ FreshResult FreshModel::replaceById(const std::string &id, const JsonDocument &r
 			return FreshResult::failure(FreshStatus::Busy, "model changed while replacement was committing");
 		}
 		const uint64_t commitSequence = _owner->_nextPendingSequence;
-        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, 1);
-        if (!sequenceCheck) return sequenceCheck;
-        sequenceCheck = FreshCheckPreparedJournalSize(
-            record, commitSequence, _owner->_config.maxJournalRecordBytes
-        );
-        if (!sequenceCheck) return sequenceCheck;
-        uint64_t nextRevision = 0;
+		FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, 1);
+		if (!sequenceCheck) return sequenceCheck;
+		sequenceCheck = FreshCheckPreparedJournalSize(
+			record, commitSequence, _owner->_config.maxJournalRecordBytes
+		);
+		if (!sequenceCheck) return sequenceCheck;
+		uint64_t nextRevision = 0;
 		result = FreshNextRevision(_state->revision, nextRevision, "model revision");
 		if (!result) return result;
 
