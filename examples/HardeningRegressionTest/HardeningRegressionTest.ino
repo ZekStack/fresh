@@ -192,6 +192,72 @@ bool testInvalidPatchIsAtomic() {
 	return ok;
 }
 
+bool testMessagePackJournalSequenceWidth() {
+    struct Case {
+        uint64_t sequence;
+        size_t bytes;
+    };
+    const Case cases[] = {
+        {1, 1}, {127, 1}, {128, 2}, {255, 2},
+        {256, 3}, {65535, 3}, {65536, 5},
+        {4294967295ULL, 5}, {4294967296ULL, 9},
+        {UINT64_MAX - 1, 9}
+    };
+    JsonDocument probe;
+    probe["sequence"] = static_cast<uint64_t>(1);
+    const size_t baseBytes = measureMsgPack(probe);
+    for (const Case &item : cases) {
+        probe["sequence"] = item.sequence;
+        const size_t actualBytes = measureMsgPack(probe);
+        if (!expect(actualBytes == baseBytes + item.bytes - 1,
+                    "MessagePack sequence width differs from commit-size preflight")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool testBackgroundSyncPersistsWithoutCallerFlush() {
+    const std::string path = testPath("background_sync");
+    Fresh db;
+    FreshConfig config;
+    config.syncIntervalMS = 100;
+    config.snapshotRecordThreshold = 1;
+    if (!expectResult(initTestDatabase(db, path.c_str(), config),
+                      "initialize background-sync database")) return false;
+
+    FreshModelResult items = db.createModel("Items");
+    if (!expect(static_cast<bool>(items), "create background-sync model")) return false;
+    auto awaitSuccess = [&](uint64_t initialSuccesses) {
+        const uint32_t start = millis();
+        while (static_cast<uint32_t>(millis() - start) < 8000) {
+            if (db.diagnostics().syncSuccesses > initialSuccesses) return true;
+            delay(10);
+        }
+        return false;
+    };
+    if (!expect(awaitSuccess(0), "background model manifest was not persisted")) {
+        (void)db.deinit(FreshDeinitOptions{.sync = false});
+        return false;
+    }
+    const uint64_t baseline = db.diagnostics().syncSuccesses;
+    JsonDocument entry;
+    entry["_id"] = "background-1";
+    entry["value"] = 42;
+    const FreshResult created = items.model.create(entry);
+    bool ok = expectResult(created, "RAM-first background-sync create") &&
+              expect(awaitSuccess(baseline), "background journal was not persisted");
+    (void)db.deinit(FreshDeinitOptions{.sync = false});
+    if (!ok) return false;
+    if (!expectResult(initTestDatabase(db, path.c_str(), config),
+                      "reopen asynchronously persisted database")) return false;
+    FreshResult restored = db.model("Items").findById("background-1");
+    ok = expectResult(restored, "recover background-synced document") &&
+         expect((restored.doc["value"] | 0) == 42, "background-sync value mismatch");
+    (void)db.deinit(FreshDeinitOptions{.sync = false});
+    return ok;
+}
+
 bool testCrossModelMutationsIgnoreUnrelatedJournalProgress() {
     const std::string path = testPath("cross_model");
     Fresh db;
@@ -737,6 +803,8 @@ void setup() {
 
 	runTest("direct ID operations retain journal semantics", testDirectIdMutationWithOtherDocuments);
 	runTest("invalid patch is atomic", testInvalidPatchIsAtomic);
+	runTest("journal sequence MessagePack widths", testMessagePackJournalSequenceWidth);
+	runTest("background sync persists without caller flush", testBackgroundSyncPersistsWithoutCallerFlush);
 	runTest("cross-model mutations preserve journal", testCrossModelMutationsIgnoreUnrelatedJournalProgress);
 	runTest("predicate reentrancy returns busy", testPredicateReentrancyReturnsBusy);
 	runTest("failed final sync is retryable", testFailedFinalSyncIsRetryable);
