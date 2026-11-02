@@ -26,8 +26,9 @@ FreshResult FreshBuildJournalRecord(
 	if (!result) {
 		return result;
 	}
+	record.preparedJournalBytes = measureMsgPack(recordDoc);
 	return owner.checkPayloadSize(
-	    measureMsgPack(recordDoc),
+	    record.preparedJournalBytes,
 	    maxJournalRecordBytes,
 	    "journal record"
 	);
@@ -135,7 +136,6 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 	const uint64_t time = _owner->now();
 	std::string id;
 	uint64_t capturedRevision = 0;
-	uint64_t capturedSequence = 0;
 	FreshResultValidator validator;
 	{
 		FreshLock lock(*_owner->_mutex);
@@ -155,11 +155,7 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 				id = FreshMakeId();
 			} while (_state->docs.find(id) != _state->docs.end());
 		}
-		if (_owner->_nextPendingSequence == UINT64_MAX) {
-			return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
-		}
 		capturedRevision = _state->revision;
-		capturedSequence = _owner->_nextPendingSequence;
 		validator = _state->validator;
 	}
 
@@ -197,7 +193,7 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 
 	FreshPendingRecord record;
 	record.op = FreshJournalOp::Create;
-	record.sequence = capturedSequence;
+	record.sequence = 1; // placeholder sequence
 	record.id = id;
 	result = FreshCloneJson(record.doc, candidate.as<JsonVariantConst>(), "journal document");
 	if (!result) return result;
@@ -217,15 +213,21 @@ FreshResult FreshModel::create(JsonDocument &doc) {
 		);
 		if (!valid) return valid;
 		if (_state->revision != capturedRevision ||
-		    _owner->_nextPendingSequence != capturedSequence ||
 		    _state->docs.find(id) != _state->docs.end()) {
 			return FreshResult::failure(FreshStatus::Busy, "model changed while validator was running");
 		}
-		uint64_t nextRevision = 0;
+		const uint64_t commitSequence = _owner->_nextPendingSequence;
+        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, 1);
+        if (!sequenceCheck) return sequenceCheck;
+        sequenceCheck = FreshCheckPreparedJournalSize(
+            record, commitSequence, _owner->_config.maxJournalRecordBytes
+        );
+        if (!sequenceCheck) return sequenceCheck;
+        uint64_t nextRevision = 0;
 		result = FreshNextRevision(_state->revision, nextRevision, "model revision");
 		if (!result) return result;
 
-		_owner->_nextPendingSequence++;
+		record.sequence = _owner->_nextPendingSequence++;
 		_state->lastSequence = record.sequence;
 		_state->docs[id] = std::move(stored);
 		_state->pending.push_back(std::move(record));
@@ -257,7 +259,6 @@ FreshResult FreshModel::append(JsonDocument &doc, const FreshStreamAppendOptions
 	}
 
 	uint64_t capturedRevision = 0;
-	uint64_t capturedSequence = 0;
 	{
 		FreshLock lock(*_owner->_mutex);
 		if (!lock) return FreshResult::failure(FreshStatus::InternalError, "failed to lock database");
@@ -267,11 +268,7 @@ FreshResult FreshModel::append(JsonDocument &doc, const FreshStreamAppendOptions
 		    "append is only valid for stream models"
 		);
 		if (!valid) return valid;
-		if (_owner->_nextPendingSequence == UINT64_MAX) {
-			return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
-		}
 		capturedRevision = _state->revision;
-		capturedSequence = _owner->_nextPendingSequence;
 	}
 
 	JsonDocument stored;
@@ -289,7 +286,7 @@ FreshResult FreshModel::append(JsonDocument &doc, const FreshStreamAppendOptions
 
 	FreshPendingRecord record;
 	record.op = FreshJournalOp::Append;
-	record.sequence = capturedSequence;
+	record.sequence = 1; // placeholder sequence
 	record.maxEntries = options.maxEntries;
 	result = FreshCloneJson(record.doc, stored.as<JsonVariantConst>(), "journal stream entry");
 	if (!result) return result;
@@ -306,14 +303,21 @@ FreshResult FreshModel::append(JsonDocument &doc, const FreshStreamAppendOptions
 		    "append is only valid for stream models"
 		);
 		if (!valid) return valid;
-		if (_state->revision != capturedRevision || _owner->_nextPendingSequence != capturedSequence) {
+		if (_state->revision != capturedRevision) {
 			return FreshResult::failure(FreshStatus::Busy, "model changed while append was being prepared");
 		}
-		uint64_t nextRevision = 0;
+		const uint64_t commitSequence = _owner->_nextPendingSequence;
+        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, 1);
+        if (!sequenceCheck) return sequenceCheck;
+        sequenceCheck = FreshCheckPreparedJournalSize(
+            record, commitSequence, _owner->_config.maxJournalRecordBytes
+        );
+        if (!sequenceCheck) return sequenceCheck;
+        uint64_t nextRevision = 0;
 		result = FreshNextRevision(_state->revision, nextRevision, "model revision");
 		if (!result) return result;
 
-		_owner->_nextPendingSequence++;
+		record.sequence = _owner->_nextPendingSequence++;
 		_state->streamEntries.push_back(std::move(stored));
 		while (options.maxEntries > 0 && _state->streamEntries.size() > options.maxEntries) {
 			_state->streamEntries.pop_front();
@@ -459,7 +463,6 @@ FreshResult FreshModel::updateById(
 
     const uint64_t updateTime = _owner->now();
     uint64_t capturedRevision = 0;
-    uint64_t capturedSequence = 0;
     FreshResultValidator validator;
     JsonDocument candidate(&FreshJsonAllocator());
     {
@@ -474,15 +477,11 @@ FreshResult FreshModel::updateById(
             // Preserve updateOne() semantics for absent IDs.
             return FreshResult::success("no documents updated", 0);
         }
-        if (_owner->_nextPendingSequence == UINT64_MAX) {
-            return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
-        }
         FreshResult clone = FreshCloneJson(
             candidate, found->second.as<JsonVariantConst>(), "update target"
         );
         if (!clone) return clone;
         capturedRevision = _state->revision;
-        capturedSequence = _owner->_nextPendingSequence;
         validator = _state->validator;
     }
 
@@ -505,7 +504,7 @@ FreshResult FreshModel::updateById(
 
     FreshPendingRecord record;
     record.op = FreshJournalOp::Update;
-    record.sequence = capturedSequence;
+    record.sequence = 1; // placeholder sequence
     record.id = id;
     result = FreshCloneJson(record.doc, candidate.as<JsonVariantConst>(), "journal document");
     if (!result) return result;
@@ -533,19 +532,25 @@ FreshResult FreshModel::updateById(
             true, FreshModelType::General, "update is only valid for general models"
         );
         if (!valid) return valid;
-        if (_state->revision != capturedRevision ||
-            _owner->_nextPendingSequence != capturedSequence) {
+        if (_state->revision != capturedRevision) {
             return FreshResult::failure(FreshStatus::Busy, "model changed while update was committing");
         }
         const auto found = _state->docs.find(id);
         if (found == _state->docs.end()) {
             return FreshResult::failure(FreshStatus::Busy, "document changed while update was committing");
         }
+        const uint64_t commitSequence = _owner->_nextPendingSequence;
+        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, 1);
+        if (!sequenceCheck) return sequenceCheck;
+        sequenceCheck = FreshCheckPreparedJournalSize(
+            record, commitSequence, _owner->_config.maxJournalRecordBytes
+        );
+        if (!sequenceCheck) return sequenceCheck;
         uint64_t nextRevision = 0;
         result = FreshNextRevision(_state->revision, nextRevision, "model revision");
         if (!result) return result;
 
-        _owner->_nextPendingSequence++;
+        record.sequence = _owner->_nextPendingSequence++;
         _state->lastSequence = record.sequence;
         found->second = std::move(candidate);
         _state->pending.push_back(std::move(record));
@@ -603,7 +608,6 @@ FreshResult FreshModel::update(
 
 	const uint64_t updateTime = _owner->now();
 	uint64_t capturedRevision = 0;
-	uint64_t capturedSequence = 0;
 	FreshResultValidator validator;
 	std::vector<FreshDocumentSnapshot> snapshot;
 	{
@@ -616,7 +620,6 @@ FreshResult FreshModel::update(
 		);
 		if (!valid) return valid;
 		capturedRevision = _state->revision;
-		capturedSequence = _owner->_nextPendingSequence;
 		validator = _state->validator;
 		snapshot.reserve(_state->docs.size());
 		for (const auto &entry : _state->docs) {
@@ -640,10 +643,6 @@ FreshResult FreshModel::update(
 	std::vector<FreshUpdateCandidate> candidates;
 	for (const FreshDocumentSnapshot &entry : snapshot) {
 		if (!predicate(entry.doc)) continue;
-		if (capturedSequence == UINT64_MAX ||
-		    candidates.size() > UINT64_MAX - capturedSequence) {
-			return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
-		}
 
 		FreshUpdateCandidate candidate;
 		candidate.id = entry.id;
@@ -673,7 +672,7 @@ FreshResult FreshModel::update(
 			}
 		}
 		candidate.record.op = FreshJournalOp::Update;
-		candidate.record.sequence = capturedSequence + candidates.size();
+		candidate.record.sequence = 1; // placeholder sequence
 		candidate.record.id = entry.id;
 		result = FreshCloneJson(
 		    candidate.record.doc,
@@ -741,18 +740,29 @@ FreshResult FreshModel::update(
 		    "update is only valid for general models"
 		);
 		if (!valid) return valid;
-		if (_state->revision != capturedRevision || _owner->_nextPendingSequence != capturedSequence) {
+		if (_state->revision != capturedRevision) {
 			return FreshResult::failure(FreshStatus::Busy, "model changed while predicate was running");
 		}
-		uint64_t nextRevision = _state->revision;
+		const uint64_t commitSequence = _owner->_nextPendingSequence;
+        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, candidates.size());
+        if (!sequenceCheck) return sequenceCheck;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            sequenceCheck = FreshCheckPreparedJournalSize(
+                candidates[i].record, commitSequence + i, _owner->_config.maxJournalRecordBytes
+            );
+            if (!sequenceCheck) return sequenceCheck;
+        }
+        uint64_t nextRevision = _state->revision;
 		if (!candidates.empty()) {
 			FreshResult revisionResult = FreshNextRevision(_state->revision, nextRevision, "model revision");
 			if (!revisionResult) return revisionResult;
 		}
 
-		_owner->_nextPendingSequence = capturedSequence + candidates.size();
-		for (FreshUpdateCandidate &candidate : candidates) {
-			auto found = _state->docs.find(candidate.id);
+		_owner->_nextPendingSequence += candidates.size();
+		size_t journalIndex = 0;
+        for (FreshUpdateCandidate &candidate : candidates) {
+            candidate.record.sequence = commitSequence + journalIndex++;
+            auto found = _state->docs.find(candidate.id);
 			if (found == _state->docs.end()) {
 				return FreshResult::failure(FreshStatus::Busy, "model changed while update was committing");
 			}
@@ -861,7 +871,6 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 	}
 
 	uint64_t capturedRevision = 0;
-	uint64_t capturedSequence = 0;
 	std::vector<FreshDocumentSnapshot> snapshot;
 	{
 		FreshLock lock(*_owner->_mutex);
@@ -873,7 +882,6 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 		);
 		if (!valid) return valid;
 		capturedRevision = _state->revision;
-		capturedSequence = _owner->_nextPendingSequence;
 		snapshot.reserve(_state->docs.size());
 		for (const auto &entry : _state->docs) {
 			FreshDocumentSnapshot item;
@@ -891,12 +899,9 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 	std::vector<FreshPendingRecord> records;
 	for (const FreshDocumentSnapshot &entry : snapshot) {
 		if (!predicate(entry.doc)) continue;
-		if (capturedSequence == UINT64_MAX || records.size() > UINT64_MAX - capturedSequence) {
-			return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
-		}
 		FreshPendingRecord record;
 		record.op = FreshJournalOp::Delete;
-		record.sequence = capturedSequence + records.size();
+		record.sequence = 1; // placeholder sequence
 		record.id = entry.id;
 		FreshResult recordResult = FreshBuildJournalRecord(
 		    *_owner,
@@ -921,18 +926,29 @@ FreshResult FreshModel::deleteMany(FreshPredicate predicate) {
 		    "delete is only valid for general models"
 		);
 		if (!valid) return valid;
-		if (_state->revision != capturedRevision || _owner->_nextPendingSequence != capturedSequence) {
+		if (_state->revision != capturedRevision) {
 			return FreshResult::failure(FreshStatus::Busy, "model changed while predicate was running");
 		}
-		uint64_t nextRevision = _state->revision;
+		const uint64_t commitSequence = _owner->_nextPendingSequence;
+        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, records.size());
+        if (!sequenceCheck) return sequenceCheck;
+        for (size_t i = 0; i < records.size(); ++i) {
+            sequenceCheck = FreshCheckPreparedJournalSize(
+                records[i], commitSequence + i, _owner->_config.maxJournalRecordBytes
+            );
+            if (!sequenceCheck) return sequenceCheck;
+        }
+        uint64_t nextRevision = _state->revision;
 		if (!records.empty()) {
 			FreshResult revisionResult = FreshNextRevision(_state->revision, nextRevision, "model revision");
 			if (!revisionResult) return revisionResult;
 		}
 
-		_owner->_nextPendingSequence = capturedSequence + records.size();
-		for (FreshPendingRecord &record : records) {
-			if (_state->docs.erase(record.id) != 1) {
+		_owner->_nextPendingSequence += records.size();
+		size_t journalIndex = 0;
+        for (FreshPendingRecord &record : records) {
+            record.sequence = commitSequence + journalIndex++;
+            if (_state->docs.erase(record.id) != 1) {
 				return FreshResult::failure(FreshStatus::Busy, "model changed while delete was committing");
 			}
 			_state->lastSequence = record.sequence;
