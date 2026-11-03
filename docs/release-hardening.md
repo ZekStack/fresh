@@ -126,3 +126,24 @@ Before tagging v0.2.1, execute runtime qualification for:
 - four-bit/eight-bit eMMC;
 - absent, full, removed, and write-protected media;
 - power loss during journal, snapshot, manifest, backup, and application-file operations.
+
+## Commit-time journal sequence assignment
+
+General-document mutations and stream appends prepare their payloads before
+acquiring the database mutex to commit. They validate the target model revision,
+not the global pending-journal sequence, to avoid a false `Busy` when an
+unrelated model changes. During the commit, Fresh reserves a unique sequence
+(or contiguous sequence range for a batch) under the database mutex.
+
+Each journal record is preflighted using a minimal valid placeholder sequence.
+At commit, the exact MessagePack sequence-width difference is checked without
+serialization or storage I/O under the mutex, and the transaction is rejected
+before altering RAM if a record would exceed the configured journal limit.
+
+Background synchronization remains unchanged. A successful mutation means the
+new state and pending journal were accepted in RAM; it does not mean a storage
+write or checkpoint has completed. Callers do not need to flush per mutation.
+
+Model-local revision mismatches remain `FreshStatus::Busy`. Cross-model changes
+are not a mutation conflict. The existing journal and snapshot formats stay
+unchanged.

@@ -140,7 +140,6 @@ FreshResult FreshModel::replaceById(const std::string &id, const JsonDocument &r
 
 	const uint64_t updateTime = _owner->now();
 	uint64_t capturedRevision = 0;
-	uint64_t capturedSequence = 0;
 	FreshResultValidator validator;
 	JsonDocument existing;
 	{
@@ -158,9 +157,6 @@ FreshResult FreshModel::replaceById(const std::string &id, const JsonDocument &r
 		if (found == _state->docs.end()) {
 			return FreshResult::failure(FreshStatus::DocumentNotFound, "document not found");
 		}
-		if (_owner->_nextPendingSequence == UINT64_MAX) {
-			return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
-		}
 		FreshResult cloneResult = FreshCloneJson(
 		    existing,
 		    found->second.as<JsonVariantConst>(),
@@ -168,7 +164,6 @@ FreshResult FreshModel::replaceById(const std::string &id, const JsonDocument &r
 		);
 		if (!cloneResult) return cloneResult;
 		capturedRevision = _state->revision;
-		capturedSequence = _owner->_nextPendingSequence;
 		validator = _state->validator;
 	}
 
@@ -205,15 +200,16 @@ FreshResult FreshModel::replaceById(const std::string &id, const JsonDocument &r
 
 	FreshPendingRecord record;
 	record.op = FreshJournalOp::Update;
-	record.sequence = capturedSequence;
+	record.sequence = 1; // placeholder sequence
 	record.id = id;
 	result = FreshCloneJson(record.doc, candidate.as<JsonVariantConst>(), "journal document");
 	if (!result) return result;
 	JsonDocument recordDoc(&FreshJsonAllocator());
 	result = _owner->recordToJson(record, recordDoc);
 	if (!result) return result;
+	record.preparedJournalBytes = measureMsgPack(recordDoc);
 	result = _owner->checkPayloadSize(
-	    measureMsgPack(recordDoc),
+	    record.preparedJournalBytes,
 	    _owner->_config.maxJournalRecordBytes,
 	    "journal record"
 	);
@@ -235,19 +231,25 @@ FreshResult FreshModel::replaceById(const std::string &id, const JsonDocument &r
 		    "replaceById is only valid for general models"
 		);
 		if (!valid) return valid;
-		if (_state->revision != capturedRevision ||
-		    _owner->_nextPendingSequence != capturedSequence) {
+		if (_state->revision != capturedRevision) {
 			return FreshResult::failure(FreshStatus::Busy, "model changed while validator was running");
 		}
 		auto found = _state->docs.find(id);
 		if (found == _state->docs.end()) {
 			return FreshResult::failure(FreshStatus::Busy, "model changed while replacement was committing");
 		}
+		const uint64_t commitSequence = _owner->_nextPendingSequence;
+		FreshResult sequenceCheck = FreshCheckJournalSequenceRange(commitSequence, 1);
+		if (!sequenceCheck) return sequenceCheck;
+		sequenceCheck = FreshCheckPreparedJournalSize(
+			record, commitSequence, _owner->_config.maxJournalRecordBytes
+		);
+		if (!sequenceCheck) return sequenceCheck;
 		uint64_t nextRevision = 0;
 		result = FreshNextRevision(_state->revision, nextRevision, "model revision");
 		if (!result) return result;
 
-		_owner->_nextPendingSequence++;
+		record.sequence = _owner->_nextPendingSequence++;
 		_state->lastSequence = record.sequence;
 		found->second = std::move(candidate);
 		_state->pending.push_back(std::move(record));

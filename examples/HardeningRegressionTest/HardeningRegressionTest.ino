@@ -192,6 +192,165 @@ bool testInvalidPatchIsAtomic() {
 	return ok;
 }
 
+bool testMessagePackJournalSequenceWidth() {
+    struct Case {
+        uint64_t sequence;
+        size_t bytes;
+    };
+    const Case cases[] = {
+        {1, 1}, {127, 1}, {128, 2}, {255, 2},
+        {256, 3}, {65535, 3}, {65536, 5},
+        {4294967295ULL, 5}, {4294967296ULL, 9},
+        {UINT64_MAX - 1, 9}
+    };
+    JsonDocument probe;
+    probe["sequence"] = static_cast<uint64_t>(1);
+    const size_t baseBytes = measureMsgPack(probe);
+    for (const Case &item : cases) {
+        probe["sequence"] = item.sequence;
+        const size_t actualBytes = measureMsgPack(probe);
+        if (!expect(actualBytes == baseBytes + item.bytes - 1,
+                    "MessagePack sequence width differs from commit-size preflight")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool testBackgroundSyncPersistsWithoutCallerFlush() {
+    const std::string path = testPath("background_sync");
+    Fresh db;
+    FreshConfig config;
+    config.syncIntervalMS = 100;
+    config.snapshotRecordThreshold = 1;
+    if (!expectResult(initTestDatabase(db, path.c_str(), config),
+                      "initialize background-sync database")) return false;
+
+    FreshModelResult items = db.createModel("Items");
+    if (!expect(static_cast<bool>(items), "create background-sync model")) return false;
+    auto awaitSuccess = [&](uint64_t initialSuccesses) {
+        const uint32_t start = millis();
+        while (static_cast<uint32_t>(millis() - start) < 8000) {
+            if (db.diagnostics().syncSuccesses > initialSuccesses) return true;
+            delay(10);
+        }
+        return false;
+    };
+    if (!expect(awaitSuccess(0), "background model manifest was not persisted")) {
+        (void)db.deinit(FreshDeinitOptions{.sync = false});
+        return false;
+    }
+    const uint64_t baseline = db.diagnostics().syncSuccesses;
+    JsonDocument entry;
+    entry["_id"] = "background-1";
+    entry["value"] = 42;
+    const FreshResult created = items.model.create(entry);
+    bool ok = expectResult(created, "RAM-first background-sync create") &&
+              expect(awaitSuccess(baseline), "background journal was not persisted");
+    (void)db.deinit(FreshDeinitOptions{.sync = false});
+    if (!ok) return false;
+    if (!expectResult(initTestDatabase(db, path.c_str(), config),
+                      "reopen asynchronously persisted database")) return false;
+    FreshResult restored = db.model("Items").findById("background-1");
+    ok = expectResult(restored, "recover background-synced document") &&
+         expect((restored.doc["value"] | 0) == 42, "background-sync value mismatch");
+    (void)db.deinit(FreshDeinitOptions{.sync = false});
+    return ok;
+}
+
+bool testCrossModelMutationsIgnoreUnrelatedJournalProgress() {
+    const std::string path = testPath("cross_model");
+    Fresh db;
+    FreshModelResult items = prepareModel(db, path.c_str());
+    if (!items) return false;
+    FreshModelResult audit = db.createModel("Audit", FreshModelType::Stream);
+    if (!expect(static_cast<bool>(audit), "create independent audit stream")) return false;
+
+    int auditCount = 0;
+    bool auditAccepted = true;
+    const auto appendAudit = [&]() {
+        JsonDocument entry;
+        entry["index"] = ++auditCount;
+        FreshResult appended = audit.model.append(entry);
+        auditAccepted = auditAccepted && static_cast<bool>(appended);
+        return static_cast<bool>(appended);
+    };
+
+    FreshResult setValidator = items.model.setValidator(FreshResultValidator(
+        [&](const JsonDocument &) -> FreshValidationResult {
+            return {.result = appendAudit(), .message = "audit append failed"};
+        }
+    ));
+    if (!expectResult(setValidator, "install cross-model validator")) return false;
+
+    JsonDocument createdDoc;
+    createdDoc["_id"] = "extra";
+    createdDoc["value"] = 3;
+    FreshResult created = items.model.create(createdDoc);
+
+    JsonDocument patch;
+    patch["value"] = 10;
+    FreshResult directUpdate = items.model.updateById(
+        "item-1", patch, FreshReturn::ChangedDocs
+    );
+
+    JsonDocument replacement;
+    replacement["value"] = 11;
+    FreshResult replaced = items.model.replaceById("item-1", replacement);
+
+    JsonDocument bulkPatch;
+    bulkPatch["tag"] = "updated";
+    FreshResult bulkUpdated = items.model.update(
+        [&](const JsonDocument &) {
+            appendAudit();
+            return true;
+        },
+        bulkPatch, FreshReturn::ChangedDocs
+    );
+
+    FreshResult removed = items.model.deleteMany([&](const JsonDocument &doc) {
+        appendAudit();
+        const char *id = doc["_id"] | "";
+        return std::string(id) == "extra";
+    });
+
+    FreshResult survivor = items.model.findById("item-1");
+    FreshResult removedDoc = items.model.findById("extra");
+    FreshResult auditRecords = audit.model.listRecords();
+    bool ok =
+        expectResult(created, "create while unrelated stream advances") &&
+        expectResult(directUpdate, "direct ID update while stream advances") &&
+        expectResult(replaced, "replace while stream advances") &&
+        expectResult(bulkUpdated, "batch update while stream advances") &&
+        expectResult(removed, "predicate delete while stream advances") &&
+        expect(auditAccepted, "audit append failed") &&
+        expect(bulkUpdated.affectedCount == 2, "batch updated wrong number of docs") &&
+        expect(removed.affectedCount == 1, "predicate deleted wrong number of docs") &&
+        expectResult(survivor, "surviving document") &&
+        expect((survivor.doc["value"] | 0) == 11, "surviving value changed") &&
+        expect(!removedDoc && removedDoc.status == FreshStatus::DocumentNotFound, "deleted record returned") &&
+        expectResult(auditRecords, "stream records") &&
+        expect(auditRecords.affectedCount == static_cast<size_t>(auditCount), "audit records lost");
+    if (!ok) {
+        (void)db.deinit(FreshDeinitOptions{.sync = false});
+        return false;
+    }
+    // Explicit durability boundary is test-only; normal mutations stay RAM-first
+    // and Fresh's background sync remains responsible for persistence.
+    ok = expectResult(db.forceSync(), "persist interleaved journal changes") && ok;
+    (void)db.deinit(FreshDeinitOptions{.sync = false});
+    if (!expectResult(initTestDatabase(db, path.c_str()), "reopen interleaved journal")) return false;
+    FreshResult restoredDoc = db.model("Items").findById("item-1");
+    FreshResult restoredAudit = db.model("Audit").listRecords();
+    ok = expectResult(restoredDoc, "recovered general document") &&
+        expect((restoredDoc.doc["value"] | 0) == 11, "replayed general value mismatch") &&
+        expectResult(restoredAudit, "recovered independent stream") &&
+        expect(restoredAudit.affectedCount == static_cast<size_t>(auditCount),
+               "replayed audit count mismatch") && ok;
+    (void)db.deinit(FreshDeinitOptions{.sync = false});
+    return ok;
+}
+
 bool testPredicateReentrancyReturnsBusy() {
 	const std::string path = testPath("predicate");
 	Fresh db;
@@ -644,6 +803,9 @@ void setup() {
 
 	runTest("direct ID operations retain journal semantics", testDirectIdMutationWithOtherDocuments);
 	runTest("invalid patch is atomic", testInvalidPatchIsAtomic);
+	runTest("journal sequence MessagePack widths", testMessagePackJournalSequenceWidth);
+	runTest("background sync persists without caller flush", testBackgroundSyncPersistsWithoutCallerFlush);
+	runTest("cross-model mutations preserve journal", testCrossModelMutationsIgnoreUnrelatedJournalProgress);
 	runTest("predicate reentrancy returns busy", testPredicateReentrancyReturnsBusy);
 	runTest("failed final sync is retryable", testFailedFinalSyncIsRetryable);
 	runTest("snapshot preflight is reported and retryable", testSnapshotPreflightIsReportedAndRetryable);
