@@ -81,7 +81,8 @@ formats the media for these tests.
 
 The 16 `FRESH_TESTING` regressions cover:
 
-- Prepared create/update/replace/append and batch journal durability after restart\n- Direct-ID update/delete and reopen durability
+- Prepared create/update/replace/append and batch journal durability after restart
+- Direct-ID update/delete and reopen durability
 - Exact MessagePack sequence encoding widths at integer boundaries
 - Successful background synchronization without application flush or forceSync
 - Invalid-patch atomicity, cross-model isolation and predicate revision conflicts
