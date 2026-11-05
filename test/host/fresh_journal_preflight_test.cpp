@@ -134,7 +134,8 @@ void testMutations(const std::string &path) {
 void testOversizeAtomicity(const std::string &path) {
     Fresh db;
     FreshConfig cfg = testConfig();
-    cfg.maxJournalRecordBytes = 256;
+    cfg.maxDocumentBytes = 256;
+    cfg.maxJournalRecordBytes = 257;
     ok(db.init("/limits", cfg, std::make_unique<HostStorage>(path)), "init limited");
     auto items = db.createModel("Items");
     ok(items, "create limited model");
@@ -145,12 +146,12 @@ void testOversizeAtomicity(const std::string &path) {
 
     JsonDocument huge;
     huge["_id"] = "too-large";
-    huge["payload"] = std::string(1024, 'x');
+    huge["payload"] = std::string(180, 'x');
     auto reject = items.model.create(huge);
     check(!reject && reject.status == FreshStatus::SizeLimitExceeded,
           "oversize create succeeded");
     JsonDocument hugePatch;
-    hugePatch["payload"] = std::string(1024, 'x');
+    hugePatch["payload"] = std::string(180, 'x');
     reject = items.model.updateById("safe", hugePatch);
     check(!reject && reject.status == FreshStatus::SizeLimitExceeded,
           "oversize update succeeded");
