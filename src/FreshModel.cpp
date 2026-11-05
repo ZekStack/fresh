@@ -16,25 +16,26 @@ struct FreshDocumentSnapshot {
 	JsonDocument doc;
 };
 
-FreshResult FreshBuildJournalRecord(
+} // namespace
+
+FreshResult FreshModel::FreshBuildJournalRecord(
     Fresh &owner,
     FreshPendingRecord &record,
     size_t maxJournalRecordBytes
-) {
-	JsonDocument recordDoc(&FreshJsonAllocator());
-	FreshResult result = owner.recordToJson(record, recordDoc);
-	if (!result) {
-		return result;
-	}
-	record.preparedJournalBytes = measureMsgPack(recordDoc);
-	return owner.checkPayloadSize(
-	    record.preparedJournalBytes,
-	    maxJournalRecordBytes,
-	    "journal record"
-	);
-}
+) const {
+    // Preparation is performed once, before the RAM commit boundary.
+    record.preparedJournalBytes = 0;
+    JsonDocument recordDoc(&FreshJsonAllocator());
+    FreshResult result = owner.recordToJson(record, recordDoc);
+    if (!result) return result;
 
-} // namespace
+    const size_t bytes = measureMsgPack(recordDoc);
+    result = owner.checkPayloadSize(bytes, maxJournalRecordBytes, "journal record");
+    if (!result) return result;
+
+    record.preparedJournalBytes = bytes;
+    return FreshResult::success();
+}
 
 FreshModel::FreshModel(Fresh *owner, std::shared_ptr<State> state) : _owner(owner), _state(state) {
 }
@@ -819,9 +820,8 @@ FreshResult FreshModel::deleteById(const std::string &id) {
         if (found == _state->docs.end()) {
             return FreshResult::success("no documents deleted", 0);
         }
-        if (_owner->_nextPendingSequence == UINT64_MAX) {
-            return FreshResult::failure(FreshStatus::InternalError, "pending sequence overflow");
-        }
+        FreshResult sequenceCheck = FreshCheckJournalSequenceRange(_owner->_nextPendingSequence, 1);
+        if (!sequenceCheck) return sequenceCheck;
         uint64_t nextRevision = 0;
         FreshResult revisionResult = FreshNextRevision(_state->revision, nextRevision, "model revision");
         if (!revisionResult) return revisionResult;
@@ -832,6 +832,10 @@ FreshResult FreshModel::deleteById(const std::string &id) {
         record.id = id;
         FreshResult journal = FreshBuildJournalRecord(
             *_owner, record, _owner->_config.maxJournalRecordBytes
+        );
+        if (!journal) return journal;
+        journal = FreshCheckPreparedJournalSize(
+            record, record.sequence, _owner->_config.maxJournalRecordBytes
         );
         if (!journal) return journal;
 

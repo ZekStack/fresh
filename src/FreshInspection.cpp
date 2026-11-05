@@ -204,15 +204,7 @@ FreshResult FreshModel::replaceById(const std::string &id, const JsonDocument &r
 	record.id = id;
 	result = FreshCloneJson(record.doc, candidate.as<JsonVariantConst>(), "journal document");
 	if (!result) return result;
-	JsonDocument recordDoc(&FreshJsonAllocator());
-	result = _owner->recordToJson(record, recordDoc);
-	if (!result) return result;
-	record.preparedJournalBytes = measureMsgPack(recordDoc);
-	result = _owner->checkPayloadSize(
-	    record.preparedJournalBytes,
-	    _owner->_config.maxJournalRecordBytes,
-	    "journal record"
-	);
+	result = FreshBuildJournalRecord(*_owner, record, _owner->_config.maxJournalRecordBytes);
 	if (!result) return result;
 
 	JsonDocument resultDoc;
