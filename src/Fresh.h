@@ -754,20 +754,5 @@ inline FreshResult FreshModel::FreshCloneJson(
 	return ::FreshCloneJson(target, source, label, placement);
 }
 
-inline FreshResult FreshModel::FreshBuildJournalRecord(
-    Fresh &owner,
-    FreshPendingRecord &record,
-    size_t maxJournalRecordBytes
-) const {
-	JsonDocument recordDoc(&FreshJsonAllocator());
-	FreshResult result = owner.recordToJson(record, recordDoc);
-	if (!result) return result;
-	return owner.checkPayloadSize(
-	    measureMsgPack(recordDoc),
-	    maxJournalRecordBytes,
-	    "journal record"
-	);
-}
-
 #include "storage/FreshLittleFSStorage.h"
 #include "storage/FreshSDStorage.h"

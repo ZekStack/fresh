@@ -217,6 +217,72 @@ bool testMessagePackJournalSequenceWidth() {
     return true;
 }
 
+bool testPreparedJournalMutationsSurviveRestart() {
+    const std::string path = testPath("prepared_journal");
+    Fresh db;
+    FreshConfig config;
+    config.syncIntervalMS = 60000;
+    config.snapshotRecordThreshold = 1000;
+    if (!expectResult(initTestDatabase(db, path.c_str(), config),
+                      "initialize prepared-journal database")) return false;
+    FreshModelResult items = db.createModel("Items");
+    FreshModelResult audit = db.createModel("Audit", FreshModelType::Stream);
+    if (!expect(static_cast<bool>(items) && static_cast<bool>(audit),
+                "create prepared-journal models")) return false;
+
+    JsonDocument first;
+    first["_id"] = "first";
+    first["value"] = 1;
+    JsonDocument second;
+    second["_id"] = "second";
+    second["value"] = 2;
+    JsonDocument patch;
+    patch["value"] = 3;
+    JsonDocument replacement;
+    replacement["value"] = 4;
+    JsonDocument entry;
+    entry["kind"] = "mutation";
+
+    bool ok = expectResult(items.model.create(first), "create first record") &&
+              expectResult(items.model.create(second), "create second record") &&
+              expectResult(items.model.updateById("first", patch), "update first record") &&
+              expectResult(items.model.replaceById("second", replacement), "replace second record") &&
+              expectResult(audit.model.append(entry), "append stream record");
+    if (ok) {
+        JsonDocument batchPatch;
+        batchPatch["tag"] = "checked";
+        FreshResult batch = items.model.update(
+            [](const JsonDocument &) { return true; }, batchPatch
+        );
+        ok = expectResult(batch, "update journal batch") &&
+             expect(batch.affectedCount == 2, "batch journal count") && ok;
+        FreshResult deleted = items.model.deleteMany([](const JsonDocument &doc) {
+            return std::string(doc["_id"] | "") == "second";
+        });
+        ok = expectResult(deleted, "delete journal batch") &&
+             expect(deleted.affectedCount == 1, "delete journal batch count") && ok;
+    }
+    if (ok) ok = expectResult(db.forceSync(), "persist prepared journal");
+    (void)db.deinit(FreshDeinitOptions{.sync = false});
+    if (!ok) return false;
+
+    Fresh reloaded;
+    if (!expectResult(initTestDatabase(reloaded, path.c_str(), config),
+                      "reopen prepared journal")) return false;
+    FreshResult restored = reloaded.model("Items").findById("first");
+    FreshResult missing = reloaded.model("Items").findById("second");
+    FreshResult stream = reloaded.model("Audit").listRecords();
+    ok = expectResult(restored, "recovered created/updated document") &&
+         expect((restored.doc["value"] | 0) == 3, "recovered value") &&
+         expect(std::string(restored.doc["tag"] | "") == "checked", "recovered tag") &&
+         expect(!missing && missing.status == FreshStatus::DocumentNotFound,
+                "deleted document reappeared") &&
+         expectResult(stream, "recovered audit stream") &&
+         expect(stream.affectedCount == 1, "recovered stream count");
+    (void)reloaded.deinit(FreshDeinitOptions{.sync = false});
+    return ok;
+}
+
 bool testBackgroundSyncPersistsWithoutCallerFlush() {
     const std::string path = testPath("background_sync");
     Fresh db;
@@ -804,6 +870,7 @@ void setup() {
 	runTest("direct ID operations retain journal semantics", testDirectIdMutationWithOtherDocuments);
 	runTest("invalid patch is atomic", testInvalidPatchIsAtomic);
 	runTest("journal sequence MessagePack widths", testMessagePackJournalSequenceWidth);
+	runTest("prepared journal mutations survive restart", testPreparedJournalMutationsSurviveRestart);
 	runTest("background sync persists without caller flush", testBackgroundSyncPersistsWithoutCallerFlush);
 	runTest("cross-model mutations preserve journal", testCrossModelMutationsIgnoreUnrelatedJournalProgress);
 	runTest("predicate reentrancy returns busy", testPredicateReentrancyReturnsBusy);
