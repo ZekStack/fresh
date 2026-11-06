@@ -1,6 +1,6 @@
 # Fresh
 
-> Current release target: **v0.3.1**; Strata dependency pinned to **v0.1.4**.
+> Current release target: **v0.3.2**; Strata dependency pinned to **v0.1.4**.
 
 Fresh is a RAM-first document database for ESP32 with owned, pluggable storage.
 
@@ -250,6 +250,7 @@ Regression sketches are compiled in CI but require manual execution on hardware.
 - [Troubleshooting](docs/troubleshooting.md)
 - [Release hardening](docs/release-hardening.md)
 - [v0.3.1 release notes](docs/release-notes-0.3.1.md)
+- [v0.3.2 release notes](docs/release-notes-0.3.2.md)
 
 ## Compatibility
 
@@ -261,13 +262,13 @@ Regression sketches are compiled in CI but require manual execution on hardware.
 | Persistence encoding | ArduinoJson MessagePack |
 | PSRAM | Used for eligible internal allocations when available |
 | Exceptions | Not used by the Fresh API |
-| Status | `0.3.1` |
+| Status | `0.3.2` |
 
 ## Limitations
 
 Fresh is not intended for large datasets, high-frequency telemetry, SQL-style queries, multi-device concurrency, or data that must be durable after every public mutation.
 
-Automatic SD hot-swap recovery, automatic remount, and multiple simultaneously managed volumes are not part of v0.3.1.
+Automatic SD hot-swap recovery, automatic remount, and multiple simultaneously managed volumes are not part of v0.3.2.
 
 ## License
 
