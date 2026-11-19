@@ -12,6 +12,15 @@ assert "FreshStorageType::SPIFlash" in source
 assert "SPIFlash" in storage_header
 assert "FreshSPIBusOwnership::Managed" in header
 assert "busOwnership != FreshSPIBusOwnership::Managed" in source
+assert "FreshSPIFlashReadMode::FastRead" in header
+assert "FreshSPIFlashReadMode::QuadIO" in header
+assert "quadWpPin" in header and "quadHdPin" in header
+assert "useQuadIO(_config)" in source
+assert "SPI_FLASH_QIO : SPI_FLASH_FASTRD" in source
+assert "busConfig.quadwp_io_num = useQuadIO(_config)" in source
+assert "busConfig.quadhd_io_num = useQuadIO(_config)" in source
+assert "managed QIO flash requires valid WP and HD data pins" in source
+assert "managed SPI flash signal pins must be distinct" in source
 assert "formatIfBlank" in header
 assert "formatOnMountFailure" in header
 
