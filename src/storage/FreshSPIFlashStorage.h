@@ -2,6 +2,7 @@
 
 #include "../FreshStorage.h"
 
+#include <cstdint>
 #include <string>
 
 #if defined(ESP32)
@@ -9,6 +10,12 @@
 #include <esp_partition.h>
 #include <wear_levelling.h>
 #endif
+
+// The ESP-IDF flash driver owns QE negotiation and command/address encoding.
+enum class FreshSPIFlashReadMode : uint8_t {
+    FastRead,
+    QuadIO,
+};
 
 struct FreshSPIFlashConfig {
 	const char *mountPath = "/fresh-flash";
@@ -24,15 +31,20 @@ struct FreshSPIFlashConfig {
 	gpio_num_t clockPin = GPIO_NUM_NC;
 	gpio_num_t mosiPin = GPIO_NUM_NC;
 	gpio_num_t misoPin = GPIO_NUM_NC;
+    gpio_num_t quadWpPin = GPIO_NUM_NC;
+    gpio_num_t quadHdPin = GPIO_NUM_NC;
 #else
 	int host = 0;
 	int chipSelectPin = -1;
 	int clockPin = -1;
 	int mosiPin = -1;
 	int misoPin = -1;
+    int quadWpPin = -1;
+    int quadHdPin = -1;
 #endif
 
 	uint32_t frequencyHz = 20'000'000;
+    FreshSPIFlashReadMode readMode = FreshSPIFlashReadMode::FastRead;
 	FreshSPIBusOwnership busOwnership = FreshSPIBusOwnership::Managed;
 	size_t partitionOffset = 0;
 	// Zero uses the remainder of the detected flash chip after partitionOffset.

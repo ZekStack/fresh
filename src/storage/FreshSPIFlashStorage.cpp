@@ -20,6 +20,10 @@ constexpr uint32_t FreshHzPerMHz = 1'000'000;
 constexpr size_t FreshPartitionLabelCapacity = 16;
 constexpr size_t FreshBlankProbeBytes = 4096;
 
+bool useQuadIO(const FreshSPIFlashConfig &config) {
+    return config.readMode == FreshSPIFlashReadMode::QuadIO;
+}
+
 #if defined(ESP32)
 bool isValidInputPin(gpio_num_t pin) {
 	const int value = static_cast<int>(pin);
@@ -80,6 +84,10 @@ FreshResult FreshSPIFlashStorage::validateConfig() const {
 	    "SPI flash storage requires ESP32"
 	);
 #else
+    if (_config.readMode != FreshSPIFlashReadMode::FastRead &&
+        _config.readMode != FreshSPIFlashReadMode::QuadIO) {
+        return FreshResult::failure(FreshStatus::InvalidArgument, "unsupported SPI flash I/O mode");
+    }
 	if (!isValidOutputPin(_config.chipSelectPin)) {
 		return FreshResult::failure(
 		    FreshStatus::InvalidArgument,
@@ -95,17 +103,33 @@ FreshResult FreshSPIFlashStorage::validateConfig() const {
 			    "managed SPI flash requires valid clock, MOSI, and MISO pins"
 			);
 		}
-		const int cs = static_cast<int>(_config.chipSelectPin);
-		const int clock = static_cast<int>(_config.clockPin);
-		const int mosi = static_cast<int>(_config.mosiPin);
-		const int miso = static_cast<int>(_config.misoPin);
-		if (cs == clock || cs == mosi || cs == miso ||
-		    clock == mosi || clock == miso || mosi == miso) {
-			return FreshResult::failure(
-			    FreshStatus::InvalidArgument,
-			    "managed SPI flash signal pins must be distinct"
-			);
-		}
+        if (useQuadIO(_config) &&
+            (!isValidOutputPin(_config.quadWpPin) ||
+             !isValidOutputPin(_config.quadHdPin))) {
+            return FreshResult::failure(
+                FreshStatus::InvalidArgument,
+                "managed QIO flash requires valid WP and HD data pins"
+            );
+        }
+        const std::array<int, 6> pins{
+            static_cast<int>(_config.chipSelectPin),
+            static_cast<int>(_config.clockPin),
+            static_cast<int>(_config.mosiPin),
+            static_cast<int>(_config.misoPin),
+            useQuadIO(_config) ? static_cast<int>(_config.quadWpPin) : -1,
+            useQuadIO(_config) ? static_cast<int>(_config.quadHdPin) : -1,
+        };
+        for (size_t i = 0; i < pins.size(); ++i) {
+            if (pins[i] < 0) continue;
+            for (size_t j = i + 1; j < pins.size(); ++j) {
+                if (pins[i] == pins[j]) {
+                    return FreshResult::failure(
+                        FreshStatus::InvalidArgument,
+                        "managed SPI flash signal pins must be distinct"
+                    );
+                }
+            }
+        }
 	}
 	if (_config.partitionOffset % SPI_FLASH_SEC_SIZE != 0) {
 		return FreshResult::failure(
@@ -135,8 +159,8 @@ FreshResult FreshSPIFlashStorage::initializeManagedSPIBus() {
 	busConfig.mosi_io_num = _config.mosiPin;
 	busConfig.miso_io_num = _config.misoPin;
 	busConfig.sclk_io_num = _config.clockPin;
-	busConfig.quadwp_io_num = -1;
-	busConfig.quadhd_io_num = -1;
+	busConfig.quadwp_io_num = useQuadIO(_config) ? _config.quadWpPin : -1;
+    busConfig.quadhd_io_num = useQuadIO(_config) ? _config.quadHdPin : -1;
 	busConfig.max_transfer_sz = 0;
 
 	const esp_err_t initialized =
@@ -160,7 +184,7 @@ FreshResult FreshSPIFlashStorage::attachFlash() {
 	esp_flash_spi_device_config_t deviceConfig = {};
 	deviceConfig.host_id = _config.host;
 	deviceConfig.cs_io_num = _config.chipSelectPin;
-	deviceConfig.io_mode = SPI_FLASH_FASTRD;
+	deviceConfig.io_mode = useQuadIO(_config) ? SPI_FLASH_QIO : SPI_FLASH_FASTRD;
 	deviceConfig.input_delay_ns = 0;
 	deviceConfig.cs_id = 0;
 	deviceConfig.freq_mhz = static_cast<int>(_config.frequencyHz / FreshHzPerMHz);
