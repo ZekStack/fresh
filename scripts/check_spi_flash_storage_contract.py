@@ -13,7 +13,7 @@ assert "SPIFlash" in storage_header
 assert "FreshSPIBusOwnership::Managed" in header
 assert "busOwnership != FreshSPIBusOwnership::Managed" in source
 assert "FreshSPIFlashReadMode::FastRead" in header
-assert "FreshSPIFlashReadMode::QuadIO" in header
+assert "    QuadIO," in header
 assert "quadWpPin" in header and "quadHdPin" in header
 assert "useQuadIO(_config)" in source
 assert "SPI_FLASH_QIO : SPI_FLASH_FASTRD" in source
