@@ -1,6 +1,6 @@
 {
   "name": "Fresh",
-  "version": "0.3.2",
+  "version": "0.3.3-rc.1",
   "description": "Document database for ESP32 devices with RAM-first writes and pluggable storage.",
   "keywords": [
     "esp32",
