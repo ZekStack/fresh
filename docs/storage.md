@@ -270,7 +270,19 @@ db.init(
 
 `Managed` initializes and releases the SPI bus. `External` attaches the flash device to a bus initialized by the application and never frees the bus. The flash device handle, dynamic partition, wear-levelling handle, and FATFS mount are owned by the Fresh backend in both modes.
 
-The initial backend uses single-I/O fast reads, so it only requires clock, MOSI, MISO, and a dedicated chip-select. `partitionOffset` and `partitionSize` select a sector-aligned region of the chip; a zero partition size uses the remainder of the detected device.
+The backend defaults to single-I/O fast reads and therefore only requires clock, MOSI, MISO, and a dedicated chip-select. Select native quad-I/O reads for a compatible flash chip:
+
+```cpp
+storageConfig.readMode = FreshSPIFlashReadMode::QuadIO;
+storageConfig.quadWpPin = GPIO_NUM_14;
+storageConfig.quadHdPin = GPIO_NUM_15;
+```
+
+In `Managed` mode, Fresh configures the additional WP/HD signals itself and rejects invalid or duplicate GPIO assignments. In `External` bus mode, the application must initialize the SPI bus with `quadwp_io_num` and `quadhd_io_num` before mounting; Fresh still selects QIO for its attached flash device.
+
+ESP-IDF's external-flash driver negotiates flash capabilities, including Quad Enable where supported. Verify the particular vendor driver, JEDEC identity and real access above 16 MiB for devices larger than 128 Mbit. Fresh does not force QPI command mode or change the primary boot flash.
+
+`partitionOffset` and `partitionSize` select a sector-aligned region of the chip; a zero partition size uses the remainder of the detected device.
 
 `formatIfBlank` is a provisioning option. Before wear levelling is mounted, Fresh scans the complete configured raw partition and permits mount-time formatting only when every byte is erased (`0xFF`). `formatOnMountFailure` is broader and potentially destructive, so it remains disabled by default. Explicit `Fresh::format()` uses the ESP-IDF wear-levelled SPI-flash formatter.
 
